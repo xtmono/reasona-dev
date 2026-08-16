@@ -110,17 +110,32 @@ def compile_to_bernstein_plan(
 
     stages = []
     for u in units:
+        stage_name = _stage_name(u.index)
+        # Convention: the review-pipeline run for this stage writes its
+        # merged, canonical ReviewResult here before the janitor evaluates
+        # this signal. See reasona_dev/gate_check.py -- confirmed against
+        # installed Bernstein source that `test_passes` (a completion
+        # signal, NOT a pluggy hook) is the only mechanism that gates
+        # whether a task's result proceeds toward PR/merge
+        # (docs/ARCHITECTURE.md §3).
+        review_result_path = f".reasona/review-{stage_name}.json"
         step: dict = {
             "title": f"PR {u.index}: {u.title}",
             "description": u.section,
             "role": dev_role,
+            "completion_signals": [
+                {
+                    "type": "test_passes",
+                    "command": f"python3 -m reasona_dev.gate_check {review_result_path}",
+                }
+            ],
         }
         if u.files:
             step["files"] = u.files
         if dev_model:
             step["model"] = dev_model
         stage: dict = {
-            "name": _stage_name(u.index),
+            "name": stage_name,
             "steps": [step],
         }
         if u.depends_on:

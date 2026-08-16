@@ -32,7 +32,10 @@ def test_compiles_to_valid_stage_shape():
     assert plan["stages"][1]["depends_on"] == ["pr-1"]
     for stage in plan["stages"]:
         assert len(stage["steps"]) == 1
-        assert "title" in stage["steps"][0]
+        step = stage["steps"][0]
+        assert "title" in step
+        assert step["completion_signals"][0]["type"] == "test_passes"
+        assert "gate_check" in step["completion_signals"][0]["command"]
 
 
 def test_no_pr_markers_falls_back_to_single_unit():

@@ -20,18 +20,34 @@ max_agents: 4
 # built-in chain applies even when this section is absent -- so it is
 # declared explicitly empty here rather than omitted.
 #
-# STATUS: NOT YET EMPIRICALLY CONFIRMED that an empty chain fully disables
-# fallback (docs/ARCHITECTURE.md §3). Verify with a forced 429/503 before
-# any production run.
+# CONFIRMED against installed source (core/routing/model_fallback.py):
+#   should_fallback = (not is_fallback) and (consecutive_529_errors >= strike_limit)
+# consecutive_529_errors starts at 0, so `strike_limit: 0` fires BEFORE any
+# real error -- that was a bug in an earlier draft of this file. What
+# actually disables fallback is the EMPTY fallback_chain: `activate_fallback`
+# only sets a fallback_model `if state.fallback_chain and ...`, so an empty
+# chain is a structural no-op regardless of strike_limit. strike_limit is
+# therefore left at its default here (irrelevant with no chain to switch
+# into) rather than set to a value that looks like "off" but means the
+# opposite.
 model_fallback:
   fallback_chain: []
-  strike_limit: 0
 
-# cascade_router.py (confidence-based auto-escalation on low-confidence /
-# janitor failure) is a SEPARATE mechanism from model_fallback above. No
-# confirmed off-switch was found in the installed source
-# (core/routing/cascade_router.py). Treat as an open blocker for production
-# use until confirmed -- see docs/ARCHITECTURE.md §3.
+# cascade_router.py (core/routing/cascade_router.py -- confidence-based
+# post-execution escalation) is CONFIRMED DEAD CODE: grepped the entire
+# installed package for `cascade_router.` / `CascadeRouter` usage outside
+# its own file -- zero call sites. The live initial-model-selection path is
+# `core/routing/bandit_router.py` (BanditRouter, wired from
+# core/orchestration/orchestrator.py / core/tasks/task_lifecycle.py). It
+# picks the STARTING model per task (cold-start static heuristic, then a
+# LinUCB bandit once warmed up on reward history) -- this is not the same
+# risk as CREDIT-BURN (silently swapping mid-task on exhaustion); it is
+# closer to dev-ralf's own per-role model configuration, just adaptive.
+# High-stakes roles are hard-floored to never start at haiku
+# (`_is_high_stakes` / `_capability_floor` in bandit_router.py). No action
+# needed here unless BanditRouter's adaptive picks are found to conflict
+# with an explicit `model:` override -- an explicit step-level `model:`
+# should win (manager-specified override branch in `_static_select`).
 
 approval: review   # gate before merge; never `auto`
 
