@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from reasona_dev.plan_compile import compile_to_bernstein_plan, parse_plan_units
 
 PLAN = """\
@@ -25,7 +27,7 @@ def test_parses_two_units_with_dependency():
 
 def test_compiles_to_valid_stage_shape():
     plan = compile_to_bernstein_plan(
-        PLAN, plan_name="sample", description="test plan", audit_trail_path=None
+        PLAN, plan_name="sample", description="test plan", write_audit_trail=False
     )
     assert plan["name"] == "sample"
     assert len(plan["stages"]) == 2
@@ -42,7 +44,7 @@ def test_compiles_to_valid_stage_shape():
 
 def test_dev_model_defaults_to_resolved_sonnet():
     plan = compile_to_bernstein_plan(
-        PLAN, plan_name="sample", description="test plan", audit_trail_path=None
+        PLAN, plan_name="sample", description="test plan", write_audit_trail=False
     )
     assert plan["stages"][0]["steps"][0]["model"] == "sonnet"
 
@@ -55,7 +57,7 @@ def test_explicit_dev_model_overrides_default():
         plan_name="sample",
         description="test plan",
         dev_model=ResolvedModel("dev", "opus", "flag"),
-        audit_trail_path=None,
+        write_audit_trail=False,
     )
     assert plan["stages"][0]["steps"][0]["model"] == "opus"
 
@@ -64,3 +66,35 @@ def test_no_pr_markers_falls_back_to_single_unit():
     units = parse_plan_units("just prose, no PR headings")
     assert len(units) == 1
     assert units[0].index == "1"
+
+
+def test_audit_trail_anchors_to_workdir_not_caller_cwd(tmp_path):
+    # reasona-dev has no "home repo" once deployed (installed like
+    # `bernstein` itself) -- the only stable anchor is the TARGET repo
+    # (`workdir`), never wherever the compile step happens to be invoked
+    # from. This must hold regardless of the actual process CWD.
+    target_repo = tmp_path / "some-target-repo"
+    target_repo.mkdir()
+
+    compile_to_bernstein_plan(
+        PLAN, plan_name="sample", description="test plan", workdir=target_repo
+    )
+
+    expected = target_repo / ".reasona" / "model_config.json"
+    assert expected.exists()
+    assert not (Path.cwd() / ".reasona").exists()
+
+
+def test_audit_trail_disabled_writes_nothing(tmp_path):
+    target_repo = tmp_path / "another-repo"
+    target_repo.mkdir()
+
+    compile_to_bernstein_plan(
+        PLAN,
+        plan_name="sample",
+        description="test plan",
+        workdir=target_repo,
+        write_audit_trail=False,
+    )
+
+    assert not (target_repo / ".reasona").exists()

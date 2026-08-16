@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import yaml
 
@@ -100,7 +101,9 @@ def compile_to_bernstein_plan(
     description: str,
     dev_role: str = "backend",
     dev_model: ResolvedModel | None = None,
-    audit_trail_path: str | None = ".reasona/model_config.json",
+    workdir: str | Path | None = None,
+    write_audit_trail: bool = True,
+    audit_trail_path: str | None = None,
 ) -> dict:
     """Return a dict matching Bernstein's plan.yaml schema (validated shape).
 
@@ -116,11 +119,34 @@ def compile_to_bernstein_plan(
     docs/ARCHITECTURE.md §3.1/§3.5). Passing a `ResolvedModel` explicitly
     is for tests; production callers should resolve once via
     `model_config.resolve_all()` and pass the `"dev"` entry through, so the
-    CONDUCTOR-COLLAPSE audit trail (`audit_trail_path`) reflects the same
-    values actually used everywhere else in the pipeline.
+    CONDUCTOR-COLLAPSE audit trail reflects the same values actually used
+    everywhere else in the pipeline.
+
+    `workdir` is the TARGET repository this plan runs against -- never
+    reasona-dev's own install location. reasona-dev has no "home repo" once
+    deployed (installed as a package, like `bernstein` itself, invoked
+    against an arbitrary caller-supplied repo); the only stable filesystem
+    anchor at compile time is whatever repo the operator points this at.
+    Defaults to `Path.cwd()`, matching Bernstein's own convention (`bernstein
+    run` with no `--workdir` uses the invoking CWD as the project root --
+    `orch._workdir`).
+
+    `audit_trail_path`, when not given explicitly, resolves to
+    `<workdir>/.reasona/model_config.json` -- anchored to the SAME `workdir`
+    that Bernstein's janitor uses to evaluate `completion_signals`
+    (confirmed: `core/tasks/task_lifecycle.py`'s `_verify_via_janitor` runs
+    every `test_passes` check with `cwd=orch._workdir`, a single fixed
+    project root, not a per-task worktree). Anchoring both to the same
+    `workdir` is what keeps `gate_check.py`'s `.reasona/review-<stage>.json`
+    convention and this audit trail landing in the same place regardless of
+    where the compile step happens to be invoked from.
     """
+    workdir = Path(workdir) if workdir is not None else Path.cwd()
+    if audit_trail_path is None:
+        audit_trail_path = str(workdir / ".reasona" / "model_config.json")
+
     resolved_dev = dev_model if dev_model is not None else resolve("dev")
-    if audit_trail_path:
+    if write_audit_trail:
         write_resolved_config({"dev": resolved_dev}, audit_trail_path)
 
     units = parse_plan_units(plan_text)
