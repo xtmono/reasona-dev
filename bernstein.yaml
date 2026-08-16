@@ -1,0 +1,39 @@
+# reasona-dev project config. See docs/ARCHITECTURE.md for what each section
+# maps onto in the old dev-ralf design.
+
+goal: >
+  Execute reasona-plan PR units to merged PRs under the reasona-dev
+  finding contract (disposition/severity separation, deterministic gates,
+  bounded escalation, hard-stop on exhaustion).
+
+cli: claude
+max_agents: 4
+
+# ---------------------------------------------------------------------------
+# CREDIT-BURN: never silently swap models on exhaustion.
+# ---------------------------------------------------------------------------
+# An EMPTY fallback_chain is the deliberate choice here -- dev-ralf's own
+# incident history (see plugins/dev/skills/dev-ralf/SKILL.md -> Failure
+# catalog -> CREDIT-BURN) is that an exhausted model retried cycle after
+# cycle burns credit instead of surfacing the outage. Bernstein's own
+# comment ("Configure here to override the built-in defaults") implies a
+# built-in chain applies even when this section is absent -- so it is
+# declared explicitly empty here rather than omitted.
+#
+# STATUS: NOT YET EMPIRICALLY CONFIRMED that an empty chain fully disables
+# fallback (docs/ARCHITECTURE.md §3). Verify with a forced 429/503 before
+# any production run.
+model_fallback:
+  fallback_chain: []
+  strike_limit: 0
+
+# cascade_router.py (confidence-based auto-escalation on low-confidence /
+# janitor failure) is a SEPARATE mechanism from model_fallback above. No
+# confirmed off-switch was found in the installed source
+# (core/routing/cascade_router.py). Treat as an open blocker for production
+# use until confirmed -- see docs/ARCHITECTURE.md §3.
+
+approval: review   # gate before merge; never `auto`
+
+worktree_setup:
+  setup_command: "true"  # per-PR build isolation; override per repo

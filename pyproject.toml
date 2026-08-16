@@ -1,0 +1,24 @@
+[project]
+name = "reasona-dev"
+version = "0.1.0"
+description = "Deterministic plan-to-PR pipeline. Bernstein orchestration substrate + the reasona finding contract."
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "bernstein>=3.15.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+# Real entry-point group verified against installed Bernstein 3.15.1:
+# plugins/manager.py -> entry_points(group="bernstein.plugins")
+[project.entry-points."bernstein.plugins"]
+reasona_dev = "reasona_dev.plugin:ReasonaGatePlugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["reasona_dev"]
