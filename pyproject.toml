@@ -16,6 +16,14 @@ test = ["pytest>=8.0"]
 [project.entry-points."bernstein.plugins"]
 reasona_dev = "reasona_dev.plugin:ReasonaGatePlugin"
 
+# Real entry-point group verified against installed Bernstein 3.15.1:
+# adapters/registry.py -> _load_entrypoint_adapters(), entry_points(group="bernstein.adapters")
+# `agy` needs no entry here -- it is already a native Bernstein adapter
+# (Antigravity CLI, same binary/flags dev-ralf's dispatch.md documents).
+# Only `ocr` was confirmed absent from the installed registry.
+[project.entry-points."bernstein.adapters"]
+ocr = "reasona_dev.adapters.ocr:OcrAdapter"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

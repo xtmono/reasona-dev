@@ -14,39 +14,44 @@ upstream PRD/plan-authoring layer this project consumes.
 
 ## Status
 
-Working V0. Install, tests, and a real Bernstein plan-validation round-trip
-all pass as of this commit:
+Working V0. All four items flagged open after the first pass are now
+resolved by direct inspection of the installed Bernstein 3.15.1 source —
+see `docs/ARCHITECTURE.md` §3. Install, tests, and real round-trips against
+the actual `bernstein` CLI all pass as of this commit:
 
 ```
-$ .venv/bin/python -m pytest tests/ -v      # 22 passed
+$ .venv/bin/python -m pytest tests/ -v          # 28 passed
 $ .venv/bin/bernstein plan validate <compiled plan.yaml>   # "Plan is valid."
-$ .venv/bin/bernstein doctor                # "Plugin loading: no errors"
+$ .venv/bin/bernstein doctor                    # "Plugin loading: no errors"
+                                                 # "Adapter version: 1 tracked adapter(s), 0 below"
+$ python3 -c "from bernstein.adapters.registry import get_adapter; \
+  print(get_adapter('ocr').name())"             # "OCR (diff-scanning reviewer)"
 ```
 
-## What's real vs. what's open
+## What was open, and how each resolved
 
-See `docs/ARCHITECTURE.md` §3 for the full list. The two that block a
-production run:
-
-- `cascade_router.py`'s confidence-based auto-escalation has no confirmed
-  off switch yet (separate from `model_fallback`, which does).
-- The exact hookspec that gates task **completion/merge** (as opposed to
-  `on_pre_task_create`, which gates **creation** and is confirmed) was not
-  found in this pass.
+| Item | Resolution |
+|---|---|
+| `cascade_router.py` off switch | Confirmed dead code -- no call sites anywhere in the installed package outside its own file. Live initial-model-selection path is `bandit_router.py`, a different (lower-risk) concern. No action needed. |
+| `model_fallback.strike_limit: 0` | Was a bug in the first draft -- `should_fallback = consecutive_errors >= strike_limit`, and errors start at 0, so `0` fires immediately. Fixed: `fallback_chain: []` alone disables it; `strike_limit` left unset. |
+| Merge-gating hook | Confirmed no dedicated hookspec exists (`on_pre_task_create` and `on_pre_tool_use` are the only two that can block). Merge/completion gating is a `completion_signals: [{type: test_passes, ...}]` concern, not a hook -- `reasona_dev/gate_check.py` is that entry point, wired automatically by `plan_compile.py`. |
+| `agy`/`ocr` adapters | `agy` turned out to already be a native Bernstein adapter ("Antigravity CLI") -- same binary and flags dev-ralf's `dispatch.md` already documents. Only `ocr` needed writing; `reasona_dev/adapters/ocr.py` is registered via `bernstein.adapters` entry points and resolves through Bernstein's own `get_adapter()`. |
 
 ## Layout
 
 ```
 docs/ARCHITECTURE.md      4-layer architecture, verified against installed Bernstein 3.15.1 source
-bernstein.yaml             project config (model_fallback deliberately emptied)
+bernstein.yaml             project config (model_fallback correctly emptied, cascade_router notes)
 templates/review.yaml      multi-lens verification pipeline (strategy: all)
 reasona_dev/
-  plan_compile.py           plan document -> bernstein plan.yaml
+  plan_compile.py           plan document -> bernstein plan.yaml, auto-wires completion_signals
   finding_adapter.py         || evidence-field text contract parser
   cycle_gate.py               recheck routing, escalation, budget, fingerprints
-  squash.py                    squash message builder + guard
-  plugin.py                     pluggy hookimpl (on_pre_task_create)
-tests/                      pytest, 22 cases, all passing
+  gate_check.py                completion_signals entry point -- the actual merge gate
+  squash.py                     squash message builder + guard
+  plugin.py                      pluggy hookimpl (on_pre_task_create) -- next-fix-task gating only
+  adapters/ocr.py                 OcrAdapter, registered via bernstein.adapters entry points
+tests/                      pytest, 28 cases, all passing
 ```
 
 ## Setup
@@ -56,3 +61,9 @@ uv venv .venv
 uv pip install --python .venv/bin/python -e ".[test]"
 .venv/bin/python -m pytest tests/
 ```
+
+## Next
+
+The remaining work is an end-to-end run: one real PR unit through
+`plan_compile.py` -> `bernstein run` -> the review pipeline -> `gate_check.py`
+-> squash merge, on a real repository.
