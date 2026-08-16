@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 
 import yaml
 
+from reasona_dev.model_config import ResolvedModel, resolve, write_resolved_config
+
 _PR_HEADING_RE = re.compile(r"^## PR (?P<index>[\w.]+):\s*(?P<title>.+)$", re.MULTILINE)
 _TYPE_RE = re.compile(r"^type:\s*(\w+)\s*$", re.MULTILINE)
 _DEPENDS_RE = re.compile(r"^depends_on:\s*(.+)$", re.MULTILINE)
@@ -97,7 +99,8 @@ def compile_to_bernstein_plan(
     plan_name: str,
     description: str,
     dev_role: str = "backend",
-    dev_model: str | None = None,
+    dev_model: ResolvedModel | None = None,
+    audit_trail_path: str | None = ".reasona/model_config.json",
 ) -> dict:
     """Return a dict matching Bernstein's plan.yaml schema (validated shape).
 
@@ -105,7 +108,21 @@ def compile_to_bernstein_plan(
     plan's declared PR dependencies -- the same DAG dev-ralf's scheduler
     used to compute a ready-set for; here Bernstein's own stage scheduler
     resolves it natively (no ready-set loop needed on our side).
+
+    `dev_model` defaults to `reasona_dev.model_config.resolve("dev")` --
+    the same flag > env var (`REASONA_DEV_DEV_MODEL`) > default chain
+    dev-ralf used, so every generated step always carries a concrete,
+    dev-ralf-faithful `model:` (never left for BanditRouter to guess at --
+    docs/ARCHITECTURE.md §3.1/§3.5). Passing a `ResolvedModel` explicitly
+    is for tests; production callers should resolve once via
+    `model_config.resolve_all()` and pass the `"dev"` entry through, so the
+    CONDUCTOR-COLLAPSE audit trail (`audit_trail_path`) reflects the same
+    values actually used everywhere else in the pipeline.
     """
+    resolved_dev = dev_model if dev_model is not None else resolve("dev")
+    if audit_trail_path:
+        write_resolved_config({"dev": resolved_dev}, audit_trail_path)
+
     units = parse_plan_units(plan_text)
 
     stages = []
@@ -132,8 +149,7 @@ def compile_to_bernstein_plan(
         }
         if u.files:
             step["files"] = u.files
-        if dev_model:
-            step["model"] = dev_model
+        step["model"] = resolved_dev.value
         stage: dict = {
             "name": stage_name,
             "steps": [step],
