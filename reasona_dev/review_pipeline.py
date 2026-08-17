@@ -23,9 +23,16 @@ import yaml
 from reasona_dev.model_config import ResolvedModel, resolve_all
 
 
-def render(resolved: dict[str, ResolvedModel] | None = None) -> dict:
-    """Build the pipeline dict. Resolves config itself if not supplied."""
-    resolved = resolved if resolved is not None else resolve_all()
+def render(resolved: dict[str, ResolvedModel] | None = None, *, workdir: str | Path | None = None) -> dict:
+    """Build the pipeline dict. Resolves config itself if not supplied.
+
+    `workdir` is forwarded to `resolve_all()` so `<workdir>/.reasona/config.yaml`
+    is consulted -- the same TARGET-repo anchor `plan_compile.
+    compile_to_bernstein_plan()` uses (docs/ARCHITECTURE.md §0.1), never
+    reasona-dev's own install location. Defaults to `Path.cwd()` like every
+    other entry point in this project.
+    """
+    resolved = resolved if resolved is not None else resolve_all(workdir=workdir)
 
     return {
         "version": 1,
@@ -87,7 +94,9 @@ def render(resolved: dict[str, ResolvedModel] | None = None) -> dict:
     }
 
 
-def render_bounded_recheck(resolved: dict[str, ResolvedModel] | None = None) -> dict:
+def render_bounded_recheck(
+    resolved: dict[str, ResolvedModel] | None = None, *, workdir: str | Path | None = None
+) -> dict:
     """Bounded recheck pipeline -- Sonnet(-tier)+OCR, confirm/regression only.
 
     Used when reasona_dev.cycle_gate.recheck_route() returns "BOUNDED"
@@ -96,7 +105,7 @@ def render_bounded_recheck(resolved: dict[str, ResolvedModel] | None = None) -> 
     confirmation + regression -- this pipeline just points the reviewer
     role at the resolved `recheck` model instead of `review`.
     """
-    resolved = resolved if resolved is not None else resolve_all()
+    resolved = resolved if resolved is not None else resolve_all(workdir=workdir)
     pipeline = render(resolved)
     pipeline["name"] = "reasona-dev-bounded-recheck"
     pipeline["stages"][0]["agents"][0]["model"] = resolved["recheck"].value
@@ -106,6 +115,16 @@ def render_bounded_recheck(resolved: dict[str, ResolvedModel] | None = None) -> 
     return pipeline
 
 
-def write_review_yaml(out_path: str | Path, *, bounded: bool = False, resolved: dict | None = None) -> None:
-    pipeline = render_bounded_recheck(resolved) if bounded else render(resolved)
+def write_review_yaml(
+    out_path: str | Path,
+    *,
+    bounded: bool = False,
+    resolved: dict | None = None,
+    workdir: str | Path | None = None,
+) -> None:
+    pipeline = (
+        render_bounded_recheck(resolved, workdir=workdir)
+        if bounded
+        else render(resolved, workdir=workdir)
+    )
     Path(out_path).write_text(yaml.safe_dump(pipeline, sort_keys=False, allow_unicode=True))

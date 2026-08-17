@@ -84,14 +84,14 @@ def test_final_audit_falls_back_to_verify_env_var_not_verifys_default():
 
 
 def test_resolve_all_dependency_order_is_correct():
-    resolved = resolve_all(env={"REASONA_DEV_VERIFY_MODEL": "sonnet-v2"})
+    resolved = resolve_all(load_config_files=False, env={"REASONA_DEV_VERIFY_MODEL": "sonnet-v2"})
     assert resolved["bugbot"].value == "sonnet-v2"
     assert resolved["final_audit"].value == "sonnet-v2"
     assert resolved["recheck"].value == resolved["review"].value
 
 
 def test_resolve_all_flags_take_priority_everywhere():
-    resolved = resolve_all(flags={"dev": "haiku", "bugbot": "custom"}, env={})
+    resolved = resolve_all(load_config_files=False, flags={"dev": "haiku", "bugbot": "custom"}, env={})
     assert resolved["dev"].value == "haiku"
     assert resolved["bugbot"].value == "custom"
     assert resolved["dev"].source == "flag"

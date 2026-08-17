@@ -145,7 +145,16 @@ def compile_to_bernstein_plan(
     if audit_trail_path is None:
         audit_trail_path = str(workdir / ".reasona" / "model_config.json")
 
-    resolved_dev = dev_model if dev_model is not None else resolve("dev")
+    if dev_model is not None:
+        resolved_dev = dev_model
+    else:
+        from reasona_dev import config_file
+
+        resolved_dev = resolve(
+            "dev",
+            project_cfg=config_file.load_project(workdir),
+            global_cfg=config_file.load_global(),
+        )
     if write_audit_trail:
         write_resolved_config({"dev": resolved_dev}, audit_trail_path)
 
