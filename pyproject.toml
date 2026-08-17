@@ -11,6 +11,12 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 
+# Real reasona-dev CLI -- previously nonexistent, so `resolve()`'s `flag`
+# parameter had no actual caller. `reasona-dev compile-plan --dev opus ...`
+# is now how a flag override is actually typed.
+[project.scripts]
+reasona-dev = "reasona_dev.cli:main"
+
 # Real entry-point group verified against installed Bernstein 3.15.1:
 # plugins/manager.py -> entry_points(group="bernstein.plugins")
 [project.entry-points."bernstein.plugins"]

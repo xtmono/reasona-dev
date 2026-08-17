@@ -101,6 +101,7 @@ def compile_to_bernstein_plan(
     description: str,
     dev_role: str = "backend",
     dev_model: ResolvedModel | None = None,
+    dev_flag: str | None = None,
     workdir: str | Path | None = None,
     write_audit_trail: bool = True,
     audit_trail_path: str | None = None,
@@ -152,6 +153,7 @@ def compile_to_bernstein_plan(
 
         resolved_dev = resolve(
             "dev",
+            flag=dev_flag,
             project_cfg=config_file.load_project(workdir),
             global_cfg=config_file.load_global(),
         )

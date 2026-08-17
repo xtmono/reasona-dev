@@ -20,7 +20,7 @@ direct inspection of the installed Bernstein 3.15.1 source — see
 actual `bernstein` CLI all pass as of this commit:
 
 ```
-$ .venv/bin/python -m pytest tests/ -v          # 60 passed
+$ .venv/bin/python -m pytest tests/ -v          # 65 passed
 $ .venv/bin/bernstein plan validate <compiled plan.yaml>          # "Plan is valid."
 $ .venv/bin/bernstein review --pipeline <rendered review.yaml> --validate-only  # "Pipeline OK"
 $ .venv/bin/bernstein doctor                    # "Plugin loading: no errors"
@@ -58,7 +58,7 @@ reasona_dev/
   squash.py                        squash message builder + guard
   plugin.py                         pluggy hookimpl (on_pre_task_create) -- next-fix-task gating only
   adapters/ocr.py                    OcrAdapter, registered via bernstein.adapters entry points
-tests/                      pytest, 60 cases, all passing
+tests/                      pytest, 65 cases, all passing
 ```
 
 ## Setup
@@ -68,6 +68,22 @@ uv venv .venv
 uv pip install --python .venv/bin/python -e ".[test]"
 .venv/bin/python -m pytest tests/
 ```
+
+## CLI
+
+`resolve()`/`resolve_all()`'s `flag`/`flags` parameters had no real caller
+until this: `reasona-dev` is now an actual installed command
+(`[project.scripts]`), the top of the `flag > env var > project config >
+global config > default` chain typed at a real shell.
+
+```bash
+reasona-dev compile-plan plan.md -o plan.yaml --workdir <target-repo> --dev opus
+reasona-dev render-review -o review.yaml --workdir <target-repo> --bugbot deepseek-v4-pro
+reasona-dev render-review -o review.yaml --workdir <target-repo> --bounded
+```
+
+Role flag names mirror dev-ralf's own one-to-one: `--dev`, `--review`,
+`--recheck`, `--bugbot`, `--verify`, `--final-audit`.
 
 ## Next
 
