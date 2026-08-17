@@ -49,6 +49,56 @@ model_fallback:
 # with an explicit `model:` override -- an explicit step-level `model:`
 # should win (manager-specified override branch in `_static_select`).
 
+# ---------------------------------------------------------------------------
+# role_model_policy: pin each role's adapter (provider) explicitly.
+# ---------------------------------------------------------------------------
+# Every role reasona-dev creates today runs on the adapter its docstring
+# already assumes (backend/reviewer/compliance -> claude, bugbot -> kilo --
+# see reasona_dev/review_pipeline.py). Declaring `provider` here even while
+# nothing has changed closes a real gap found while tracing CREDIT-BURN
+# (docs/ARCHITECTURE.md §3.6): `retry_or_fail_task`'s escalation logic
+# (core/tasks/task_lifecycle.py) reads `role_model_policy.<role>.provider`
+# to decide whether the retrying role is Claude-compatible; when this
+# section is absent, that check falls back to the run's `cli:` default
+# above ("claude") REGARDLESS of what adapter the role's own step/agent
+# spec actually names -- so switching e.g. `backend` to a non-Claude
+# adapter later, without updating this section first, would make a retry
+# stamp a Claude tier name ("opus"/"sonnet") onto a non-Claude task (the
+# "run-9 attempt-8" defect class Bernstein's own source comments describe).
+# Declaring it now, before any role has actually moved off Claude, means
+# there is nothing to remember to do at migration time -- only the
+# `provider` value needs to change.
+#
+# `model` is deliberately NOT set here. reasona_dev/model_config.py already
+# resolves each role's model per invocation (flag > env var > project
+# config > global config > default) and stamps it onto every generated
+# plan.yaml step / review.yaml agent -- hardcoding a model string in this
+# static file too would create a second, unsynchronized source of truth
+# for the same value (the exact CONDUCTOR-COLLAPSE failure mode dev-ralf-
+# renewal-claude.md §3.7 guards against). Leaving `model` unset means a
+# retry on a non-Claude role falls back to `task.model` -- whatever
+# model_config had already resolved for that task -- not a second hardcoded
+# guess.
+#
+# NOTE: this section also turns Bernstein's task-create route
+# (core/routes/task_crud.py) into an ALLOWLIST for `role` -- any task
+# created with a role not listed below is rejected with HTTP 400 ("Invalid
+# role"). Confirmed reasona-dev only ever creates these four roles
+# (plan_compile.py -> "backend"; review_pipeline.py -> "reviewer"/"bugbot"/
+# "compliance"); no evolution/watchdog auto-spawn features are enabled in
+# this file, so no other role is expected to appear. If those features are
+# ever turned on, their auto-spawned task roles must be added here too, or
+# their task creation will start failing.
+role_model_policy:
+  backend:
+    provider: claude
+  reviewer:
+    provider: claude
+  bugbot:
+    provider: kilo
+  compliance:
+    provider: claude
+
 approval: review   # gate before merge; never `auto`
 
 worktree_setup:

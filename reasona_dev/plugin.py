@@ -14,11 +14,29 @@ do by itself. The gate decision is computed here and persisted to
 ``bernstein run --from-plan`` for the next fix cycle is responsible for
 reading ``escalated_model`` from that file and passing it as the step's
 ``model:`` override. This module supplies the decision, not the re-dispatch.
+
+CREDIT-BURN post-hoc monitor (docs/ARCHITECTURE.md §3.6): Bernstein's own
+retry-escalation (``task_lifecycle.py``'s two independent retry paths --
+``retry_or_fail_task`` and ``maybe_retry_task``) can silently bump a retried
+task's model to a stronger tier, and there is no declarative
+``bernstein.yaml``/``plan.yaml`` surface that fully prevents it (the
+``maybe_retry_task`` tick-loop path has no ``role_model_policy`` parameter
+at all -- it stamps a Claude tier name unconditionally). ``on_pre_task_create``
+cannot detect this even after the fact: its hookspec omits ``model`` entirely,
+even though the server has the value in scope at the point it fires the hook.
+``on_agent_spawned(session_id, role, model)`` is the one lifecycle hook that
+actually receives the model a session was spawned with (verified live call
+site: ``core/agents/spawner_core.py:4648``), so that is where this monitor is
+wired instead. It cannot block -- the agent is already running by the time
+this fires -- but it logs loudly and records the divergence, which is the
+"never silently" half of CREDIT-BURN even where the "never" half is currently
+unenforceable.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -26,9 +44,31 @@ from bernstein.plugins import hookimpl  # verified real: pluggy.HookimplMarker("
 
 from reasona_dev.cycle_gate import FixBudget, GateDecision, RecurrenceTracker, evaluate
 from reasona_dev.finding_adapter import ReviewResult
+from reasona_dev.model_config import resolve_all
+
+logger = logging.getLogger(__name__)
 
 _STATE_DIR = Path(".reasona")
 _STATE_FILE = _STATE_DIR / "gate_state.json"
+_DIVERGENCE_LOG = _STATE_DIR / "model_divergence.jsonl"
+
+# Bernstein's own agent-role vocabulary (plan.yaml step `role`, review.yaml
+# agent `role`) differs from reasona_dev.model_config's role keys -- this is
+# the same mapping plan_compile.py / review_pipeline.py already establish by
+# construction (dev_role="backend" default; review.yaml agent roles
+# "reviewer"/"bugbot"/"compliance"). "reviewer" maps to two config roles
+# because the same Bernstein role name is reused for both the initial
+# review pipeline (resolved["review"]) and the bounded recheck pipeline
+# (resolved["recheck"]) -- either is a legitimate expected value, so both
+# must be accepted to avoid a false positive when bounded recheck is in use.
+# "ocr_reviewer" has no model slot (adapter="ocr", stateless tool) and is
+# intentionally absent -- there is nothing to compare it against.
+_SPAWN_ROLE_TO_CONFIG_ROLES: dict[str, tuple[str, ...]] = {
+    "backend": ("dev",),
+    "reviewer": ("review", "recheck"),
+    "bugbot": ("bugbot",),
+    "compliance": ("verify",),
+}
 
 
 def _load_state() -> dict:
@@ -102,6 +142,50 @@ class ReasonaGatePlugin:
         # spawn_fix / spawn_fix_escalated / pass all proceed; the escalated
         # model, if any, is picked up by the re-dispatch caller from
         # `.reasona/gate_state.json[stage_key]['last_decision']['escalated_model']`.
+
+    @hookimpl
+    def on_agent_spawned(self, session_id: str, role: str, model: str) -> None:
+        """Log loudly when a spawned session's model diverges from what
+        `reasona_dev.model_config` resolved for its role.
+
+        Cannot block (see module docstring) -- this is detection, not
+        prevention. `role` not present in `_SPAWN_ROLE_TO_CONFIG_ROLES`
+        (e.g. `ocr_reviewer`, or any role this project didn't define) is
+        silently skipped -- there is no expectation to compare against.
+        """
+        expected = _expected_models(role)
+        if not expected or model in expected:
+            return
+        _record_divergence(session_id=session_id, role=role, expected=expected, actual=model)
+
+
+def _expected_models(role: str) -> set[str]:
+    config_roles = _SPAWN_ROLE_TO_CONFIG_ROLES.get(role)
+    if not config_roles:
+        return set()
+    resolved = resolve_all()
+    return {resolved[r].value for r in config_roles if r in resolved}
+
+
+def _record_divergence(*, session_id: str, role: str, expected: set[str], actual: str) -> None:
+    _STATE_DIR.mkdir(exist_ok=True)
+    record = {
+        "session_id": session_id,
+        "role": role,
+        "expected_models": sorted(expected),
+        "actual_model": actual,
+    }
+    with _DIVERGENCE_LOG.open("a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+    logger.warning(
+        "reasona-dev CREDIT-BURN monitor: session %s (role=%r) spawned with model=%r, "
+        "expected one of %s -- reasona_dev.model_config was not the source of this model "
+        "(likely Bernstein retry escalation; see docs/ARCHITECTURE.md §3.6)",
+        session_id,
+        role,
+        actual,
+        sorted(expected),
+    )
 
 
 def record_review_result(stage_key: str, stage: str, result: ReviewResult) -> None:
