@@ -2,15 +2,15 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-# .reasona/config.yaml is this repo's own committed, project-local
-# reasona_dev.model_config layer (see README). Everything else under
-# .reasona/ (model_config.json, gate_state.json, review-*.json, ...) is a
-# runtime artifact and stays ignored. bernstein.yaml itself is committed
-# directly at the repo root (NOT under .reasona/) -- Bernstein's own config
-# loader only reads a root-level (or .bernstein/) file with no `--seed`
-# override for bare `bernstein`/`bernstein doctor`, so this repo keeps it
-# where every ad-hoc `bernstein` invocation against it can actually find it.
+# .reasona/reasona.yaml is this repo's own committed, project-local
+# reasona_dev.model_config layer (see README) -- shared with a future
+# reasona-plan under a separate top-level key, see reasona_dev/config_file.py.
+# Everything else under .reasona/ (model_config.json, gate_state.json,
+# review-*.json, ...) is a runtime artifact and stays ignored.
+# .bernstein/bernstein.yaml (Bernstein's own project config -- not
+# reasona_dev's) is committed directly, not ignored -- no rule below needs
+# to mention it.
 .reasona/*
-!.reasona/config.yaml
+!.reasona/reasona.yaml
 .sdd/
 generated_plan.yaml

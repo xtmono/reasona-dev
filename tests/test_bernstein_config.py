@@ -28,7 +28,7 @@ def _resolved(**adapters: str) -> dict[str, ResolvedModel]:
     }
 
 
-def test_copies_global_template_when_target_missing(tmp_path, monkeypatch):
+def test_copies_global_template_to_dot_bernstein_when_target_missing(tmp_path, monkeypatch):
     global_yaml = tmp_path / "global-bernstein.yaml"
     global_yaml.write_text("goal: test\ncli: claude\n")
     monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
@@ -38,11 +38,30 @@ def test_copies_global_template_when_target_missing(tmp_path, monkeypatch):
 
     result = bernstein_config.ensure_bernstein_yaml(workdir)
 
-    assert result == workdir / "bernstein.yaml"
-    assert (workdir / "bernstein.yaml").read_text() == "goal: test\ncli: claude\n"
+    assert result == workdir / ".bernstein" / "bernstein.yaml"
+    assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: test\ncli: claude\n"
 
 
-def test_never_overwrites_existing_target_file(tmp_path, monkeypatch):
+def test_never_overwrites_existing_dot_bernstein_file(tmp_path, monkeypatch):
+    global_yaml = tmp_path / "global-bernstein.yaml"
+    global_yaml.write_text("goal: from-global\n")
+    monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
+
+    workdir = tmp_path / "target-repo"
+    (workdir / ".bernstein").mkdir(parents=True)
+    (workdir / ".bernstein" / "bernstein.yaml").write_text("goal: repo-owns-this-already\n")
+
+    result = bernstein_config.ensure_bernstein_yaml(workdir)
+
+    assert result == workdir / ".bernstein" / "bernstein.yaml"
+    assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: repo-owns-this-already\n"
+
+
+def test_never_overwrites_existing_legacy_root_file(tmp_path, monkeypatch):
+    # A repo already using the pre-existing convention (repo-root
+    # bernstein.yaml, no .bernstein/ dir) is left alone -- Bernstein itself
+    # would already find that file, so nothing needs bootstrapping, and
+    # this must NOT also create a second, redundant .bernstein/bernstein.yaml.
     global_yaml = tmp_path / "global-bernstein.yaml"
     global_yaml.write_text("goal: from-global\n")
     monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
@@ -55,6 +74,7 @@ def test_never_overwrites_existing_target_file(tmp_path, monkeypatch):
 
     assert result == workdir / "bernstein.yaml"
     assert (workdir / "bernstein.yaml").read_text() == "goal: repo-owns-this-already\n"
+    assert not (workdir / ".bernstein").exists()
 
 
 def test_project_local_template_beats_global_template(tmp_path, monkeypatch):
@@ -68,17 +88,18 @@ def test_project_local_template_beats_global_template(tmp_path, monkeypatch):
 
     result = bernstein_config.ensure_bernstein_yaml(workdir)
 
-    assert result == workdir / "bernstein.yaml"
-    assert (workdir / "bernstein.yaml").read_text() == "goal: from-project-local\n"
+    assert result == workdir / ".bernstein" / "bernstein.yaml"
+    assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: from-project-local\n"
 
 
-def test_returns_none_when_neither_target_nor_global_exists(tmp_path, monkeypatch):
+def test_returns_none_when_nothing_exists(tmp_path, monkeypatch):
     monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", tmp_path / "nonexistent.yaml")
 
     workdir = tmp_path / "target-repo"
     workdir.mkdir()
 
     assert bernstein_config.ensure_bernstein_yaml(workdir) is None
+    assert not (workdir / ".bernstein" / "bernstein.yaml").exists()
     assert not (workdir / "bernstein.yaml").exists()
 
 

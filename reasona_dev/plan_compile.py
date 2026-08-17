@@ -155,18 +155,16 @@ def compile_to_bernstein_plan(
     where the compile step happens to be invoked from.
 
     `write_bernstein_yaml` (default True) does two things, both in
-    `bernstein_config.py`: (1) copies `~/.reasona/bernstein.yaml`
-    (`GLOBAL_BERNSTEIN_YAML`) into `<workdir>/bernstein.yaml` when the
-    target repo doesn't already have one -- Bernstein's own config loader
-    only ever reads a project-local file (no home-directory fallback for
-    the config `bernstein run` needs), so this is what lets an operator
-    maintain ONE global template instead of hand-authoring it per target
-    repo; never overwrites an existing file. (2) patches that file's
-    `role_model_policy.<role>.provider` values in place (comments
-    untouched) to match what `model_config.resolve_all()` resolves right
-    now -- every `compile-plan` run, not just the first, so a role's
-    adapter changing later (e.g. in `~/.reasona/config.yaml`) doesn't
-    require a matching hand-edit here too.
+    `bernstein_config.py`: (1) copies a local-or-global template into
+    `<workdir>/.bernstein/bernstein.yaml` when the target repo has no seed
+    file Bernstein would find on its own (checked at BOTH real locations
+    it reads -- `.bernstein/bernstein.yaml` and the legacy repo-root
+    `bernstein.yaml`); never overwrites either. (2) patches whichever file
+    was found/created's `role_model_policy.<role>.provider` values in
+    place (comments untouched) to match what `model_config.resolve_all()`
+    resolves right now -- every `compile-plan` run, not just the first, so
+    a role's adapter changing later (e.g. in `~/.reasona/reasona.yaml`)
+    doesn't require a matching hand-edit here too.
 
     `policy_flags` is the flag layer for that same sync -- role -> value
     (dev-ralf's own `tool:model:effort` shape or a bare model name, same as
@@ -198,7 +196,7 @@ def compile_to_bernstein_plan(
         from reasona_dev.bernstein_config import ensure_bernstein_yaml, sync_role_model_policy
         from reasona_dev.model_config import resolve_all
 
-        ensure_bernstein_yaml(workdir)
+        bernstein_yaml_path = ensure_bernstein_yaml(workdir)
         # `policy_flags` carries the flag > env var > project cfg > global
         # cfg chain's TOP layer through to review/recheck/bugbot/verify/
         # final_audit -- without this, resolve_all() here would silently
@@ -208,9 +206,10 @@ def compile_to_bernstein_plan(
         # `resolved_dev` -- a test/caller-supplied `dev_model` override (or
         # `dev_flag`) must win here too, same as it wins on the plan step
         # itself below.
-        policy_resolved = resolve_all(workdir=workdir, flags=policy_flags)
-        policy_resolved["dev"] = resolved_dev
-        sync_role_model_policy(workdir / "bernstein.yaml", policy_resolved)
+        if bernstein_yaml_path is not None:
+            policy_resolved = resolve_all(workdir=workdir, flags=policy_flags)
+            policy_resolved["dev"] = resolved_dev
+            sync_role_model_policy(bernstein_yaml_path, policy_resolved)
 
     units = parse_plan_units(plan_text)
 

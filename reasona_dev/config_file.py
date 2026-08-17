@@ -1,9 +1,17 @@
 """reasona-dev's own two-layer config cascade -- mirrors Bernstein's pattern
-(`~/.bernstein/bernstein.yaml` -> `<workdir>/bernstein.yaml`) but scoped to
-exactly two layers, as decided for this project:
+(`~/.bernstein/bernstein.yaml` -> `<workdir>/.bernstein/bernstein.yaml`) but
+scoped to exactly two layers, as decided for this project:
 
-    ~/.reasona/config.yaml           -- global (user-wide defaults)
-    <workdir>/.reasona/config.yaml   -- project/local (overrides global)
+    ~/.reasona/reasona.yaml           -- global (user-wide defaults)
+    <workdir>/.reasona/reasona.yaml   -- project/local (overrides global)
+
+The filename is `reasona.yaml`, not a generic `config.yaml` -- `.reasona/`
+is the shared namespace this whole product family lives under, and this
+one FILE is meant to be shared too: a future `reasona-plan` (the
+`plan-ralf` successor) will read/write the same `reasona.yaml`, under its
+own top-level key (`plan-models:`) next to this module's `dev-models:`.
+Namespacing by KEY, not by a separate file per product, is deliberate --
+see `model_for()`.
 
 This is a SEPARATE cascade from Bernstein's own six-layer one
 (docs/ARCHITECTURE.md §0.1) -- reasona-dev's config file only ever sets
@@ -14,7 +22,7 @@ File format -- each value is either a bare model name or dev-ralf's own
 `tool:model:effort` composite (`reasona_dev.model_config._split_composite`
 parses either shape identically to a flag or env var):
 
-    models:
+    dev-models:
       dev: claude:sonnet:high
       review: claude:opus:high
       recheck: claude:sonnet:high
@@ -22,9 +30,14 @@ parses either shape identically to a flag or env var):
       verify: claude:sonnet:high
       final_audit: claude:opus:high
       dev_escalation: claude:opus:high
+    plan-models:
+      ...   # reasona-plan's own future top-level key, same file, no collision
 
-Any subset of roles may be present; missing keys simply fall through to the
-next layer in reasona_dev.model_config's priority chain.
+Any subset of roles may be present under `dev-models`; missing keys simply
+fall through to the next layer in reasona_dev.model_config's priority
+chain. reasona-dev never reads or writes `plan-models` -- that key exists
+here purely as documentation of the shape this file is expected to grow
+into.
 """
 
 from __future__ import annotations
@@ -33,7 +46,7 @@ from pathlib import Path
 
 import yaml
 
-GLOBAL_CONFIG_PATH = Path.home() / ".reasona" / "config.yaml"
+GLOBAL_CONFIG_PATH = Path.home() / ".reasona" / "reasona.yaml"
 
 
 def _load_yaml(path: Path) -> dict:
@@ -51,17 +64,21 @@ def load_global() -> dict:
 
 
 def load_project(workdir: str | Path) -> dict:
-    """`<workdir>/.reasona/config.yaml` -- same `workdir` that
+    """`<workdir>/.reasona/reasona.yaml` -- same `workdir` that
     `reasona_dev.plan_compile.compile_to_bernstein_plan()` anchors the audit
     trail to (docs/ARCHITECTURE.md §0.1), never reasona-dev's own install
     location.
     """
-    return _load_yaml(Path(workdir) / ".reasona" / "config.yaml")
+    return _load_yaml(Path(workdir) / ".reasona" / "reasona.yaml")
 
 
 def model_for(role: str, cfg: dict) -> str | None:
-    """Extract `models.<role>` from a loaded config dict, or None if absent."""
-    models = cfg.get("models")
+    """Extract `dev-models.<role>` from a loaded config dict, or None if
+    absent. Reads `dev-models` specifically (not `plan-models`, not a
+    generic `models`) -- see module docstring for why this file is
+    key-namespaced per product rather than split into one file each.
+    """
+    models = cfg.get("dev-models")
     if not isinstance(models, dict):
         return None
     val = models.get(role)

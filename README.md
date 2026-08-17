@@ -48,17 +48,18 @@ $ python3 -c "from bernstein.adapters.registry import get_adapter; \
 | `agy`/`ocr` adapters | `agy` turned out to already be a native Bernstein adapter ("Antigravity CLI") -- same binary and flags dev-ralf's `dispatch.md` already documents. Only `ocr` needed writing; `reasona_dev/adapters/ocr.py` is registered via `bernstein.adapters` entry points and resolves through Bernstein's own `get_adapter()`. |
 | Per-role model config | Ported dev-ralf's `flag > env var > fallback > default` priority chain (`DEV_RALF_*` -> `REASONA_DEV_*`) as `reasona_dev/model_config.py`, since bandit routing being off means nothing else picks a model. Caught and fixed a real asymmetry bug in the first draft: `bugbot`/`final_audit` must fall back only to the `VERIFY_MODEL` **env var/config slot**, never to `verify`'s fully-resolved value -- only `recheck` inherits `review`'s resolved outcome. |
 | **CREDIT-BURN on retry -- NOT resolved** | `_choose_retry_escalation` (`core/tasks/task_lifecycle.py`) is a fourth, independent model-selection path: bumps the model up `haiku -> sonnet -> opus` on a task's 2nd+ retry. `role_model_policy` only guards non-Claude-adapter roles (confirmed via docstring); the `terminal_reason == "model_error"` exemption is unreachable (nothing in the package ever sets that value); `max_retries` has no config surface in either `plan_schema.py` or `seed_config.py`. See `docs/ARCHITECTURE.md` §3.6 for the full trace and candidate next steps. |
-| Persistent config, no env var re-export | Added `reasona_dev/config_file.py` -- a two-layer cascade (`~/.reasona/config.yaml` global, `<workdir>/.reasona/config.yaml` project/local, mirroring Bernstein's own pattern) sitting between the env var and the hardcoded default in `model_config.py`'s priority chain. Anchored to the same `workdir` as everything else (never reasona-dev's own install location, since there won't be one once deployed). |
+| Persistent config, no env var re-export | Added `reasona_dev/config_file.py` -- a two-layer cascade (`~/.reasona/reasona.yaml` global, `<workdir>/.reasona/reasona.yaml` project/local, mirroring Bernstein's own pattern) sitting between the env var and the hardcoded default in `model_config.py`'s priority chain. Anchored to the same `workdir` as everything else (never reasona-dev's own install location, since there won't be one once deployed). |
 
 ## Layout
 
 ```
-docs/ARCHITECTURE.md      4-layer architecture, verified against installed Bernstein 3.15.1 source
-bernstein.yaml             THIS repo's own committed project config (model_fallback correctly emptied,
-                            cascade_router/bandit notes, role_model_policy) -- committed directly at repo
-                            root, not under .reasona/ (see "bernstein.yaml for target repos" below for why)
-.reasona/config.yaml        THIS repo's own committed model_config layer -- real dev-ralf-ported values
-templates/review.yaml      static example only -- review_pipeline.py generates the real one
+docs/ARCHITECTURE.md       4-layer architecture, verified against installed Bernstein 3.15.1 source
+.bernstein/bernstein.yaml   THIS repo's own committed project config (model_fallback correctly emptied,
+                             cascade_router/bandit notes, role_model_policy) -- see "bernstein.yaml for
+                             target repos vs. this repo's own" below for why it lives under .bernstein/
+.reasona/reasona.yaml        THIS repo's own committed model_config layer, under the `dev-models:` key
+                              (a future reasona-plan gets its own `plan-models:` key, same file)
+templates/review.yaml       static example only -- review_pipeline.py generates the real one
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml, auto-wires completion_signals, anchors to workdir
   model_config.py            per-role model/adapter/effort priority chain + CONDUCTOR-COLLAPSE audit trail
@@ -98,48 +99,47 @@ reasona-dev render-review -o review.yaml --workdir <target-repo> --bounded
 Role flag names mirror dev-ralf's own one-to-one: `--dev`, `--review`,
 `--recheck`, `--bugbot`, `--verify`, `--final-audit`.
 
-`compile-plan` also bootstraps and keeps `<workdir>/bernstein.yaml` in
-sync as a side effect (`reasona_dev/bernstein_config.py`) -- see the next
-section for the mechanism and why THIS repo doesn't need it for itself.
+`compile-plan` also bootstraps and keeps `<workdir>/.bernstein/
+bernstein.yaml` in sync as a side effect (`reasona_dev/bernstein_config.py`)
+-- see the next section for the mechanism.
 
 ## `bernstein.yaml` for target repos vs. this repo's own
 
-Bernstein's own config loader (`cli/helpers.py:find_seed_file()`) only
-ever reads a project-local `bernstein.yaml`/`.bernstein/bernstein.yaml` in
-the invoking cwd. `bernstein run` alone accepts an explicit `--seed PATH`
-override; bare `bernstein` ("run from bernstein.yaml or backlog") and
-`bernstein doctor` have no such flag and always fall through to
-`find_seed_file()` -- so a real, project-local `bernstein.yaml` has to
-exist on disk for every ad-hoc `bernstein` invocation to work, `--seed` or
-not (confirmed by reading the loader directly; see `docs/ARCHITECTURE.md`
-§3.5.3 for the full trace). A truly global `bernstein.yaml` isn't
-something Bernstein itself supports.
+Bernstein's own config loader (`cli/helpers.py:find_seed_file()`) checks,
+in order, `.bernstein/bernstein.yaml` THEN the repo-root `bernstein.yaml`
+in the invoking cwd -- both cwd-relative, no home-directory fallback.
+`bernstein run` alone accepts an explicit `--seed PATH` override; bare
+`bernstein` ("run from bernstein.yaml or backlog") and `bernstein doctor`
+have no such flag and always fall through to `find_seed_file()` -- so a
+real, project-local file has to exist at one of those two locations for
+every ad-hoc `bernstein` invocation to work, `--seed` or not (confirmed by
+reading the loader directly; see `docs/ARCHITECTURE.md` §3.5.3 for the
+full trace). A truly global `bernstein.yaml` isn't something Bernstein
+itself supports.
 
-For every OTHER target repository, `reasona_dev.bernstein_config.
-ensure_bernstein_yaml()` bootstraps that project-local file automatically
-(never overwriting one that's already there), sourced from:
+`reasona_dev.bernstein_config.ensure_bernstein_yaml()` bootstraps
+`<workdir>/.bernstein/bernstein.yaml` automatically for any target repo
+that has neither location already (checked at both; whichever one already
+exists is left completely untouched, never duplicated), sourced from:
 
 ```
-<workdir>/bernstein.yaml              what Bernstein reads
-<workdir>/.reasona/bernstein.yaml     project-local template (checked first)
-~/.reasona/bernstein.yaml             global template (checked second)
+<workdir>/.bernstein/bernstein.yaml   what Bernstein reads FIRST -- the bootstrap target
+<workdir>/bernstein.yaml              legacy location Bernstein also reads -- left alone if present
+<workdir>/.reasona/bernstein.yaml     project-local template (checked first when bootstrapping)
+~/.reasona/bernstein.yaml             global template (checked second when bootstrapping)
 ```
 
-**This repo's own `bernstein.yaml` is just committed directly at the repo
-root** -- the plain "already has one, so leave it alone" case above, not
-the template cascade. That's deliberate: `bernstein.yaml`, unlike
-`.reasona/config.yaml` (see below), has no `--seed`-independent fallback
-for `bernstein doctor`/bare `bernstein`, so keeping it anywhere other than
-the root would break those commands when run directly against this repo
-(exactly what this session's own verification loop relies on throughout
-`docs/ARCHITECTURE.md`).
+**This repo uses the `.bernstein/` layout for itself too** --
+`.bernstein/bernstein.yaml` is committed directly, the plain "already has
+one, so leave it alone" case above, not the template cascade. `.bernstein/`
+is preferred over the legacy repo-root location because
+`find_seed_file()` checks it first and it keeps the repo root tidier.
 
-`.reasona/config.yaml`, by contrast, IS committed under `.reasona/` here --
-that file is `reasona_dev.config_file`'s own project-local model-config
-layer (not something Bernstein itself ever reads), so it carries none of
-`bernstein.yaml`'s constraint. It wins over whatever's in the machine's
-`~/.reasona/config.yaml`, so running this repo's tests or tooling doesn't
-depend on the operator's own global config.
+`.reasona/reasona.yaml` is a different, unrelated file: it's
+`reasona_dev.config_file`'s own project-local model-config layer (never
+read by Bernstein itself), committed here under its `dev-models:` key so
+running this repo's tests or tooling doesn't depend on whatever's in the
+operator's own `~/.reasona/reasona.yaml`.
 
 ## Next
 

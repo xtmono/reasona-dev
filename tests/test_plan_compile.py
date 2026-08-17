@@ -98,9 +98,8 @@ def test_audit_trail_anchors_to_workdir_not_caller_cwd(tmp_path):
     expected = target_repo / ".reasona" / "model_config.json"
     assert expected.exists()
     # Not "cwd/.reasona doesn't exist at all" -- this repo now commits its
-    # own .reasona/{bernstein.yaml,config.yaml} templates (see README
-    # "Bootstrapping this repo's own bernstein.yaml"). The actual invariant
-    # is that THIS call's audit trail never lands there.
+    # own .reasona/reasona.yaml (see README). The actual invariant is that
+    # THIS call's audit trail never lands there.
     assert not (Path.cwd() / ".reasona" / "model_config.json").exists()
 
 
@@ -133,7 +132,7 @@ def test_bernstein_yaml_bootstrapped_from_global_template(tmp_path, monkeypatch)
         write_audit_trail=False,
     )
 
-    assert (target_repo / "bernstein.yaml").read_text() == "goal: from-global-template\n"
+    assert (target_repo / ".bernstein" / "bernstein.yaml").read_text() == "goal: from-global-template\n"
 
 
 def test_bernstein_yaml_disabled_writes_nothing(tmp_path, monkeypatch):
@@ -149,7 +148,7 @@ def test_bernstein_yaml_disabled_writes_nothing(tmp_path, monkeypatch):
         write_audit_trail=False, write_bernstein_yaml=False,
     )
 
-    assert not (target_repo / "bernstein.yaml").exists()
+    assert not (target_repo / ".bernstein" / "bernstein.yaml").exists()
 
 
 def test_policy_flags_reach_role_model_policy_sync(tmp_path, monkeypatch):
@@ -172,5 +171,5 @@ def test_policy_flags_reach_role_model_policy_sync(tmp_path, monkeypatch):
         policy_flags={"bugbot": "codex:o1:max"},
     )
 
-    text = (target_repo / "bernstein.yaml").read_text()
+    text = (target_repo / ".bernstein" / "bernstein.yaml").read_text()
     assert "bugbot:\n    provider: codex" in text

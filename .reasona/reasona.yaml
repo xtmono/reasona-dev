@@ -1,0 +1,29 @@
+# Committed, project-local reasona_dev.model_config layer for THIS repo --
+# see README for why a development repo uses this instead of relying on
+# whatever happens to be in the operator's own ~/.reasona/reasona.yaml.
+# reasona_dev.config_file's own priority (project cfg beats global cfg)
+# means this file wins whenever reasona-dev tooling is run with `--workdir`
+# pointing at this repo (or no `--workdir` at all, from inside it).
+#
+# Named reasona.yaml, not reasona-dev.yaml or a generic config.yaml --
+# .reasona/ is the shared namespace this whole product family lives under,
+# and this one file is meant to be shared too: a future reasona-plan (the
+# plan-ralf successor) will read/write the same reasona.yaml, under its own
+# `plan-models:` top-level key next to this project's `dev-models:` below --
+# see reasona_dev/config_file.py.
+#
+# Content mirrors the real dev-ralf env-var setup this project was ported
+# from (tool:model:effort composite, same format env vars/flags/this file
+# all accept identically -- reasona_dev/model_config.py).
+#
+# bugbot: dev-ralf ran bugbot on claude:opus:high -- NOT reasona-dev's
+# hardcoded fallback (kilo adapter / deepseek-v4-pro), which only applies
+# when nothing overrides it. This file is that override.
+dev-models:
+  dev: claude:sonnet:high
+  review: claude:opus:high,ocr
+  recheck: claude:sonnet:high,ocr
+  bugbot: claude:opus:high
+  verify: claude:sonnet:high
+  final_audit: claude:opus:high
+  dev_escalation: claude:opus:high

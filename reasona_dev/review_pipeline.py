@@ -35,7 +35,7 @@ def render(
 ) -> dict:
     """Build the pipeline dict. Resolves config itself if not supplied.
 
-    `workdir` is forwarded to `resolve_all()` so `<workdir>/.reasona/config.yaml`
+    `workdir` is forwarded to `resolve_all()` so `<workdir>/.reasona/reasona.yaml`
     is consulted -- the same TARGET-repo anchor `plan_compile.
     compile_to_bernstein_plan()` uses (docs/ARCHITECTURE.md §0.1), never
     reasona-dev's own install location. Defaults to `Path.cwd()` like every
