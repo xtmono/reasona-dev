@@ -9,6 +9,23 @@ def test_render_uses_resolved_models_not_hardcoded():
     assert reviewer["model"] == "opus-custom"
 
 
+def test_adapter_and_effort_come_from_resolved_spec_not_literals():
+    # These used to be hardcoded literals ("claude"/"kilo", "high") in
+    # review_pipeline.py, bypassing the priority chain entirely -- a
+    # composite env var must now be able to move an agent off its default
+    # adapter/effort, same as it can move its model.
+    resolved = resolve_all(load_config_files=False, env={"REASONA_DEV_BUGBOT_MODEL": "codex:o1:max"})
+    pipeline = render(resolved)
+    bugbot = next(a for a in pipeline["stages"][1]["agents"] if a["role"] == "bugbot")
+    assert bugbot["model"] == "o1"
+    assert bugbot["adapter"] == "codex"
+    assert bugbot["effort"] == "max"
+
+    compliance = next(a for a in pipeline["stages"][1]["agents"] if a["role"] == "compliance")
+    assert compliance["adapter"] == "claude"
+    assert compliance["effort"] == "high"
+
+
 def test_strategy_all_expresses_merge_rule():
     pipeline = render(resolve_all(load_config_files=False, env={}))
     for stage in pipeline["stages"]:
@@ -31,7 +48,10 @@ def test_bugbot_and_compliance_use_resolved_values():
 
 
 def test_bounded_recheck_drops_scan_stage_and_uses_recheck_model():
-    resolved = resolve_all(load_config_files=False, env={"REASONA_DEV_RECHECK_MODEL": "sonnet-light"})
+    resolved = resolve_all(load_config_files=False, env={"REASONA_DEV_RECHECK_MODEL": "codex:o1:max"})
     pipeline = render_bounded_recheck(resolved)
     assert len(pipeline["stages"]) == 1
-    assert pipeline["stages"][0]["agents"][0]["model"] == "sonnet-light"
+    reviewer = pipeline["stages"][0]["agents"][0]
+    assert reviewer["model"] == "o1"
+    assert reviewer["adapter"] == "codex"
+    assert reviewer["effort"] == "max"

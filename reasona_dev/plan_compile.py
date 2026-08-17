@@ -7,6 +7,8 @@ the real schema in the installed Bernstein 3.15.1 package
   plan.yaml:
     name: str
     description: str
+    cli: str                 # plan-WIDE adapter -- no per-step override exists (checked
+                              # against plan_schema.py's _STEP_SCHEMA: no adapter/cli key there)
     stages:
       - name: str            # unique
         depends_on: [str]    # stage names
@@ -14,6 +16,8 @@ the real schema in the installed Bernstein 3.15.1 package
           - title: str
             role: str
             files: [str]
+            model: str
+            effort: str
             completion_signals: [...]
 
 `stages[].steps[]` run IN PARALLEL within a stage; there is no native
@@ -23,6 +27,12 @@ one stage with one "implement" step; the develop -> verify -> fix ->
 recheck loop is NOT pre-declared here -- it is driven at runtime by
 `reasona_dev.cycle_gate.evaluate()` inside the `on_pre_task_create` hook,
 which spawns follow-up tasks as findings demand.
+
+`dev`'s resolved adapter is written to the plan-level `cli:` key -- the
+step schema has `model`/`effort` fields but no per-step adapter override,
+so this is the only place in plan.yaml Bernstein lets an adapter be named.
+Since this project only ever compiles one role (`dev`) into plan.yaml
+steps, a single plan-wide `cli:` is not a loss of expressiveness here.
 """
 
 from __future__ import annotations
@@ -186,7 +196,8 @@ def compile_to_bernstein_plan(
         }
         if u.files:
             step["files"] = u.files
-        step["model"] = resolved_dev.value
+        step["model"] = resolved_dev.model
+        step["effort"] = resolved_dev.effort
         stage: dict = {
             "name": stage_name,
             "steps": [step],
@@ -198,6 +209,7 @@ def compile_to_bernstein_plan(
     return {
         "name": plan_name,
         "description": description,
+        "cli": resolved_dev.adapter,
         "stages": stages,
     }
 

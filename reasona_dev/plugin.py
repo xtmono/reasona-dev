@@ -124,6 +124,7 @@ class ReasonaGatePlugin:
             stage=entry.get("stage", "review"),
             recurrence=recurrence,
             inconclusive_attempts=entry.get("inconclusive_attempts", 0),
+            escalation_model=resolve_all()["dev_escalation"].model,
         )
 
         entry["budget"] = budget.__dict__
@@ -164,7 +165,7 @@ def _expected_models(role: str) -> set[str]:
     if not config_roles:
         return set()
     resolved = resolve_all()
-    return {resolved[r].value for r in config_roles if r in resolved}
+    return {resolved[r].model for r in config_roles if r in resolved}
 
 
 def _record_divergence(*, session_id: str, role: str, expected: set[str], actual: str) -> None:

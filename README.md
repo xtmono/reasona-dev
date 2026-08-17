@@ -28,7 +28,7 @@ currently hold. Install, tests, and real round-trips against the actual
 `bernstein` CLI all pass as of this commit:
 
 ```
-$ .venv/bin/python -m pytest tests/ -v          # 65 passed
+$ .venv/bin/python -m pytest tests/ -v          # 77 passed
 $ .venv/bin/bernstein plan validate <compiled plan.yaml>          # "Plan is valid."
 $ .venv/bin/bernstein review --pipeline <rendered review.yaml> --validate-only  # "Pipeline OK"
 $ .venv/bin/bernstein doctor                    # "Plugin loading: no errors"
@@ -67,7 +67,7 @@ reasona_dev/
   squash.py                        squash message builder + guard
   plugin.py                         pluggy hookimpl (on_pre_task_create) -- next-fix-task gating only
   adapters/ocr.py                    OcrAdapter, registered via bernstein.adapters entry points
-tests/                      pytest, 65 cases, all passing
+tests/                      pytest, 77 cases, all passing
 ```
 
 ## Setup

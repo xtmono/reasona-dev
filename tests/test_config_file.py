@@ -31,13 +31,13 @@ def test_project_config_beats_global_config():
     project_cfg = {"models": {"dev": "opus-project"}}
     global_cfg = {"models": {"dev": "opus-global"}}
     r = resolve("dev", env={}, project_cfg=project_cfg, global_cfg=global_cfg)
-    assert r.value == "opus-project"
+    assert r.model == "opus-project"
     assert r.source == "config:project:dev"
 
 
 def test_global_config_used_when_project_silent():
     r = resolve("dev", env={}, project_cfg={}, global_cfg={"models": {"dev": "opus-global"}})
-    assert r.value == "opus-global"
+    assert r.model == "opus-global"
     assert r.source == "config:global:dev"
 
 
@@ -48,13 +48,13 @@ def test_env_var_beats_both_config_layers():
         project_cfg={"models": {"dev": "from-project"}},
         global_cfg={"models": {"dev": "from-global"}},
     )
-    assert r.value == "from-env"
+    assert r.model == "from-env"
     assert r.source == "env:REASONA_DEV_DEV_MODEL"
 
 
 def test_config_beats_hardcoded_default():
     r = resolve("dev", env={}, project_cfg={}, global_cfg={"models": {"dev": "opus-global"}})
-    assert r.value != "sonnet"  # would be the hardcoded default without config
+    assert r.model != "sonnet"  # would be the hardcoded default without config
 
 
 def test_bugbot_falls_back_to_verify_config_slot_not_verifys_resolved_value():
@@ -63,7 +63,7 @@ def test_bugbot_falls_back_to_verify_config_slot_not_verifys_resolved_value():
     # come from a --verify flag that must NOT propagate to bugbot).
     project_cfg = {"models": {"verify": "sonnet-from-config"}}
     r = resolve("bugbot", env={}, project_cfg=project_cfg, global_cfg={})
-    assert r.value == "sonnet-from-config"
+    assert r.model == "sonnet-from-config"
     assert "via verify fallback" in r.source
 
 
@@ -71,11 +71,11 @@ def test_recheck_config_slot_beats_review_fallback():
     review = resolve("review", env={}, project_cfg={}, global_cfg={})
     project_cfg = {"models": {"recheck": "sonnet-recheck-config"}}
     r = resolve("recheck", env={}, project_cfg=project_cfg, global_cfg={}, review_resolved=review)
-    assert r.value == "sonnet-recheck-config"
+    assert r.model == "sonnet-recheck-config"
     assert r.source == "config:project:recheck"
 
 
 def test_flag_beats_config_file():
     r = resolve("dev", flag="haiku", project_cfg={"models": {"dev": "opus"}}, env={})
-    assert r.value == "haiku"
+    assert r.model == "haiku"
     assert r.source == "flag"

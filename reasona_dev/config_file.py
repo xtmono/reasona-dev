@@ -10,15 +10,18 @@ This is a SEPARATE cascade from Bernstein's own six-layer one
 `REASONA_DEV_*`-equivalent role->model defaults; it never touches
 `bernstein.yaml` itself.
 
-File format:
+File format -- each value is either a bare model name or dev-ralf's own
+`tool:model:effort` composite (`reasona_dev.model_config._split_composite`
+parses either shape identically to a flag or env var):
 
     models:
-      dev: sonnet
-      review: opus
-      recheck: sonnet
-      bugbot: deepseek-v4-pro
-      verify: sonnet
-      final_audit: opus
+      dev: claude:sonnet:high
+      review: claude:opus:high
+      recheck: claude:sonnet:high
+      bugbot: kilo:deepseek-v4-pro:high
+      verify: claude:sonnet:high
+      final_audit: claude:opus:high
+      dev_escalation: claude:opus:high
 
 Any subset of roles may be present; missing keys simply fall through to the
 next layer in reasona_dev.model_config's priority chain.

@@ -25,7 +25,9 @@ def test_compile_plan_dev_flag_reaches_generated_model(tmp_path):
 
     audit = json.loads((workdir / ".reasona" / "model_config.json").read_text())
     assert audit["dev"]["source"] == "flag"
-    assert audit["dev"]["value"] == "opus"
+    assert audit["dev"]["model"] == "opus"
+    assert audit["dev"]["adapter"] == "claude"
+    assert compiled["cli"] == "claude"
 
 
 def test_compile_plan_without_flag_uses_default(tmp_path):

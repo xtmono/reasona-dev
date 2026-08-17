@@ -43,10 +43,18 @@ def test_compiles_to_valid_stage_shape():
 
 
 def test_dev_model_defaults_to_resolved_sonnet():
+    from reasona_dev.model_config import ResolvedModel
+
     plan = compile_to_bernstein_plan(
-        PLAN, plan_name="sample", description="test plan", write_audit_trail=False
+        PLAN,
+        plan_name="sample",
+        description="test plan",
+        dev_model=ResolvedModel("dev", "sonnet", "claude", "high", "default"),
+        write_audit_trail=False,
     )
     assert plan["stages"][0]["steps"][0]["model"] == "sonnet"
+    assert plan["stages"][0]["steps"][0]["effort"] == "high"
+    assert plan["cli"] == "claude"
 
 
 def test_explicit_dev_model_overrides_default():
@@ -56,10 +64,12 @@ def test_explicit_dev_model_overrides_default():
         PLAN,
         plan_name="sample",
         description="test plan",
-        dev_model=ResolvedModel("dev", "opus", "flag"),
+        dev_model=ResolvedModel("dev", "opus", "claude", "high", "flag"),
         write_audit_trail=False,
     )
     assert plan["stages"][0]["steps"][0]["model"] == "opus"
+    assert plan["stages"][0]["steps"][0]["effort"] == "high"
+    assert plan["cli"] == "claude"
 
 
 def test_no_pr_markers_falls_back_to_single_unit():

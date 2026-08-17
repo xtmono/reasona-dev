@@ -3,7 +3,11 @@
 Replaces the previously-hardcoded `templates/review.yaml` (literal model
 names, no override mechanism) with a generator driven by
 `reasona_dev.model_config.resolve_all()` -- the same priority chain
-(flag > env var > fallback > default) that governs every other role.
+(flag > env var > project config > global config > default) that governs
+every other role. Every agent's `adapter`/`effort`, not just its `model`,
+now comes from the resolved spec too -- these used to be hardcoded literals
+here ("claude"/"kilo", "high") that never went through the priority chain
+at all; that gap is what this rewrite closes.
 
 Schema verified against installed Bernstein 3.15.1
 (`core/quality/review_pipeline/schema.py`): `version`, `name`,
@@ -56,10 +60,10 @@ def render(
                 "agents": [
                     {
                         "role": "reviewer",
-                        "model": resolved["review"].value,
-                        "adapter": "claude",
+                        "model": resolved["review"].model,
+                        "adapter": resolved["review"].adapter,
                         "prompt_template": "prompts/review.md",
-                        "effort": "high",
+                        "effort": resolved["review"].effort,
                     },
                     {
                         # ocr is stateless/tool-native; no LLM model slot.
@@ -85,17 +89,17 @@ def render(
                 "agents": [
                     {
                         "role": "bugbot",
-                        "model": resolved["bugbot"].value,
-                        "adapter": "kilo",
+                        "model": resolved["bugbot"].model,
+                        "adapter": resolved["bugbot"].adapter,
                         "prompt_template": "prompts/bugbot.md",
-                        "effort": "high",
+                        "effort": resolved["bugbot"].effort,
                     },
                     {
                         "role": "compliance",
-                        "model": resolved["verify"].value,
-                        "adapter": "claude",
+                        "model": resolved["verify"].model,
+                        "adapter": resolved["verify"].adapter,
                         "prompt_template": "prompts/compliance.md",
-                        "effort": "high",
+                        "effort": resolved["verify"].effort,
                     },
                 ],
             },
@@ -120,7 +124,9 @@ def render_bounded_recheck(
     resolved = resolved if resolved is not None else resolve_all(workdir=workdir, flags=flags)
     pipeline = render(resolved)
     pipeline["name"] = "reasona-dev-bounded-recheck"
-    pipeline["stages"][0]["agents"][0]["model"] = resolved["recheck"].value
+    pipeline["stages"][0]["agents"][0]["model"] = resolved["recheck"].model
+    pipeline["stages"][0]["agents"][0]["adapter"] = resolved["recheck"].adapter
+    pipeline["stages"][0]["agents"][0]["effort"] = resolved["recheck"].effort
     pipeline["stages"][0]["agents"][0]["prompt_template"] = "prompts/recheck.md"
     # bounded recheck never re-runs the scan stage -- only verify results matter here.
     pipeline["stages"] = pipeline["stages"][:1]

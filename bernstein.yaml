@@ -89,13 +89,26 @@ model_fallback:
 # this file, so no other role is expected to appear. If those features are
 # ever turned on, their auto-spawned task roles must be added here too, or
 # their task creation will start failing.
+#
+# WARNING -- this is a hand-maintained mirror of reasona_dev.model_config's
+# resolved `adapter` per role, and CAN drift out of sync the moment an
+# operator overrides a role's adapter in `~/.reasona/config.yaml` or
+# `<workdir>/.reasona/config.yaml` (e.g. this project's own bugbot moved
+# from the kilo/deepseek-v4-pro default to claude:opus:high in
+# ~/.reasona/config.yaml -- this section had to be hand-updated to match,
+# and would have gone silently stale otherwise). `tests/test_bernstein_yaml_consistency.py`
+# asserts every `provider` below equals `resolve_all()["<role>"].adapter`
+# under the SAME config layers this file assumes (no project/env override)
+# specifically to catch that drift -- if you change a role's adapter in a
+# config.yaml, this section must be updated to match, and the test will
+# fail until it is.
 role_model_policy:
   backend:
     provider: claude
   reviewer:
     provider: claude
   bugbot:
-    provider: kilo
+    provider: claude
   compliance:
     provider: claude
 
