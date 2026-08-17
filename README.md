@@ -61,7 +61,6 @@ docs/ARCHITECTURE.md       4-layer architecture, verified against installed Bern
                               (a future reasona-plan gets its own `plan-models:` key, same file)
 .reasona/bernstein-template.yaml   committed copy of .bernstein/bernstein.yaml, kept purely as a real
                                      example of bernstein_config's project-local template shape
-samples/review.yaml         static example only, not read by any code (see review_pipeline.py -- DEPRECATED)
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step), anchors to workdir
   pr_cycle.py                 dev-ralf-faithful develop -> verify -> bug+compliance scan driver (worker.md)
@@ -70,8 +69,6 @@ reasona_dev/
   model_config.py            per-role model/adapter/effort priority chain + CONDUCTOR-COLLAPSE audit trail
   config_file.py              reasona-dev's own 2-layer config cascade (~/.reasona -> <workdir>/.reasona)
   bernstein_config.py          bootstraps + syncs a target repo's bernstein.yaml (see "Bootstrapping" below)
-  review_pipeline.py          DEPRECATED -- bernstein review --pipeline can't run agentic/role-specific
-                                prompts (docs/ARCHITECTURE.md §3.5.4); superseded by pr_cycle.py
   finding_adapter.py           || text contract AND external-skill KV contract (`parse_kv_contract`) parsers
   cycle_gate.py                  recheck routing, escalation, budget, fingerprints
   gate_check.py                   completion_signals entry point -- the actual merge gate
@@ -97,13 +94,15 @@ until this: `reasona-dev` is now an actual installed command
 global config > default` chain typed at a real shell.
 
 ```bash
-reasona-dev compile-plan plan.md -o plan.yaml --workdir <target-repo> --dev opus
-reasona-dev render-review -o review.yaml --workdir <target-repo> --bugbot deepseek-v4-pro
-reasona-dev render-review -o review.yaml --workdir <target-repo> --bounded
+reasona-dev compile-plan plan.md -o plan.yaml --workdir <target-repo> --dev opus --bugbot codex:o1:max
 ```
 
 Role flag names mirror dev-ralf's own one-to-one: `--dev`, `--review`,
-`--recheck`, `--bugbot`, `--verify`, `--final-audit`.
+`--recheck`, `--bugbot`, `--verify`, `--final-audit`. `compile-plan` is now
+the ONLY subcommand -- review/bugbot/compliance dispatch went from a
+static `render-review`-generated YAML to `reasona_dev.pr_cycle`'s runtime
+driver (see below), so every role's flag still reaches `role_model_policy`
+sync through `compile-plan`, just not through a second subcommand anymore.
 
 `compile-plan` also bootstraps and keeps `<workdir>/.bernstein/
 bernstein.yaml` in sync as a side effect (`reasona_dev/bernstein_config.py`)

@@ -13,8 +13,10 @@ Subcommands:
     reasona-dev compile-plan <plan.md> -o plan.yaml [--workdir DIR]
         [--dev MODEL] [--review MODEL] [--recheck MODEL] [--bugbot MODEL]
         [--verify MODEL] [--final-audit MODEL]
-    reasona-dev render-review -o review.yaml [--bounded] [--workdir DIR]
-        [--review MODEL] [--recheck MODEL] [--bugbot MODEL] [--verify MODEL]
+
+(`render-review`, which rendered a `bernstein review --pipeline` YAML, was
+removed with `review_pipeline.py` -- see docs/ARCHITECTURE.md §3.5.4.
+review/bugbot/compliance dispatch now goes through `reasona_dev.pr_cycle`.)
 
 Every role flag mirrors dev-ralf's own flag names one-to-one
 (dev-ralf-renewal-claude.md §3.7: `--dev`, `--review`, `--recheck`,
@@ -38,7 +40,6 @@ import sys
 from pathlib import Path
 
 from reasona_dev.plan_compile import write_plan_yaml
-from reasona_dev.review_pipeline import write_review_yaml
 
 _ROLE_FLAGS = ("dev", "review", "recheck", "bugbot", "verify", "final_audit")
 
@@ -75,13 +76,6 @@ def _cmd_compile_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_render_review(args: argparse.Namespace) -> int:
-    flags = _collect_flags(args, ("review", "recheck", "bugbot", "verify", "final_audit"))
-    write_review_yaml(args.out, bounded=args.bounded, workdir=args.workdir, flags=flags)
-    print(f"wrote {args.out}", file=sys.stderr)
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reasona-dev")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -94,13 +88,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
     _add_role_flags(p_plan, _ROLE_FLAGS)
     p_plan.set_defaults(func=_cmd_compile_plan)
-
-    p_review = sub.add_parser("render-review", help="Render the review.yaml pipeline")
-    p_review.add_argument("-o", "--out", required=True, help="Output path for review.yaml")
-    p_review.add_argument("--bounded", action="store_true", help="Render the bounded-recheck pipeline instead")
-    p_review.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
-    _add_role_flags(p_review, ("review", "recheck", "bugbot", "verify", "final_audit"))
-    p_review.set_defaults(func=_cmd_render_review)
 
     return parser
 
