@@ -1,7 +1,9 @@
 from reasona_dev.finding_adapter import (
     Disposition,
     RoleStatus,
+    Severity,
     merge,
+    parse_kv_contract,
     parse_ocr_result,
     parse_text_contract,
 )
@@ -99,3 +101,88 @@ def test_merge_inconclusive_dominates():
     passing = parse_text_contract("VERDICT: PASS\n")
     merged = merge(inc, passing)
     assert merged.role_status is RoleStatus.INCONCLUSIVE
+
+
+KV_SAMPLE = """\
+=== ext-bugbot RESULT ===
+VERDICT: FAIL
+COUNT_BLOCKING=1
+COUNT_NON_BLOCKING=1
+COUNT_CRITICAL=0
+COUNT_HIGH=1
+COUNT_MEDIUM=1
+COUNT_LOW=0
+BLOCKING_JSON=[{"file": "src/session.rs", "line": 142, "severity": "high", "title": "token reuse", "description": "the previous refresh token is not rejected after rotation", "additional_locations": []}]
+NON_BLOCKING_JSON=[{"file": "src/util.rs", "line": 88, "severity": "medium", "title": "boundary handling", "description": "TTL boundary is off by one", "additional_locations": []}]
+=== END ===
+"""
+
+
+def test_kv_contract_parses_blocking_and_non_blocking():
+    r = parse_kv_contract(KV_SAMPLE)
+    assert r.role_status is RoleStatus.COMPLETE
+    assert len(r.must_fix) == 1
+    assert len(r.advisory) == 1
+    mf = r.must_fix[0]
+    assert mf.path == "src/session.rs"
+    assert mf.line == 142
+    assert mf.severity == Severity.HIGH
+    assert mf.disposition is Disposition.MUST_FIX
+
+
+def test_kv_contract_gate_is_fix_required():
+    assert parse_kv_contract(KV_SAMPLE).gate() == "FIX_REQUIRED"
+
+
+def test_kv_contract_must_fix_marked_contract_incomplete():
+    # worker.md's KV wire shape has no contract/scenario/fix breakdown --
+    # every MUST_FIX from it is inherently missing that evidence.
+    mf = parse_kv_contract(KV_SAMPLE).must_fix[0]
+    assert mf.contract_incomplete is True
+
+
+def test_kv_contract_zero_findings_pass():
+    text = (
+        "=== ext-bugbot RESULT ===\n"
+        "VERDICT: PASS\n"
+        "COUNT_BLOCKING=0\n"
+        "COUNT_NON_BLOCKING=0\n"
+        "BLOCKING_JSON=[]\n"
+        "NON_BLOCKING_JSON=[]\n"
+        "=== END ===\n"
+    )
+    r = parse_kv_contract(text)
+    assert r.gate() == "PASS"
+    assert r.findings == []
+
+
+def test_kv_contract_missing_block_is_error_not_pass():
+    # worker.md -> *RESULT parsing*: "Missing block ... -> cycle FAIL" --
+    # must never silently read as a clean pass.
+    r = parse_kv_contract("some garbled or truncated output with no RESULT block\n")
+    assert r.role_status is RoleStatus.ERROR
+    assert r.gate() == "ERROR"
+
+
+def test_kv_contract_verdict_mismatch_recorded_not_trusted():
+    text = (
+        "=== ext-bugbot RESULT ===\n"
+        "VERDICT: PASS\n"  # disagrees with a non-empty BLOCKING_JSON below
+        "BLOCKING_JSON=[{\"file\": \"a.rs\", \"line\": 1, \"severity\": \"critical\", "
+        "\"title\": \"x\", \"description\": \"y\", \"additional_locations\": []}]\n"
+        "NON_BLOCKING_JSON=[]\n"
+        "=== END ===\n"
+    )
+    r = parse_kv_contract(text)
+    assert r.contract_mismatch is True
+    assert r.gate() == "FIX_REQUIRED"  # section membership wins, not VERDICT
+
+
+def test_kv_contract_merges_with_text_contract_reviewer():
+    # bugbot (kv) and review (text contract) findings merge through the same
+    # deterministic merge() -- any MUST_FIX from either blocks.
+    bugbot = parse_kv_contract(KV_SAMPLE)
+    review = parse_text_contract("VERDICT: PASS\n")
+    merged = merge(bugbot, review)
+    assert merged.gate() == "FIX_REQUIRED"
+    assert len(merged.must_fix) == 1

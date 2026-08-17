@@ -28,7 +28,7 @@ currently hold. Install, tests, and real round-trips against the actual
 `bernstein` CLI all pass as of this commit:
 
 ```
-$ .venv/bin/python -m pytest tests/ -v          # 89 passed
+$ .venv/bin/python -m pytest tests/ -v          # 114 passed
 $ .venv/bin/bernstein plan validate <compiled plan.yaml>          # "Plan is valid."
 $ .venv/bin/bernstein review --pipeline <rendered review.yaml> --validate-only  # "Pipeline OK"
 $ .venv/bin/bernstein doctor                    # "Plugin loading: no errors"
@@ -61,22 +61,24 @@ docs/ARCHITECTURE.md       4-layer architecture, verified against installed Bern
                               (a future reasona-plan gets its own `plan-models:` key, same file)
 .reasona/bernstein-template.yaml   committed copy of .bernstein/bernstein.yaml, kept purely as a real
                                      example of bernstein_config's project-local template shape
-samples/review.yaml         static example only, not read by any code -- unlike bernstein-template.yaml,
-                              nothing ever copies this; review_pipeline.py generates the real one, and
-                              its output path is always caller-specified (`-o`, no default)
+samples/review.yaml         static example only, not read by any code (see review_pipeline.py -- DEPRECATED)
 reasona_dev/
-  plan_compile.py           plan document -> bernstein plan.yaml, auto-wires completion_signals, anchors to workdir
+  plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step), anchors to workdir
+  pr_cycle.py                 dev-ralf-faithful develop -> verify -> bug+compliance scan driver (worker.md)
+  prompt_profile.py            project/language-selectable review/bugbot/compliance prompts (.reasona/prompts/<profile>/)
+  prompts/generic/               packaged default prompt profile (review/bugbot/compliance/final_audit.md)
   model_config.py            per-role model/adapter/effort priority chain + CONDUCTOR-COLLAPSE audit trail
   config_file.py              reasona-dev's own 2-layer config cascade (~/.reasona -> <workdir>/.reasona)
   bernstein_config.py          bootstraps + syncs a target repo's bernstein.yaml (see "Bootstrapping" below)
-  review_pipeline.py          model_config-driven review.yaml renderer (initial + bounded recheck)
-  finding_adapter.py           || evidence-field text contract parser
+  review_pipeline.py          DEPRECATED -- bernstein review --pipeline can't run agentic/role-specific
+                                prompts (docs/ARCHITECTURE.md §3.5.4); superseded by pr_cycle.py
+  finding_adapter.py           || text contract AND external-skill KV contract (`parse_kv_contract`) parsers
   cycle_gate.py                  recheck routing, escalation, budget, fingerprints
   gate_check.py                   completion_signals entry point -- the actual merge gate
   squash.py                        squash message builder + guard
   plugin.py                         pluggy hookimpl (on_pre_task_create, on_agent_spawned)
   adapters/ocr.py                    OcrAdapter, registered via bernstein.adapters entry points
-tests/                      pytest, 89 cases, all passing
+tests/                      pytest, 114 cases, all passing
 ```
 
 ## Setup
@@ -150,8 +152,35 @@ read by Bernstein itself), committed here under its `dev-models:` key so
 running this repo's tests or tooling doesn't depend on whatever's in the
 operator's own `~/.reasona/reasona.yaml`.
 
+## Prompt profiles
+
+review/bugbot/compliance/final_audit prompts are project- and
+language-specific (dev-ralf's Rust-monorepo setup is Rust-aware and dispatches to
+a target repo's own `ext-bugbot`/`ext-review` skills) -- they live as plain `.md`
+files under a named **profile**, resolved through the same
+flag > env var > project cfg > global cfg > default chain as everything
+else (`reasona_dev/prompt_profile.py`):
+
+```
+<workdir>/.reasona/prompts/<profile>/<role>.md   project-local (e.g. a target repo's own Rust profile)
+~/.reasona/prompts/<profile>/<role>.md           global (an operator's shared profile)
+reasona_dev/prompts/<profile>/<role>.md          packaged with reasona-dev (only "generic" ships today)
+```
+
+Select a profile via `--profile NAME`, `REASONA_DEV_PROFILE`, or
+`dev-profile:` in `reasona.yaml`. An unresolvable profile name returns no
+prompt (never silently falls back to `generic`) -- `pr_cycle.py` aborts
+rather than run with the wrong policy.
+
 ## Next
 
-The remaining work is an end-to-end run: one real PR unit through
-`plan_compile.py` -> `bernstein run` -> the review pipeline -> `gate_check.py`
--> squash merge, on a real repository.
+`reasona_dev/pr_cycle.py` (the dev-ralf-faithful develop -> verify ->
+bug+compliance scan driver, see `docs/ARCHITECTURE.md` §3.5.4) is built and
+unit-tested, but its `run_role()` boundary -- the actual `bernstein run`
+subprocess dispatch -- has NOT been run against a live server yet; that's
+real agent budget on a real repository, deliberately deferred. The
+remaining work is exactly that: one real PR unit through `plan_compile.py`'s
+cycle-0 dev step -> `pr_cycle.run_pr_cycle()` -> `gate_check.py` -> squash
+merge, on a real repository -- plus the still-unbuilt tail
+(`sync-main -> /gh-pr -> /gh-review -> up-to-date gate -> final_audit`,
+worker.md's last third) and bounded (vs. always-full) recheck routing.

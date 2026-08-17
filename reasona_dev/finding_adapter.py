@@ -30,6 +30,7 @@ source of truth regardless of what the model actually wrote):
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -212,6 +213,93 @@ def parse_text_contract(text: str) -> ReviewResult:
     contract_mismatch = bool(
         verdict_tail is not None
         and ((verdict_tail == "FAIL") != section_says_fail)
+    )
+
+    return ReviewResult(
+        role_status=RoleStatus.COMPLETE,
+        findings=findings,
+        verdict_tail=verdict_tail,
+        contract_mismatch=contract_mismatch,
+    )
+
+
+_KV_BLOCKING_RE = re.compile(r"^BLOCKING_JSON=(.*)$", re.MULTILINE)
+_KV_NON_BLOCKING_RE = re.compile(r"^NON_BLOCKING_JSON=(.*)$", re.MULTILINE)
+
+
+def parse_kv_contract(text: str) -> ReviewResult:
+    """Parse an external skill's own KV wire shape (worker.md -> *Role I/O*:
+    dev-ralf's ``finding_adapter.py --input kv`` mode) -- the
+    ``=== <skill> RESULT ===`` ... ``=== END ===`` block ``ext-bugbot``/
+    ``ext-review`` emit:
+
+        === ext-bugbot RESULT ===
+        VERDICT: PASS|FAIL
+        COUNT_BLOCKING=<n>
+        ...
+        BLOCKING_JSON=<single-line JSON array>
+        NON_BLOCKING_JSON=<single-line JSON array>
+        === END ===
+
+    Same "section membership is authoritative, VERDICT is a parsing anchor
+    only" rule as :func:`parse_text_contract` -- MUST_FIX/ADVISORY
+    membership comes from BLOCKING_JSON/NON_BLOCKING_JSON, never from
+    VERDICT. Each JSON element is
+    ``{file, line, severity, title, description, additional_locations}``;
+    this wire shape carries no contract/scenario/fix breakdown, so every
+    MUST_FIX finding is marked ``contract_incomplete`` the same way a v1
+    text-contract fallback finding is.
+
+    A block missing BOTH ``BLOCKING_JSON`` and ``NON_BLOCKING_JSON`` is a
+    parse failure, not "zero findings" -- worker.md -> *RESULT parsing*:
+    "Missing block: ext-bugbot/ext-review -> cycle FAIL". Returned as
+    ``role_status=ERROR`` so the caller retries the dispatch rather than
+    silently recording a clean pass.
+    """
+    blocking_match = _KV_BLOCKING_RE.search(text)
+    non_blocking_match = _KV_NON_BLOCKING_RE.search(text)
+    if blocking_match is None and non_blocking_match is None:
+        return ReviewResult(role_status=RoleStatus.ERROR, findings=[])
+
+    def _elements(match: re.Match[str] | None) -> list[dict]:
+        if match is None:
+            return []
+        try:
+            data = json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            return []
+        return data if isinstance(data, list) else []
+
+    findings: list[Finding] = []
+    for disposition, match in (
+        (Disposition.MUST_FIX, blocking_match),
+        (Disposition.ADVISORY, non_blocking_match),
+    ):
+        for elem in _elements(match):
+            severity_raw = str(elem.get("severity", "")).upper()
+            severity = Severity(severity_raw) if severity_raw in Severity.__members__ else None
+            findings.append(
+                Finding(
+                    disposition=disposition,
+                    severity=severity,
+                    path=elem.get("file", ""),
+                    line=elem.get("line"),
+                    symbol=None,
+                    contract=elem.get("description") or elem.get("title"),
+                    note=elem.get("title"),
+                    raw=json.dumps(elem),
+                )
+            )
+
+    for f in findings:
+        if f.disposition is Disposition.MUST_FIX and not f.is_evidence_complete():
+            f.contract_incomplete = True
+
+    verdict_match = _VERDICT_RE.search(text)
+    verdict_tail = verdict_match.group(1) if verdict_match else None
+    section_says_fail = any(f.disposition is Disposition.MUST_FIX for f in findings)
+    contract_mismatch = bool(
+        verdict_tail is not None and ((verdict_tail == "FAIL") != section_says_fail)
     )
 
     return ReviewResult(

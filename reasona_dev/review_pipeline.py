@@ -1,13 +1,29 @@
-"""Render Bernstein's `review --pipeline` YAML from resolved model config.
+"""DEPRECATED -- do not build on this module. Kept only until its CLI
+surface (`reasona-dev render-review`) and tests are formally removed.
 
-Replaces the previously-hardcoded `samples/review.yaml` (literal model
-names, no override mechanism) with a generator driven by
-`reasona_dev.model_config.resolve_all()` -- the same priority chain
-(flag > env var > project config > global config > default) that governs
-every other role. Every agent's `adapter`/`effort`, not just its `model`,
-now comes from the resolved spec too -- these used to be hardcoded literals
-here ("claude"/"kilo", "high") that never went through the priority chain
-at all; that gap is what this rewrite closes.
+Render Bernstein's `review --pipeline` YAML from resolved model config.
+
+**Why deprecated:** `bernstein review --pipeline`'s actual runner
+(`core/quality/review_pipeline/runner.py`) turned out to ignore `adapter`
+and `prompt_template` entirely -- every agent in a stage gets a single
+fixed, role-blind prompt built only from the diff + task title/description
+(`_build_agent_prompt` -> `cross_model_verifier._build_prompt`), with no
+tool access (no Bash/Read -- a bare LLM completion call, not an agentic
+session). That makes it structurally unable to run dev-ralf's actual
+bugbot/compliance dispatch (`ext-bugbot --dir ...`, which needs a real
+agentic session) or give reviewer/bugbot/compliance genuinely different
+instructions (see docs/ARCHITECTURE.md §3.5.4 for the full trace). The
+replacement is `reasona_dev.pr_cycle` (dev-ralf-faithful develop -> verify
+-> bug+compliance scan loop, driven by real `bernstein run` dispatches)
+plus `reasona_dev.prompt_profile` (project-selectable prompt files instead
+of this module's hardcoded `prompt_template:` path, which the runner never
+even read).
+
+Everything below this docstring still works and is still tested -- it just
+isn't wired into anything real anymore. Model/adapter/effort DO still flow
+through `reasona_dev.model_config.resolve_all()`'s priority chain here, for
+whatever it's worth to a caller that still wants a `review --pipeline` YAML
+for some other purpose.
 
 Schema verified against installed Bernstein 3.15.1
 (`core/quality/review_pipeline/schema.py`): `version`, `name`,
