@@ -115,6 +115,8 @@ def compile_to_bernstein_plan(
     workdir: str | Path | None = None,
     write_audit_trail: bool = True,
     audit_trail_path: str | None = None,
+    write_bernstein_yaml: bool = True,
+    policy_flags: dict[str, str] | None = None,
 ) -> dict:
     """Return a dict matching Bernstein's plan.yaml schema (validated shape).
 
@@ -151,8 +153,30 @@ def compile_to_bernstein_plan(
     `workdir` is what keeps `gate_check.py`'s `.reasona/review-<stage>.json`
     convention and this audit trail landing in the same place regardless of
     where the compile step happens to be invoked from.
+
+    `write_bernstein_yaml` (default True) does two things, both in
+    `bernstein_config.py`: (1) copies `~/.reasona/bernstein.yaml`
+    (`GLOBAL_BERNSTEIN_YAML`) into `<workdir>/bernstein.yaml` when the
+    target repo doesn't already have one -- Bernstein's own config loader
+    only ever reads a project-local file (no home-directory fallback for
+    the config `bernstein run` needs), so this is what lets an operator
+    maintain ONE global template instead of hand-authoring it per target
+    repo; never overwrites an existing file. (2) patches that file's
+    `role_model_policy.<role>.provider` values in place (comments
+    untouched) to match what `model_config.resolve_all()` resolves right
+    now -- every `compile-plan` run, not just the first, so a role's
+    adapter changing later (e.g. in `~/.reasona/config.yaml`) doesn't
+    require a matching hand-edit here too.
+
+    `policy_flags` is the flag layer for that same sync -- role -> value
+    (dev-ralf's own `tool:model:effort` shape or a bare model name, same as
+    every other flag in this project), e.g. `{"bugbot": "codex:o1:max"}`.
+    Only affects the `role_model_policy` patch; `dev`'s own step-level
+    `model:`/`effort:`/plan-level `cli:` are controlled by `dev_flag`/
+    `dev_model` as before, independently of this.
     """
     workdir = Path(workdir) if workdir is not None else Path.cwd()
+
     if audit_trail_path is None:
         audit_trail_path = str(workdir / ".reasona" / "model_config.json")
 
@@ -169,6 +193,24 @@ def compile_to_bernstein_plan(
         )
     if write_audit_trail:
         write_resolved_config({"dev": resolved_dev}, audit_trail_path)
+
+    if write_bernstein_yaml:
+        from reasona_dev.bernstein_config import ensure_bernstein_yaml, sync_role_model_policy
+        from reasona_dev.model_config import resolve_all
+
+        ensure_bernstein_yaml(workdir)
+        # `policy_flags` carries the flag > env var > project cfg > global
+        # cfg chain's TOP layer through to review/recheck/bugbot/verify/
+        # final_audit -- without this, resolve_all() here would silently
+        # skip the flag layer for every role except dev (a real gap found
+        # by inspection: this call used to omit `flags=` entirely).
+        # resolve_all()'s own "dev" entry is then overwritten by
+        # `resolved_dev` -- a test/caller-supplied `dev_model` override (or
+        # `dev_flag`) must win here too, same as it wins on the plan step
+        # itself below.
+        policy_resolved = resolve_all(workdir=workdir, flags=policy_flags)
+        policy_resolved["dev"] = resolved_dev
+        sync_role_model_policy(workdir / "bernstein.yaml", policy_resolved)
 
     units = parse_plan_units(plan_text)
 

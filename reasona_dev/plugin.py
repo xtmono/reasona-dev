@@ -44,7 +44,7 @@ from bernstein.plugins import hookimpl  # verified real: pluggy.HookimplMarker("
 
 from reasona_dev.cycle_gate import FixBudget, GateDecision, RecurrenceTracker, evaluate
 from reasona_dev.finding_adapter import ReviewResult
-from reasona_dev.model_config import resolve_all
+from reasona_dev.model_config import BERNSTEIN_ROLE_TO_PRIMARY_CONFIG_ROLE, resolve_all
 
 logger = logging.getLogger(__name__)
 
@@ -52,23 +52,19 @@ _STATE_DIR = Path(".reasona")
 _STATE_FILE = _STATE_DIR / "gate_state.json"
 _DIVERGENCE_LOG = _STATE_DIR / "model_divergence.jsonl"
 
-# Bernstein's own agent-role vocabulary (plan.yaml step `role`, review.yaml
-# agent `role`) differs from reasona_dev.model_config's role keys -- this is
-# the same mapping plan_compile.py / review_pipeline.py already establish by
-# construction (dev_role="backend" default; review.yaml agent roles
-# "reviewer"/"bugbot"/"compliance"). "reviewer" maps to two config roles
-# because the same Bernstein role name is reused for both the initial
-# review pipeline (resolved["review"]) and the bounded recheck pipeline
-# (resolved["recheck"]) -- either is a legitimate expected value, so both
-# must be accepted to avoid a false positive when bounded recheck is in use.
+# Extends model_config.BERNSTEIN_ROLE_TO_PRIMARY_CONFIG_ROLE (the shared
+# canonical single-role mapping) with a SET of acceptable config roles per
+# Bernstein role, since this monitor needs to accept more than one value
+# for "reviewer": the same Bernstein role name is reused for both the
+# initial review pipeline (resolved["review"]) and the bounded recheck
+# pipeline (resolved["recheck"]) -- either is legitimate, so both must be
+# accepted to avoid a false positive when bounded recheck is in use.
 # "ocr_reviewer" has no model slot (adapter="ocr", stateless tool) and is
 # intentionally absent -- there is nothing to compare it against.
 _SPAWN_ROLE_TO_CONFIG_ROLES: dict[str, tuple[str, ...]] = {
-    "backend": ("dev",),
-    "reviewer": ("review", "recheck"),
-    "bugbot": ("bugbot",),
-    "compliance": ("verify",),
+    bernstein_role: (config_role,) for bernstein_role, config_role in BERNSTEIN_ROLE_TO_PRIMARY_CONFIG_ROLE.items()
 }
+_SPAWN_ROLE_TO_CONFIG_ROLES["reviewer"] = ("review", "recheck")
 
 
 def _load_state() -> dict:

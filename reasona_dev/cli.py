@@ -10,7 +10,9 @@ was unreachable from an actual shell invocation.
 
 Subcommands:
 
-    reasona-dev compile-plan <plan.md> -o plan.yaml [--workdir DIR] [--dev MODEL]
+    reasona-dev compile-plan <plan.md> -o plan.yaml [--workdir DIR]
+        [--dev MODEL] [--review MODEL] [--recheck MODEL] [--bugbot MODEL]
+        [--verify MODEL] [--final-audit MODEL]
     reasona-dev render-review -o review.yaml [--bounded] [--workdir DIR]
         [--review MODEL] [--recheck MODEL] [--bugbot MODEL] [--verify MODEL]
 
@@ -18,6 +20,15 @@ Every role flag mirrors dev-ralf's own flag names one-to-one
 (dev-ralf-renewal-claude.md §3.7: `--dev`, `--review`, `--recheck`,
 `--bugbot`, `--verify`, `--final-audit`) -- this CLI does not invent new
 flag names.
+
+`compile-plan` accepts every role's flag, not just `--dev`: `--dev` still
+controls the plan step itself (the only thing this subcommand generates),
+but `compile_to_bernstein_plan()` also syncs `<workdir>/bernstein.yaml`'s
+`role_model_policy` as a side effect (`bernstein_config.py`), and that sync
+needs the full flag > env var > project cfg > global cfg chain for
+review/recheck/bugbot/verify/final_audit too -- omitting those flags here
+used to mean the "flag" layer was silently unreachable for every role
+except dev when syncing role_model_policy.
 """
 
 from __future__ import annotations
@@ -50,7 +61,7 @@ def _collect_flags(args: argparse.Namespace, roles: tuple[str, ...]) -> dict[str
 
 def _cmd_compile_plan(args: argparse.Namespace) -> int:
     plan_text = Path(args.plan_file).read_text(encoding="utf-8")
-    flags = _collect_flags(args, ("dev",))
+    flags = _collect_flags(args, _ROLE_FLAGS)
     write_plan_yaml(
         plan_text,
         args.out,
@@ -58,6 +69,7 @@ def _cmd_compile_plan(args: argparse.Namespace) -> int:
         description=args.description or f"Compiled from {args.plan_file}",
         dev_flag=flags.get("dev"),
         workdir=args.workdir,
+        policy_flags=flags,
     )
     print(f"wrote {args.out}", file=sys.stderr)
     return 0
@@ -80,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--plan-name", default=None)
     p_plan.add_argument("--description", default=None)
     p_plan.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
-    _add_role_flags(p_plan, ("dev",))
+    _add_role_flags(p_plan, _ROLE_FLAGS)
     p_plan.set_defaults(func=_cmd_compile_plan)
 
     p_review = sub.add_parser("render-review", help="Render the review.yaml pipeline")
