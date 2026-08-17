@@ -1,6 +1,6 @@
 """Render Bernstein's `review --pipeline` YAML from resolved model config.
 
-Replaces the previously-hardcoded `templates/review.yaml` (literal model
+Replaces the previously-hardcoded `samples/review.yaml` (literal model
 names, no override mechanism) with a generator driven by
 `reasona_dev.model_config.resolve_all()` -- the same priority chain
 (flag > env var > project config > global config > default) that governs

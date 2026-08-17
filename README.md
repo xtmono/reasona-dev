@@ -61,7 +61,9 @@ docs/ARCHITECTURE.md       4-layer architecture, verified against installed Bern
                               (a future reasona-plan gets its own `plan-models:` key, same file)
 .reasona/bernstein-template.yaml   committed copy of .bernstein/bernstein.yaml, kept purely as a real
                                      example of bernstein_config's project-local template shape
-templates/review.yaml       static example only -- review_pipeline.py generates the real one
+samples/review.yaml         static example only, not read by any code -- unlike bernstein-template.yaml,
+                              nothing ever copies this; review_pipeline.py generates the real one, and
+                              its output path is always caller-specified (`-o`, no default)
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml, auto-wires completion_signals, anchors to workdir
   model_config.py            per-role model/adapter/effort priority chain + CONDUCTOR-COLLAPSE audit trail
