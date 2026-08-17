@@ -5,6 +5,10 @@ __pycache__/
 # .reasona/reasona.yaml is this repo's own committed, project-local
 # reasona_dev.model_config layer (see README) -- shared with a future
 # reasona-plan under a separate top-level key, see reasona_dev/config_file.py.
+# .reasona/bernstein-template.yaml is a committed COPY of .bernstein/
+# bernstein.yaml, kept purely as a real, checked-in example of what
+# reasona_dev.bernstein_config's project-local template looks like for
+# other repos (this repo itself doesn't consume it -- see README).
 # Everything else under .reasona/ (model_config.json, gate_state.json,
 # review-*.json, ...) is a runtime artifact and stays ignored.
 # .bernstein/bernstein.yaml (Bernstein's own project config -- not
@@ -12,5 +16,6 @@ __pycache__/
 # to mention it.
 .reasona/*
 !.reasona/reasona.yaml
+!.reasona/bernstein-template.yaml
 .sdd/
 generated_plan.yaml

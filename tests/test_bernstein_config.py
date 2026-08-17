@@ -84,7 +84,7 @@ def test_project_local_template_beats_global_template(tmp_path, monkeypatch):
 
     workdir = tmp_path / "target-repo"
     (workdir / ".reasona").mkdir(parents=True)
-    (workdir / ".reasona" / "bernstein.yaml").write_text("goal: from-project-local\n")
+    (workdir / ".reasona" / "bernstein-template.yaml").write_text("goal: from-project-local\n")
 
     result = bernstein_config.ensure_bernstein_yaml(workdir)
 

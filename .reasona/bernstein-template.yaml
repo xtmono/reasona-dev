@@ -1,0 +1,118 @@
+# reasona-dev project config. See docs/ARCHITECTURE.md for what each section
+# maps onto in the old dev-ralf design.
+
+goal: >
+  Execute reasona-plan PR units to merged PRs under the reasona-dev
+  finding contract (disposition/severity separation, deterministic gates,
+  bounded escalation, hard-stop on exhaustion).
+
+cli: claude
+max_agents: 4
+
+# ---------------------------------------------------------------------------
+# CREDIT-BURN: never silently swap models on exhaustion.
+# ---------------------------------------------------------------------------
+# An EMPTY fallback_chain is the deliberate choice here -- dev-ralf's own
+# incident history (see plugins/dev/skills/dev-ralf/SKILL.md -> Failure
+# catalog -> CREDIT-BURN) is that an exhausted model retried cycle after
+# cycle burns credit instead of surfacing the outage. Bernstein's own
+# comment ("Configure here to override the built-in defaults") implies a
+# built-in chain applies even when this section is absent -- so it is
+# declared explicitly empty here rather than omitted.
+#
+# CONFIRMED against installed source (core/routing/model_fallback.py):
+#   should_fallback = (not is_fallback) and (consecutive_529_errors >= strike_limit)
+# consecutive_529_errors starts at 0, so `strike_limit: 0` fires BEFORE any
+# real error -- that was a bug in an earlier draft of this file. What
+# actually disables fallback is the EMPTY fallback_chain: `activate_fallback`
+# only sets a fallback_model `if state.fallback_chain and ...`, so an empty
+# chain is a structural no-op regardless of strike_limit. strike_limit is
+# therefore left at its default here (irrelevant with no chain to switch
+# into) rather than set to a value that looks like "off" but means the
+# opposite.
+model_fallback:
+  fallback_chain: []
+
+# cascade_router.py (core/routing/cascade_router.py -- confidence-based
+# post-execution escalation) is CONFIRMED DEAD CODE: grepped the entire
+# installed package for `cascade_router.` / `CascadeRouter` usage outside
+# its own file -- zero call sites. The live initial-model-selection path is
+# `core/routing/bandit_router.py` (BanditRouter, wired from
+# core/orchestration/orchestrator.py / core/tasks/task_lifecycle.py). It
+# picks the STARTING model per task (cold-start static heuristic, then a
+# LinUCB bandit once warmed up on reward history) -- this is not the same
+# risk as CREDIT-BURN (silently swapping mid-task on exhaustion); it is
+# closer to dev-ralf's own per-role model configuration, just adaptive.
+# High-stakes roles are hard-floored to never start at haiku
+# (`_is_high_stakes` / `_capability_floor` in bandit_router.py). No action
+# needed here unless BanditRouter's adaptive picks are found to conflict
+# with an explicit `model:` override -- an explicit step-level `model:`
+# should win (manager-specified override branch in `_static_select`).
+
+# ---------------------------------------------------------------------------
+# role_model_policy: pin each role's adapter (provider) explicitly.
+# ---------------------------------------------------------------------------
+# Every role reasona-dev creates today runs on the adapter its docstring
+# already assumes (backend/reviewer/compliance -> claude, bugbot -> kilo --
+# see reasona_dev/review_pipeline.py). Declaring `provider` here even while
+# nothing has changed closes a real gap found while tracing CREDIT-BURN
+# (docs/ARCHITECTURE.md §3.6): `retry_or_fail_task`'s escalation logic
+# (core/tasks/task_lifecycle.py) reads `role_model_policy.<role>.provider`
+# to decide whether the retrying role is Claude-compatible; when this
+# section is absent, that check falls back to the run's `cli:` default
+# above ("claude") REGARDLESS of what adapter the role's own step/agent
+# spec actually names -- so switching e.g. `backend` to a non-Claude
+# adapter later, without updating this section first, would make a retry
+# stamp a Claude tier name ("opus"/"sonnet") onto a non-Claude task (the
+# "run-9 attempt-8" defect class Bernstein's own source comments describe).
+# Declaring it now, before any role has actually moved off Claude, means
+# there is nothing to remember to do at migration time -- only the
+# `provider` value needs to change.
+#
+# `model` is deliberately NOT set here. reasona_dev/model_config.py already
+# resolves each role's model per invocation (flag > env var > project
+# config > global config > default) and stamps it onto every generated
+# plan.yaml step / review.yaml agent -- hardcoding a model string in this
+# static file too would create a second, unsynchronized source of truth
+# for the same value (the exact CONDUCTOR-COLLAPSE failure mode dev-ralf-
+# renewal-claude.md §3.7 guards against). Leaving `model` unset means a
+# retry on a non-Claude role falls back to `task.model` -- whatever
+# model_config had already resolved for that task -- not a second hardcoded
+# guess.
+#
+# NOTE: this section also turns Bernstein's task-create route
+# (core/routes/task_crud.py) into an ALLOWLIST for `role` -- any task
+# created with a role not listed below is rejected with HTTP 400 ("Invalid
+# role"). Confirmed reasona-dev only ever creates these four roles
+# (plan_compile.py -> "backend"; review_pipeline.py -> "reviewer"/"bugbot"/
+# "compliance"); no evolution/watchdog auto-spawn features are enabled in
+# this file, so no other role is expected to appear. If those features are
+# ever turned on, their auto-spawned task roles must be added here too, or
+# their task creation will start failing.
+#
+# WARNING -- this is a hand-maintained mirror of reasona_dev.model_config's
+# resolved `adapter` per role, and CAN drift out of sync the moment an
+# operator overrides a role's adapter in `~/.reasona/config.yaml` or
+# `<workdir>/.reasona/config.yaml` (e.g. this project's own bugbot moved
+# from the kilo/deepseek-v4-pro default to claude:opus:high in
+# ~/.reasona/config.yaml -- this section had to be hand-updated to match,
+# and would have gone silently stale otherwise). `tests/test_bernstein_yaml_consistency.py`
+# asserts every `provider` below equals `resolve_all()["<role>"].adapter`
+# under the SAME config layers this file assumes (no project/env override)
+# specifically to catch that drift -- if you change a role's adapter in a
+# config.yaml, this section must be updated to match, and the test will
+# fail until it is.
+role_model_policy:
+  backend:
+    provider: claude
+  reviewer:
+    provider: claude
+  bugbot:
+    provider: claude
+  compliance:
+    provider: claude
+
+approval: review   # gate before merge; never `auto`
+
+worktree_setup:
+  setup_command: "true"  # per-PR build isolation; override per repo

@@ -24,10 +24,13 @@ cluttering the repo root).
 
 What CAN be global is reasona-dev's own copy of it, and -- mirroring
 `reasona_dev.config_file`'s exact two-layer cascade for `reasona.yaml`
--- it too has a project-local layer above the global one:
+-- it too has a project-local layer above the global one. Named
+`bernstein-template.yaml`, not `bernstein.yaml`, specifically so it reads
+as "the source this gets COPIED from" rather than looking like a second
+copy of the real, Bernstein-readable file:
 
-    <workdir>/.reasona/bernstein.yaml   project-local template (checked first)
-    ~/.reasona/bernstein.yaml           global template (GLOBAL_BERNSTEIN_YAML)
+    <workdir>/.reasona/bernstein-template.yaml   project-local template (checked first)
+    ~/.reasona/bernstein-template.yaml           global template (GLOBAL_BERNSTEIN_YAML)
 
 `ensure_bernstein_yaml()` copies whichever one wins into a target repo's
 `<workdir>/.bernstein/bernstein.yaml` the first time reasona-dev compiles a
@@ -35,11 +38,14 @@ plan against that repo -- and ONLY if that repo doesn't already have a
 seed file Bernstein would find on its own (checked at BOTH real locations,
 `.bernstein/bernstein.yaml` and the legacy repo-root `bernstein.yaml`), so
 a repo that already has either kept from before this module existed is
-left untouched. This project's own repo uses the `.bernstein/` layout for
-itself too (see README) -- `.bernstein/bernstein.yaml` is committed
-directly, the plain "already has one" case above, not the template
-cascade. The local/global template cascade exists for every OTHER target
-repo reasona-dev bootstraps.
+left untouched. This project's own repo commits BOTH: `.bernstein/
+bernstein.yaml` directly (the plain "already has one" case above -- so its
+own `bernstein doctor`/`bernstein run` invocations never touch the
+template cascade at all) AND `.reasona/bernstein-template.yaml` (identical
+content, committed purely so this repo's own template doubles as a real,
+checked-in example other repos' project-local template can be copied
+from). The local/global template cascade itself exists for every OTHER
+target repo reasona-dev bootstraps.
 
 `sync_role_model_policy()` handles a different, ongoing concern: even a
 `bernstein.yaml` that's already in place can have a `role_model_policy`
@@ -57,7 +63,7 @@ from pathlib import Path
 
 from reasona_dev.model_config import BERNSTEIN_ROLE_TO_PRIMARY_CONFIG_ROLE, ResolvedModel
 
-GLOBAL_BERNSTEIN_YAML = Path.home() / ".reasona" / "bernstein.yaml"
+GLOBAL_BERNSTEIN_YAML = Path.home() / ".reasona" / "bernstein-template.yaml"
 
 
 def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
@@ -69,9 +75,9 @@ def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
     `bernstein.yaml`) -- a repo already using either convention is left
     completely untouched, never given a second, redundant copy.
 
-    Source priority when neither exists: `<workdir>/.reasona/bernstein.yaml`
-    (project-local template) -> `GLOBAL_BERNSTEIN_YAML`
-    (`~/.reasona/bernstein.yaml`, global template) -- the same
+    Source priority when neither exists: `<workdir>/.reasona/
+    bernstein-template.yaml` (project-local template) -> `GLOBAL_BERNSTEIN_YAML`
+    (`~/.reasona/bernstein-template.yaml`, global template) -- the same
     local-beats-global order `reasona_dev.config_file` uses for
     `reasona.yaml`.
 
@@ -89,7 +95,7 @@ def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
     if legacy_root_target.exists():
         return legacy_root_target
 
-    local_template = workdir / ".reasona" / "bernstein.yaml"
+    local_template = workdir / ".reasona" / "bernstein-template.yaml"
     for source in (local_template, GLOBAL_BERNSTEIN_YAML):
         if source.is_file():
             dot_bernstein_target.parent.mkdir(parents=True, exist_ok=True)

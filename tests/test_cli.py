@@ -10,7 +10,7 @@ from reasona_dev.cli import main
 @pytest.fixture(autouse=True)
 def _no_real_global_bernstein_yaml(tmp_path, monkeypatch):
     # compile-plan now also bootstraps <workdir>/bernstein.yaml from
-    # ~/.reasona/bernstein.yaml (reasona_dev.bernstein_config) -- point it
+    # ~/.reasona/bernstein-template.yaml (reasona_dev.bernstein_config) -- point it
     # at a path that doesn't exist so these tests never touch the real
     # machine's global template.
     monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", tmp_path / "unused-global.yaml")

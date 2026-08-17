@@ -59,6 +59,8 @@ docs/ARCHITECTURE.md       4-layer architecture, verified against installed Bern
                              target repos vs. this repo's own" below for why it lives under .bernstein/
 .reasona/reasona.yaml        THIS repo's own committed model_config layer, under the `dev-models:` key
                               (a future reasona-plan gets its own `plan-models:` key, same file)
+.reasona/bernstein-template.yaml   committed copy of .bernstein/bernstein.yaml, kept purely as a real
+                                     example of bernstein_config's project-local template shape
 templates/review.yaml       static example only -- review_pipeline.py generates the real one
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml, auto-wires completion_signals, anchors to workdir
@@ -125,15 +127,20 @@ exists is left completely untouched, never duplicated), sourced from:
 ```
 <workdir>/.bernstein/bernstein.yaml   what Bernstein reads FIRST -- the bootstrap target
 <workdir>/bernstein.yaml              legacy location Bernstein also reads -- left alone if present
-<workdir>/.reasona/bernstein.yaml     project-local template (checked first when bootstrapping)
-~/.reasona/bernstein.yaml             global template (checked second when bootstrapping)
+<workdir>/.reasona/bernstein-template.yaml     project-local template (checked first when bootstrapping)
+~/.reasona/bernstein-template.yaml             global template (checked second when bootstrapping)
 ```
 
 **This repo uses the `.bernstein/` layout for itself too** --
 `.bernstein/bernstein.yaml` is committed directly, the plain "already has
-one, so leave it alone" case above, not the template cascade. `.bernstein/`
-is preferred over the legacy repo-root location because
-`find_seed_file()` checks it first and it keeps the repo root tidier.
+one, so leave it alone" case above, not the template cascade -- this
+repo's own `bernstein doctor`/`bernstein run` never go through
+`ensure_bernstein_yaml()`'s copy logic at all. `.bernstein/` is preferred
+over the legacy repo-root location because `find_seed_file()` checks it
+first and it keeps the repo root tidier. `.reasona/bernstein-template.yaml`
+is ALSO committed here, as an identical copy -- not consumed by this repo,
+just a real, checked-in example of the shape a project-local template
+takes for every other repo.
 
 `.reasona/reasona.yaml` is a different, unrelated file: it's
 `reasona_dev.config_file`'s own project-local model-config layer (never
