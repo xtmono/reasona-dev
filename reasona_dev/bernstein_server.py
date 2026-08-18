@@ -73,6 +73,15 @@ _TERMINAL_STATUSES = frozenset({
     "done", "closed", "failed", "cancelled", "orphaned", "abandoned", "refused", "blocked_by_abandon",
 })
 
+# `pending_approval` is NOT terminal -- Bernstein's own definition is
+# "Completed; awaiting human approval before taking effect", so the task
+# still moves on its own once a person acts. It needs its own handling
+# rather than living in either set: treating it as terminal would report an
+# unapproved task as finished, and treating it as an ordinary in-flight
+# status would silently burn the normal poll timeout waiting for a human
+# who was never told they were needed.
+_AWAITING_APPROVAL = "pending_approval"
+
 
 @dataclass
 class ServerHandle:
@@ -154,6 +163,7 @@ def dispatch_task(
     effort: str,
     cli: str,
     raw_output_path: Path,
+    approval_required: bool = False,
 ) -> str:
     """`POST /tasks` for one role dispatch. Returns the new task's id.
 
@@ -161,6 +171,13 @@ def dispatch_task(
     the plan step: the orchestrator considers this task done only once
     `raw_output_path` is non-empty, the same file the description instructs
     the agent to write its full output to as its last action.
+
+    `approval_required` is Bernstein's own per-task human gate
+    (`TaskCreate.approval_required`, confirmed against the installed
+    package's `core/server/server_models.py`): the task completes normally,
+    then parks at `pending_approval` until a person acts, rather than
+    taking effect immediately. `pr_cycle` sets it on the first PR unit of a
+    plan only -- see its module docstring for why that one point.
     """
     body = {
         "title": title,
@@ -171,21 +188,50 @@ def dispatch_task(
         "cli": cli,
         "completion_signals": [{"type": "test_passes", "value": f"test -s {raw_output_path}"}],
     }
+    if approval_required:
+        body["approval_required"] = True
     response = _request(handle, "POST", "/tasks", body)
     return response["id"]
 
 
-def poll_task(handle: ServerHandle, task_id: str, *, poll_interval: float = 5.0, timeout: float = 1800.0) -> dict:
-    """`GET /tasks/{id}` until `status` reaches a terminal value or
-    `timeout` elapses. Returns the final task JSON either way -- the
-    caller (`pr_cycle.run_role()`) decides what a non-`done` terminal
-    status means, this function only knows polling is over.
+def poll_task(
+    handle: ServerHandle,
+    task_id: str,
+    *,
+    poll_interval: float = 5.0,
+    timeout: float = 1800.0,
+    approval_timeout: float = 86400.0,
+    on_awaiting_approval=None,
+) -> dict:
+    """`GET /tasks/{id}` until `status` reaches a terminal value. Returns the
+    final task JSON -- the caller (`pr_cycle.run_role()`) decides what a
+    non-`done` terminal status means, this function only knows polling is
+    over.
+
+    **Approval handling.** A task that parks at `pending_approval` is
+    waiting on a human, not on an agent, so the ordinary `timeout` must not
+    apply to it -- 30 minutes is a reasonable bound on a model finishing
+    work and a nonsensical one on a person noticing a review request. On
+    first entering that state the deadline is extended to
+    `approval_timeout` and `on_awaiting_approval(task)` is called once, so
+    the caller can actually tell someone. Without this split an
+    approval-gated task would fail with a bare `TimeoutError` that reads
+    like a stuck agent.
     """
     deadline = time.monotonic() + timeout
+    announced = False
     task = _request(handle, "GET", f"/tasks/{task_id}")
     while task.get("status") not in _TERMINAL_STATUSES:
+        if task.get("status") == _AWAITING_APPROVAL and not announced:
+            announced = True
+            deadline = time.monotonic() + approval_timeout
+            if on_awaiting_approval is not None:
+                on_awaiting_approval(task)
         if time.monotonic() >= deadline:
-            raise TimeoutError(f"task {task_id} did not reach a terminal status within {timeout}s (last: {task.get('status')!r})")
+            waiting_on = "human approval" if announced else "a terminal status"
+            raise TimeoutError(
+                f"task {task_id} did not reach {waiting_on} in time (last status: {task.get('status')!r})"
+            )
         time.sleep(poll_interval)
         task = _request(handle, "GET", f"/tasks/{task_id}")
     return task

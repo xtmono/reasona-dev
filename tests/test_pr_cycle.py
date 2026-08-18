@@ -8,6 +8,7 @@ _RESOLVED = {
     "dev": ResolvedModel("dev", "sonnet", "claude", "high", "default"),
     "review": ResolvedModel("review", "opus", "claude", "high", "default"),
     "bugbot": ResolvedModel("bugbot", "deepseek-v4-pro", "kilo", "high", "default"),
+    "recheck": ResolvedModel("recheck", "sonnet", "claude", "high", "default"),
     "verify": ResolvedModel("verify", "sonnet", "claude", "high", "default"),
     "dev_escalation": ResolvedModel("dev_escalation", "opus", "claude", "high", "default"),
 }
@@ -31,7 +32,7 @@ def _stub_role_fn(*, script):
     """
     calls = {"n": 0}
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
         idx = calls["n"]
         calls["n"] += 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)

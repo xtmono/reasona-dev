@@ -133,6 +133,52 @@ class RecurrenceTracker:
         return "FAIL"  # survived escalation too -- stop-the-world, not another retry
 
 
+@dataclass
+class ConvergenceTracker:
+    """Tracks whether MUST_FIX COUNT is actually falling across cycles.
+
+    **The hole this closes.** `RecurrenceTracker` only fires when the SAME
+    finding key survives a fix. A PR whose every cycle produces a fresh set
+    of MUST_FIX keys therefore gets `PROCEED` forever and burns the entire
+    stage cap (8 cycles) before failing -- the most expensive failure mode
+    in the budget, and the one `recheck_route()` cannot help with, since
+    that only lowers the cost of each cycle, never the number of them.
+
+    dev-ralf's escalation trigger was `cross_reviewer_convergence` (two
+    reviewers naming the same location). This is its missing temporal dual:
+    agreement across CYCLES rather than across reviewers. Both exist for
+    the same reason -- a single observation is weak evidence, so the gate
+    waits for a second one before acting.
+
+    Deliberately counts findings rather than judging them. "Is this PR
+    getting better" is a question a model would answer with a narrative;
+    `len(must_fix)` over a window answers it arithmetically, which is the
+    only kind of answer this pipeline acts on.
+    """
+
+    counts: list[int] = field(default_factory=list)
+
+    def record(self, must_fix_count: int) -> None:
+        self.counts.append(must_fix_count)
+
+    def diverging(self, window: int = 3) -> bool:
+        """True once `window` cycles have passed with no net reduction.
+
+        Compares the window's last count to its first: strictly fewer
+        findings than `window` cycles ago is progress, anything else is
+        not. Oscillation (3 -> 5 -> 3) reads as no progress, which is the
+        intended reading -- it is a PR trading one defect for another, not
+        one converging.
+
+        Returns False until `window` cycles exist, so a PR is never failed
+        before it has had a real chance to improve.
+        """
+        if len(self.counts) < window:
+            return False
+        recent = self.counts[-window:]
+        return recent[-1] >= recent[0]
+
+
 def recheck_route(repo: str, pre_fix_head: str, finding_files: set[str]) -> str:
     """BOUNDED | FULL -- dev-ralf-renewal-claude.md §3.8 / §8.4.
 
@@ -165,8 +211,16 @@ def evaluate(
     recurrence: RecurrenceTracker,
     inconclusive_attempts: int,
     escalation_model: str = "opus",
+    convergence: ConvergenceTracker | None = None,
+    convergence_window: int = 3,
 ) -> GateDecision:
-    """The single entry point `on_pre_task_create` calls before spawning a fix task."""
+    """The single entry point `on_pre_task_create` calls before spawning a fix task.
+
+    `convergence` is optional so existing callers keep their exact
+    behaviour; when supplied, it adds the non-convergence exit described in
+    `ConvergenceTracker` -- a PR that stops improving fails at
+    `convergence_window` cycles instead of at the stage cap.
+    """
     gate = result.gate()
 
     if gate == "INCONCLUSIVE":
@@ -184,9 +238,28 @@ def evaluate(
     if not budget.can_spend(stage):
         return GateDecision("fail", f"{stage} budget exhausted ({budget.total_used}/{MAX_TOTAL_FIX_CYCLES})")
 
+    # Recorded here so the window always reflects THIS cycle's count, but
+    # CHECKED below, after recurrence -- the two rules are independent
+    # exits that overlap on the same-key case, and recurrence's reason
+    # ("this exact finding survived an escalated fix") is the more specific
+    # of the two, so it should be the one reported when both apply.
+    if convergence is not None:
+        convergence.record(len(result.must_fix))
+
     decisions = {recurrence.decide(f.key()) for f in result.must_fix}
     if "FAIL" in decisions:
         return GateDecision("fail", "MUST_FIX key survived escalated fix -- stop-the-world")
+
+    # The exit recurrence structurally cannot reach: findings that keep
+    # changing identity never accumulate a survival count, so without this
+    # the stage would run to its full cap.
+    if convergence is not None and convergence.diverging(convergence_window):
+        return GateDecision(
+            "fail",
+            f"no net reduction in MUST_FIX over {convergence_window} cycles "
+            f"(counts: {convergence.counts[-convergence_window:]}) -- not converging",
+        )
+
     if "ESCALATE_ONCE" in decisions:
         budget.spend(stage)
         return GateDecision(

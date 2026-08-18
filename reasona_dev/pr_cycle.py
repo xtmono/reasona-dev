@@ -17,33 +17,61 @@ worth risking. Instead this driver runs OUTSIDE Bernstein, one level up:
 `run_pr_cycle()` starts ONE persistent Bernstein server
 (`reasona_dev.bernstein_server.start_server()`) for the whole cycle, then
 each role dispatch is a `POST /tasks` against it (`run_role()`), polled via
-`GET /tasks/{id}` -- no plan.yaml file per role, no fresh server bootstrap
-per role. The agent's actual structured output (the markdown report +
-`RESULT: ...` line `finding_adapter.py` parses) still comes back through
-the same file-handoff convention as before: the task description instructs
-the agent to write its complete output to a file as its last action, and
-that file -- not the task's own one-line `result_summary` -- is what
-`run_role()` reads and parses. See `bernstein_server.py`'s module docstring
-for the full "why HTTP, why the file handoff survives" reasoning.
+`GET /tasks/{id}`. The agent's structured output comes back through a file
+the task description tells it to write -- see `bernstein_server.py`'s
+module docstring for why that handoff survives the move to HTTP.
+
+**Three budget mechanisms, three different failure modes.** The 8/8/16
+cycle caps this inherited from dev-ralf are a ceiling, not a cost; what
+actually spends money is how expensive each cycle is and how many of them
+run before a doomed PR gives up. Each is addressed by a different piece:
+
+- *Cost per cycle* -- `cycle_gate.recheck_route()`. When a dev fix touched
+  only files that were already named in the findings it was fixing, the
+  next pass is a BOUNDED recheck (confirm + regression, `recheck.md`,
+  the cheaper `recheck` model) instead of a full omission hunt. Scan roles
+  get the same treatment through a scope suffix rather than a separate
+  prompt, since their prompts come from an external skill contract.
+- *Number of cycles* -- `cycle_gate.ConvergenceTracker`. `RecurrenceTracker`
+  only fires when the SAME finding survives, so a PR emitting fresh
+  findings every cycle used to burn the whole stage cap. Non-convergence
+  now exits at 3 cycles.
+- *Which rule ended it* -- `cycles_log`. Every dispatch and every gate
+  decision is recorded, so the caps above can eventually be re-derived from
+  measurement instead of inherited on faith.
+
+**Human approval.** `approval_required` maps onto Bernstein's own per-task
+gate. It is deliberately a caller-supplied flag rather than something this
+module decides: the argument for gating is that the FIRST PR of a plan
+fixes contract shapes every later PR inherits, and this function sees one
+PR unit at a time and cannot know which one that is. Note the scope limit
+-- it gates the dev fix dispatches this driver makes, not the eventual
+squash-merge, because the merge tail is not built yet (README "Next").
 
 **Not yet live-verified.** Every individual HTTP primitive `run_role()`
-now uses (`POST /tasks`, `GET /tasks/{id}`) was checked against a real
-running Bernstein server in an earlier session; this driver's OWN
+uses was checked against a real running Bernstein server; this driver's OWN
 composition of them -- one server serving every role dispatch across a
-whole `run_pr_cycle()` call -- has not itself been run end-to-end against
-a live paid server yet (see `bernstein_server.py`'s docstring). Treat
-`run_role()` as the one unverified boundary; everything above it
-(`FixBudget`/`RecurrenceTracker`/`evaluate()`-driven looping) is plain,
-already-tested Python.
+whole cycle -- has not been run end-to-end against a live paid server yet.
+Treat `run_role()` as the one unverified boundary; everything above it is
+plain, already-tested Python.
 """
 
 from __future__ import annotations
 
+import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from reasona_dev import cycles_log
 from reasona_dev.bernstein_server import ServerHandle, dispatch_task, poll_task, start_server, stop_server
-from reasona_dev.cycle_gate import FixBudget, RecurrenceTracker, evaluate
+from reasona_dev.cycle_gate import (
+    ConvergenceTracker,
+    FixBudget,
+    RecurrenceTracker,
+    evaluate,
+    recheck_route,
+)
 from reasona_dev.finding_adapter import (
     ReviewResult,
     RoleStatus,
@@ -105,6 +133,7 @@ def run_role(
     model: ResolvedModel,
     rundir: Path,
     cycle: int,
+    approval_required: bool = False,
 ) -> RoleRunResult:
     """Dispatch one role once against the shared, already-running
     `server`, via `POST /tasks`, then poll `GET /tasks/{id}` to completion.
@@ -125,6 +154,7 @@ def run_role(
         description=_build_role_description(prompt, raw_output_path),
         model=model.model, effort=model.effort, cli=model.adapter,
         raw_output_path=raw_output_path,
+        approval_required=approval_required,
     )
     task = poll_task(server, task_id)
 
@@ -140,17 +170,12 @@ def run_role(
     return RoleRunResult(role=role, cycle=cycle, review_result=parser(text), raw_output_path=raw_output_path)
 
 
-def _build_fix_prompt(pr_title: str, findings) -> str:
-    """worker.md -> *Loop control*: "dispatch dev (fix-cycle $DEV_PROMPT +
-    `must_fix` list, `contract`/`scenario`/`fix` fields included
-    verbatim)". Every field is passed through unedited -- this driver
-    never rewrites or summarizes a finding on the way to dev.
+def _render_findings(findings) -> list[str]:
+    """One block per finding with every evidence field verbatim -- shared by
+    the dev fix prompt and the bounded recheck prompt so both name findings
+    the same way, and neither summarizes.
     """
-    lines = [
-        f"Fix the following MUST_FIX findings from review on {pr_title}. "
-        "Do not address anything not listed here.",
-        "",
-    ]
+    lines: list[str] = []
     for f in findings:
         loc = f.path + (f":{f.line}" if f.line else "") + (f" {f.symbol}" if f.symbol else "")
         lines.append(f"- [{f.severity.value if f.severity else '?'}] {loc}")
@@ -163,7 +188,105 @@ def _build_fix_prompt(pr_title: str, findings) -> str:
         if f.note:
             lines.append(f"  || note: {f.note}")
         lines.append("")
-    return "\n".join(lines)
+    return lines
+
+
+def _build_fix_prompt(pr_title: str, findings) -> str:
+    """worker.md -> *Loop control*: "dispatch dev (fix-cycle $DEV_PROMPT +
+    `must_fix` list, `contract`/`scenario`/`fix` fields included
+    verbatim)". Every field is passed through unedited -- this driver
+    never rewrites or summarizes a finding on the way to dev.
+    """
+    return "\n".join(
+        [
+            f"Fix the following MUST_FIX findings from review on {pr_title}. "
+            "Do not address anything not listed here.",
+            "",
+            *_render_findings(findings),
+        ]
+    )
+
+
+def _build_recheck_prompt(recheck_profile_prompt: str, findings) -> str:
+    """`recheck.md` + the exact findings to confirm.
+
+    The prompt file states the BOUNDED contract (confirm + regression, no
+    fresh omission hunt); this appends which findings are being confirmed,
+    with the same verbatim evidence the fix dispatch received, so the
+    recheck is judged against the same stated contract the fix was.
+    """
+    return "\n".join(
+        [
+            recheck_profile_prompt,
+            "",
+            "---",
+            "Findings to CONFIRM (these are what the fix claimed to address):",
+            "",
+            *_render_findings(findings),
+        ]
+    )
+
+
+def _bounded_scope_suffix(fix_files: set[str]) -> str:
+    """Scope restriction for scan roles on a BOUNDED cycle.
+
+    bugbot/compliance prompts come from an external skill contract, so
+    they get a suffix rather than a separate bounded prompt file the way
+    review does. The saving is the same: the role re-examines only what the
+    fix touched instead of re-scanning the entire diff.
+    """
+    listed = "\n".join(f"- {p}" for p in sorted(fix_files))
+    return (
+        "\n\n---\n"
+        "SCOPE RESTRICTION for this cycle: the previous fix touched only the "
+        "files listed below, and every other file is unchanged since your "
+        "last scan of it. Examine ONLY these files; do not re-report findings "
+        "elsewhere.\n\n"
+        f"{listed}\n"
+    )
+
+
+def _head_sha(workdir: Path) -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    return out.stdout.strip() or None
+
+
+def _changed_files(workdir: Path, pre_fix_head: str) -> set[str]:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(workdir), "diff", "--name-only", f"{pre_fix_head}..HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return set()
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def _safe_recheck_route(workdir: Path, pre_fix_head: str | None, finding_files: set[str]) -> str:
+    """`recheck_route()` with a conservative failure mode.
+
+    Any condition that makes the routing question unanswerable -- no git
+    repo, an unknown pre-fix HEAD, a failed diff -- returns FULL. Bounding a
+    recheck is an optimization; doing it on an unverified premise would
+    narrow the review's scope without evidence that narrowing is safe, which
+    is the one direction this pipeline must never guess in.
+    """
+    if pre_fix_head is None or not finding_files:
+        return "FULL"
+    try:
+        return recheck_route(str(workdir), pre_fix_head, finding_files)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "FULL"
+
+
+def _finding_files(findings) -> set[str]:
+    return {f.path for f in findings if f.path}
 
 
 def _run_dev_fix(
@@ -177,6 +300,7 @@ def _run_dev_fix(
     rundir: Path,
     cycle: int,
     run_role_fn,
+    approval_required: bool = False,
 ) -> RoleRunResult:
     """Dispatch one dev fix-cycle. `escalated_model` (from
     `GateDecision.escalated_model`) overrides `dev_model.model` for exactly
@@ -190,7 +314,12 @@ def _run_dev_fix(
     return run_role_fn(
         server=server, workdir=workdir, role="backend", title=f"{pr_title} -- fix c{cycle}",
         prompt=_build_fix_prompt(pr_title, findings), model=model, rundir=rundir, cycle=cycle,
+        approval_required=approval_required,
     )
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "pr"
 
 
 def run_pr_cycle(
@@ -201,6 +330,8 @@ def run_pr_cycle(
     rundir: str | Path,
     profile: str,
     port: int = 8052,
+    approval_required: bool = False,
+    stage_name: str | None = None,
     run_role_fn=run_role,
     start_server_fn=start_server,
     stop_server_fn=stop_server,
@@ -213,36 +344,66 @@ def run_pr_cycle(
     the way it already is).
 
     One Bernstein server is started here, once, and shared across every
-    role dispatch in this cycle (see module docstring for why) -- stopped
-    in a `finally` so a mid-cycle exception never leaves it running.
+    role dispatch in this cycle (see module docstring) -- stopped in a
+    `finally` so a mid-cycle exception never leaves it running.
 
     `run_role_fn`/`start_server_fn`/`stop_server_fn` are injectable purely
-    for testing -- production callers never pass them (defaults are the
-    real `run_role`/`start_server`/`stop_server`, which talk to a real
-    Bernstein server over HTTP).
+    for testing -- production callers never pass them.
     """
     workdir = Path(workdir)
     rundir = Path(rundir)
+    stage_name = stage_name or _slug(pr_title)
     recurrence = RecurrenceTracker()
     review_budget = FixBudget()
     scan_budget = FixBudget()
+    review_convergence = ConvergenceTracker()
+    scan_convergence = ConvergenceTracker()
     role_results: list[RoleRunResult] = []
+
+    def _log(stage: str, cycle: int, result: RoleRunResult, model: ResolvedModel) -> None:
+        cycles_log.record_dispatch(
+            workdir=workdir, stage_name=stage_name, stage=stage, cycle=cycle,
+            role=result.role, model=model.model, adapter=model.adapter,
+            result=result.review_result,
+        )
+
+    def _log_decision(stage: str, cycle: int, decision) -> None:
+        cycles_log.record_decision(
+            workdir=workdir, stage_name=stage_name, stage=stage, cycle=cycle,
+            action=decision.action, reason=decision.reason,
+            escalated_model=decision.escalated_model,
+        )
 
     review_profile_prompt = resolve_prompt("review", profile=profile, workdir=workdir)
     if review_profile_prompt is None:
         return CycleResult(verdict="ABORT", stage="review", reason=f"no review prompt for profile {profile!r}")
+    # Absent `recheck.md` is not fatal -- it only means every cycle stays
+    # FULL, which is the pre-existing behaviour. A profile opts into the
+    # cheaper path by shipping the file, and never silently gets a bounded
+    # review it did not define the contract for.
+    recheck_profile_prompt = resolve_prompt("recheck", profile=profile, workdir=workdir)
 
     server = start_server_fn(workdir, port=port)
     try:
         # --- Verify cycles (review), max 8 -- worker.md -> *Develop & verify* ---
         cycle = 0
+        route = "FULL"
+        pending_confirm: list = []
         while True:
             cycle += 1
+            bounded = route == "BOUNDED" and recheck_profile_prompt is not None
+            model = resolved["recheck"] if bounded else resolved["review"]
+            prompt = (
+                _build_recheck_prompt(recheck_profile_prompt, pending_confirm)
+                if bounded else review_profile_prompt
+            )
             result = run_role_fn(
-                server=server, workdir=workdir, role="reviewer", title=f"{pr_title} -- review c{cycle}",
-                prompt=review_profile_prompt, model=resolved["review"], rundir=rundir, cycle=cycle,
+                server=server, workdir=workdir, role="reviewer",
+                title=f"{pr_title} -- {'recheck' if bounded else 'review'} c{cycle}",
+                prompt=prompt, model=model, rundir=rundir, cycle=cycle,
             )
             role_results.append(result)
+            _log("review", cycle, result, model)
             if cycle > 1:
                 # This review followed a dev fix -- whatever MUST_FIX is still
                 # here just SURVIVED that fix. Record it BEFORE evaluate() so
@@ -253,7 +414,9 @@ def run_pr_cycle(
             decision = evaluate(
                 result.review_result, review_budget, "review", recurrence,
                 inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
+                convergence=review_convergence,
             )
+            _log_decision("review", cycle, decision)
             if decision.action in ("pass",):
                 break
             if decision.action in ("fail", "abort"):
@@ -263,17 +426,19 @@ def run_pr_cycle(
                 )
             if decision.action == "inconclusive_retry":
                 continue  # re-run the SAME reviewer, no dev dispatch, no budget spend
-            # spawn_fix / spawn_fix_escalated: dispatch dev, then FULL re-review
-            # (not the bounded confirm/regression recheck -- `cycle_gate.
-            # recheck_route()` needs pre-fix-head/finding-file tracking this
-            # driver does not do yet; every fix cycle here re-runs the complete
-            # review prompt, worker.md's "recheck" narrowing is a follow-up).
+            # spawn_fix / spawn_fix_escalated
+            pending_confirm = list(result.review_result.must_fix)
+            finding_files = _finding_files(pending_confirm)
+            pre_fix_head = _head_sha(workdir)
             fix_result = _run_dev_fix(
-                server=server, workdir=workdir, pr_title=pr_title, findings=result.review_result.must_fix,
+                server=server, workdir=workdir, pr_title=pr_title, findings=pending_confirm,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
                 rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
+                approval_required=approval_required,
             )
             role_results.append(fix_result)
+            _log("review", cycle, fix_result, resolved["dev"])
+            route = _safe_recheck_route(workdir, pre_fix_head, finding_files)
 
         review_cycles_used = cycle
 
@@ -287,24 +452,29 @@ def run_pr_cycle(
             )
 
         cycle = 0
+        scope_suffix = ""
         while True:
             cycle += 1
             bugbot_result = run_role_fn(
                 server=server, workdir=workdir, role="bugbot", title=f"{pr_title} -- bugbot c{cycle}",
-                prompt=bugbot_prompt, model=resolved["bugbot"], rundir=rundir, cycle=cycle,
+                prompt=bugbot_prompt + scope_suffix, model=resolved["bugbot"], rundir=rundir, cycle=cycle,
             )
             compliance_result = run_role_fn(
                 server=server, workdir=workdir, role="compliance", title=f"{pr_title} -- compliance c{cycle}",
-                prompt=compliance_prompt, model=resolved["verify"], rundir=rundir, cycle=cycle,
+                prompt=compliance_prompt + scope_suffix, model=resolved["verify"], rundir=rundir, cycle=cycle,
             )
             role_results.extend((bugbot_result, compliance_result))
+            _log("scan", cycle, bugbot_result, resolved["bugbot"])
+            _log("scan", cycle, compliance_result, resolved["verify"])
             merged = merge(bugbot_result.review_result, compliance_result.review_result)
             if cycle > 1:
                 recurrence.record_post_fix(merged.must_fix)
             decision = evaluate(
                 merged, scan_budget, "scan", recurrence,
                 inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
+                convergence=scan_convergence,
             )
+            _log_decision("scan", cycle, decision)
             if decision.action == "pass":
                 break
             if decision.action in ("fail", "abort"):
@@ -315,12 +485,20 @@ def run_pr_cycle(
             if decision.action == "inconclusive_retry":
                 continue
             # spawn_fix / spawn_fix_escalated
+            finding_files = _finding_files(merged.must_fix)
+            pre_fix_head = _head_sha(workdir)
             fix_result = _run_dev_fix(
                 server=server, workdir=workdir, pr_title=pr_title, findings=merged.must_fix,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
                 rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
+                approval_required=approval_required,
             )
             role_results.append(fix_result)
+            _log("scan", cycle, fix_result, resolved["dev"])
+            if _safe_recheck_route(workdir, pre_fix_head, finding_files) == "BOUNDED":
+                scope_suffix = _bounded_scope_suffix(_changed_files(workdir, pre_fix_head))
+            else:
+                scope_suffix = ""
 
         return CycleResult(
             verdict="PASS", stage="scan", reason="review + bug/compliance scan clean",

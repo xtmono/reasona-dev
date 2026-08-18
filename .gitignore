@@ -19,3 +19,6 @@ __pycache__/
 !.reasona/bernstein-template.yaml
 .sdd/
 generated_plan.yaml
+
+# Worktrees created per the project convention (see CLAUDE.md worktree rule).
+.worktrees/
