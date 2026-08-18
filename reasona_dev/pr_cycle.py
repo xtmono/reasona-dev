@@ -14,31 +14,35 @@ can safely create a follow-up task from inside a running request: pluggy's
 request handler (`task_crud.py`), so a same-process HTTP call back to
 `/tasks` from inside it risks event-loop reentrancy -- untested and not
 worth risking. Instead this driver runs OUTSIDE Bernstein, one level up:
-for each role it writes a tiny one-step `plan.yaml` and shells out to
-``bernstein run <that plan> --auto-approve`` -- the exact same CLI surface
-an operator types by hand -- then reads the agent's raw output back from a
-file the step's own prompt instructs the agent to write as its last action.
-No Bernstein HTTP API is touched or guessed at.
+`run_pr_cycle()` starts ONE persistent Bernstein server
+(`reasona_dev.bernstein_server.start_server()`) for the whole cycle, then
+each role dispatch is a `POST /tasks` against it (`run_role()`), polled via
+`GET /tasks/{id}` -- no plan.yaml file per role, no fresh server bootstrap
+per role. The agent's actual structured output (the markdown report +
+`RESULT: ...` line `finding_adapter.py` parses) still comes back through
+the same file-handoff convention as before: the task description instructs
+the agent to write its complete output to a file as its last action, and
+that file -- not the task's own one-line `result_summary` -- is what
+`run_role()` reads and parses. See `bernstein_server.py`'s module docstring
+for the full "why HTTP, why the file handoff survives" reasoning.
 
-**Not yet live-verified.** Every other mechanism in this project was
-checked against a real `bernstein` invocation (`plan validate`, `review
---pipeline --validate-only`, `doctor`) before being called done. This
-module has NOT had that pass yet -- `run_role()`'s actual `bernstein run`
-subprocess call is untested against a live server (that requires spending
-real agent budget on a real repo, deliberately deferred -- see README
-"Next"). Treat `run_role()` as the one unverified boundary; everything
-above it (`FixBudget`/`RecurrenceTracker`/`evaluate()`-driven looping) is
-plain, already-tested Python.
+**Not yet live-verified.** Every individual HTTP primitive `run_role()`
+now uses (`POST /tasks`, `GET /tasks/{id}`) was checked against a real
+running Bernstein server in an earlier session; this driver's OWN
+composition of them -- one server serving every role dispatch across a
+whole `run_pr_cycle()` call -- has not itself been run end-to-end against
+a live paid server yet (see `bernstein_server.py`'s docstring). Treat
+`run_role()` as the one unverified boundary; everything above it
+(`FixBudget`/`RecurrenceTracker`/`evaluate()`-driven looping) is plain,
+already-tested Python.
 """
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
+from reasona_dev.bernstein_server import ServerHandle, dispatch_task, poll_task, start_server, stop_server
 from reasona_dev.cycle_gate import FixBudget, RecurrenceTracker, evaluate
 from reasona_dev.finding_adapter import (
     ReviewResult,
@@ -76,46 +80,24 @@ class CycleResult:
     role_results: list[RoleRunResult] = field(default_factory=list)
 
 
-def _write_role_plan(
-    *,
-    role: str,
-    title: str,
-    prompt: str,
-    model: ResolvedModel,
-    raw_output_path: Path,
-    plan_path: Path,
-) -> None:
-    """One-step plan.yaml whose step instructs the agent to write its
-    COMPLETE output (markdown + RESULT block, verbatim) to
-    `raw_output_path` as its last action -- see module docstring for why
-    this is the handoff mechanism instead of a Bernstein API call.
+def _build_role_description(prompt: str, raw_output_path: Path) -> str:
+    """Appends the file-handoff instruction to a role's prompt -- unchanged
+    from the old plan-step description, just no longer embedded in a YAML
+    file (see module docstring).
     """
-    step = {
-        "title": title,
-        "description": (
-            f"{prompt}\n\n"
-            "---\n"
-            "When you are completely done, write your ENTIRE output above "
-            "(the markdown report AND the RESULT block, verbatim, nothing "
-            f"added or removed) to the file `{raw_output_path}` as your "
-            "final action, then stop."
-        ),
-        "role": role,
-        "model": model.model,
-        "effort": model.effort,
-        "completion_signals": [{"type": "test_passes", "command": f"test -s {raw_output_path}"}],
-    }
-    plan = {
-        "name": f"reasona-dev-{role}",
-        "description": f"reasona-dev {role} dispatch",
-        "cli": model.adapter,
-        "stages": [{"name": role, "steps": [step]}],
-    }
-    plan_path.write_text(yaml.safe_dump(plan, sort_keys=False, allow_unicode=True))
+    return (
+        f"{prompt}\n\n"
+        "---\n"
+        "When you are completely done, write your ENTIRE output above "
+        "(the markdown report AND the RESULT block, verbatim, nothing "
+        f"added or removed) to the file `{raw_output_path}` as your "
+        "final action, then stop."
+    )
 
 
 def run_role(
     *,
+    server: ServerHandle,
     workdir: Path,
     role: str,
     title: str,
@@ -124,30 +106,29 @@ def run_role(
     rundir: Path,
     cycle: int,
 ) -> RoleRunResult:
-    """Dispatch one role once, synchronously, via `bernstein run`.
+    """Dispatch one role once against the shared, already-running
+    `server`, via `POST /tasks`, then poll `GET /tasks/{id}` to completion.
 
-    Returns `role_status=ERROR` (never a silent PASS) if the agent's
-    output file never appears -- matches worker.md -> *RESULT parsing*:
-    "Missing block ... -> cycle FAIL", not "treat as clean".
+    Returns `role_status=ERROR` (never a silent PASS) if the task never
+    reaches `done` or the agent's output file never appears -- matches
+    worker.md -> *RESULT parsing*: "Missing block ... -> cycle FAIL", not
+    "treat as clean".
     """
     raw_output_path = rundir / f"{role}-c{cycle}.raw.txt"
-    plan_path = rundir / f"{role}-c{cycle}.plan.yaml"
     rundir.mkdir(parents=True, exist_ok=True)
     if raw_output_path.exists():
         raw_output_path.unlink()
 
-    _write_role_plan(
-        role=role, title=title, prompt=prompt, model=model,
-        raw_output_path=raw_output_path, plan_path=plan_path,
+    task_id = dispatch_task(
+        server,
+        role=role, title=title,
+        description=_build_role_description(prompt, raw_output_path),
+        model=model.model, effort=model.effort, cli=model.adapter,
+        raw_output_path=raw_output_path,
     )
+    task = poll_task(server, task_id)
 
-    subprocess.run(
-        ["bernstein", "run", str(plan_path), "--auto-approve"],
-        cwd=workdir,
-        check=False,
-    )
-
-    if not raw_output_path.is_file():
+    if task.get("status") != "done" or not raw_output_path.is_file():
         return RoleRunResult(
             role=role, cycle=cycle,
             review_result=ReviewResult(role_status=RoleStatus.ERROR),
@@ -187,6 +168,7 @@ def _build_fix_prompt(pr_title: str, findings) -> str:
 
 def _run_dev_fix(
     *,
+    server: ServerHandle,
     workdir: Path,
     pr_title: str,
     findings,
@@ -206,7 +188,7 @@ def _run_dev_fix(
         effort=dev_model.effort, source="cycle_gate:escalated",
     )
     return run_role_fn(
-        workdir=workdir, role="backend", title=f"{pr_title} -- fix c{cycle}",
+        server=server, workdir=workdir, role="backend", title=f"{pr_title} -- fix c{cycle}",
         prompt=_build_fix_prompt(pr_title, findings), model=model, rundir=rundir, cycle=cycle,
     )
 
@@ -218,7 +200,10 @@ def run_pr_cycle(
     resolved: dict[str, ResolvedModel],
     rundir: str | Path,
     profile: str,
+    port: int = 8052,
     run_role_fn=run_role,
+    start_server_fn=start_server,
+    stop_server_fn=stop_server,
 ) -> CycleResult:
     """develop -> verify(review) -> bug+compliance scan, worker.md-faithful.
 
@@ -227,9 +212,14 @@ def run_pr_cycle(
     cycle-0 development, gated by `$CI_FAST`-equivalent `completion_signals`
     the way it already is).
 
-    `run_role_fn` is injectable purely for testing -- production callers
-    never pass it (defaults to the real `run_role`, which shells out to
-    `bernstein run`).
+    One Bernstein server is started here, once, and shared across every
+    role dispatch in this cycle (see module docstring for why) -- stopped
+    in a `finally` so a mid-cycle exception never leaves it running.
+
+    `run_role_fn`/`start_server_fn`/`stop_server_fn` are injectable purely
+    for testing -- production callers never pass them (defaults are the
+    real `run_role`/`start_server`/`stop_server`, which talk to a real
+    Bernstein server over HTTP).
     """
     workdir = Path(workdir)
     rundir = Path(rundir)
@@ -242,95 +232,99 @@ def run_pr_cycle(
     if review_profile_prompt is None:
         return CycleResult(verdict="ABORT", stage="review", reason=f"no review prompt for profile {profile!r}")
 
-    # --- Verify cycles (review), max 8 -- worker.md -> *Develop & verify* ---
-    cycle = 0
-    while True:
-        cycle += 1
-        result = run_role_fn(
-            workdir=workdir, role="reviewer", title=f"{pr_title} -- review c{cycle}",
-            prompt=review_profile_prompt, model=resolved["review"], rundir=rundir, cycle=cycle,
-        )
-        role_results.append(result)
-        if cycle > 1:
-            # This review followed a dev fix -- whatever MUST_FIX is still
-            # here just SURVIVED that fix. Record it BEFORE evaluate() so
-            # `RecurrenceTracker.decide()` sees the updated count (dev-ralf
-            # §3.5: a key surviving one completed fix earns exactly one
-            # bounded escalation before FAIL).
-            recurrence.record_post_fix(result.review_result.must_fix)
-        decision = evaluate(
-            result.review_result, review_budget, "review", recurrence,
-            inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
-        )
-        if decision.action in ("pass",):
-            break
-        if decision.action in ("fail", "abort"):
-            return CycleResult(
-                verdict="FAIL", stage="review", reason=decision.reason,
-                review_cycles=cycle, role_results=role_results,
+    server = start_server_fn(workdir, port=port)
+    try:
+        # --- Verify cycles (review), max 8 -- worker.md -> *Develop & verify* ---
+        cycle = 0
+        while True:
+            cycle += 1
+            result = run_role_fn(
+                server=server, workdir=workdir, role="reviewer", title=f"{pr_title} -- review c{cycle}",
+                prompt=review_profile_prompt, model=resolved["review"], rundir=rundir, cycle=cycle,
             )
-        if decision.action == "inconclusive_retry":
-            continue  # re-run the SAME reviewer, no dev dispatch, no budget spend
-        # spawn_fix / spawn_fix_escalated: dispatch dev, then FULL re-review
-        # (not the bounded confirm/regression recheck -- `cycle_gate.
-        # recheck_route()` needs pre-fix-head/finding-file tracking this
-        # driver does not do yet; every fix cycle here re-runs the complete
-        # review prompt, worker.md's "recheck" narrowing is a follow-up).
-        fix_result = _run_dev_fix(
-            workdir=workdir, pr_title=pr_title, findings=result.review_result.must_fix,
-            dev_model=resolved["dev"], escalated_model=decision.escalated_model,
-            rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
-        )
-        role_results.append(fix_result)
+            role_results.append(result)
+            if cycle > 1:
+                # This review followed a dev fix -- whatever MUST_FIX is still
+                # here just SURVIVED that fix. Record it BEFORE evaluate() so
+                # `RecurrenceTracker.decide()` sees the updated count (dev-ralf
+                # §3.5: a key surviving one completed fix earns exactly one
+                # bounded escalation before FAIL).
+                recurrence.record_post_fix(result.review_result.must_fix)
+            decision = evaluate(
+                result.review_result, review_budget, "review", recurrence,
+                inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
+            )
+            if decision.action in ("pass",):
+                break
+            if decision.action in ("fail", "abort"):
+                return CycleResult(
+                    verdict="FAIL", stage="review", reason=decision.reason,
+                    review_cycles=cycle, role_results=role_results,
+                )
+            if decision.action == "inconclusive_retry":
+                continue  # re-run the SAME reviewer, no dev dispatch, no budget spend
+            # spawn_fix / spawn_fix_escalated: dispatch dev, then FULL re-review
+            # (not the bounded confirm/regression recheck -- `cycle_gate.
+            # recheck_route()` needs pre-fix-head/finding-file tracking this
+            # driver does not do yet; every fix cycle here re-runs the complete
+            # review prompt, worker.md's "recheck" narrowing is a follow-up).
+            fix_result = _run_dev_fix(
+                server=server, workdir=workdir, pr_title=pr_title, findings=result.review_result.must_fix,
+                dev_model=resolved["dev"], escalated_model=decision.escalated_model,
+                rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
+            )
+            role_results.append(fix_result)
 
-    review_cycles_used = cycle
+        review_cycles_used = cycle
 
-    # --- Bug + compliance scan, parallel, max 8 -- worker.md -> *Pipeline* ---
-    bugbot_prompt = resolve_prompt("bugbot", profile=profile, workdir=workdir)
-    compliance_prompt = resolve_prompt("compliance", profile=profile, workdir=workdir)
-    if bugbot_prompt is None or compliance_prompt is None:
+        # --- Bug + compliance scan, parallel, max 8 -- worker.md -> *Pipeline* ---
+        bugbot_prompt = resolve_prompt("bugbot", profile=profile, workdir=workdir)
+        compliance_prompt = resolve_prompt("compliance", profile=profile, workdir=workdir)
+        if bugbot_prompt is None or compliance_prompt is None:
+            return CycleResult(
+                verdict="ABORT", stage="scan", reason=f"no bugbot/compliance prompt for profile {profile!r}",
+                review_cycles=review_cycles_used, role_results=role_results,
+            )
+
+        cycle = 0
+        while True:
+            cycle += 1
+            bugbot_result = run_role_fn(
+                server=server, workdir=workdir, role="bugbot", title=f"{pr_title} -- bugbot c{cycle}",
+                prompt=bugbot_prompt, model=resolved["bugbot"], rundir=rundir, cycle=cycle,
+            )
+            compliance_result = run_role_fn(
+                server=server, workdir=workdir, role="compliance", title=f"{pr_title} -- compliance c{cycle}",
+                prompt=compliance_prompt, model=resolved["verify"], rundir=rundir, cycle=cycle,
+            )
+            role_results.extend((bugbot_result, compliance_result))
+            merged = merge(bugbot_result.review_result, compliance_result.review_result)
+            if cycle > 1:
+                recurrence.record_post_fix(merged.must_fix)
+            decision = evaluate(
+                merged, scan_budget, "scan", recurrence,
+                inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
+            )
+            if decision.action == "pass":
+                break
+            if decision.action in ("fail", "abort"):
+                return CycleResult(
+                    verdict="FAIL", stage="scan", reason=decision.reason,
+                    review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
+                )
+            if decision.action == "inconclusive_retry":
+                continue
+            # spawn_fix / spawn_fix_escalated
+            fix_result = _run_dev_fix(
+                server=server, workdir=workdir, pr_title=pr_title, findings=merged.must_fix,
+                dev_model=resolved["dev"], escalated_model=decision.escalated_model,
+                rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
+            )
+            role_results.append(fix_result)
+
         return CycleResult(
-            verdict="ABORT", stage="scan", reason=f"no bugbot/compliance prompt for profile {profile!r}",
-            review_cycles=review_cycles_used, role_results=role_results,
+            verdict="PASS", stage="scan", reason="review + bug/compliance scan clean",
+            review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
         )
-
-    cycle = 0
-    while True:
-        cycle += 1
-        bugbot_result = run_role_fn(
-            workdir=workdir, role="bugbot", title=f"{pr_title} -- bugbot c{cycle}",
-            prompt=bugbot_prompt, model=resolved["bugbot"], rundir=rundir, cycle=cycle,
-        )
-        compliance_result = run_role_fn(
-            workdir=workdir, role="compliance", title=f"{pr_title} -- compliance c{cycle}",
-            prompt=compliance_prompt, model=resolved["verify"], rundir=rundir, cycle=cycle,
-        )
-        role_results.extend((bugbot_result, compliance_result))
-        merged = merge(bugbot_result.review_result, compliance_result.review_result)
-        if cycle > 1:
-            recurrence.record_post_fix(merged.must_fix)
-        decision = evaluate(
-            merged, scan_budget, "scan", recurrence,
-            inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
-        )
-        if decision.action == "pass":
-            break
-        if decision.action in ("fail", "abort"):
-            return CycleResult(
-                verdict="FAIL", stage="scan", reason=decision.reason,
-                review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
-            )
-        if decision.action == "inconclusive_retry":
-            continue
-        # spawn_fix / spawn_fix_escalated
-        fix_result = _run_dev_fix(
-            workdir=workdir, pr_title=pr_title, findings=merged.must_fix,
-            dev_model=resolved["dev"], escalated_model=decision.escalated_model,
-            rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
-        )
-        role_results.append(fix_result)
-
-    return CycleResult(
-        verdict="PASS", stage="scan", reason="review + bug/compliance scan clean",
-        review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
-    )
+    finally:
+        stop_server_fn(server, workdir=workdir)

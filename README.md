@@ -197,15 +197,20 @@ rather than run with the wrong policy.
 
 `reasona_dev/pr_cycle.py` (the dev-ralf-faithful develop -> verify ->
 bug+compliance scan driver, see `docs/ARCHITECTURE.md` §3.5.4) is built and
-unit-tested. Its `run_role()` boundary's underlying mechanism -- a real
-`bernstein run <plan> --auto-approve` against a live server -- IS now
-live-verified (2026-08-18, real paid run: haiku agent spawned, committed,
-merged, task `done`, `result_summary` populated; see the `bernstein.yaml`
-placement bug this same test caught, above). `pr_cycle.py`'s own
-`run_role()` -- the file-handoff prompt convention specifically -- has not
-yet been run end-to-end itself. The remaining work: one real PR unit
-through `plan_compile.py`'s cycle-0 dev step -> `pr_cycle.run_pr_cycle()`
--> `gate_check.py` -> squash merge, on a real repository -- plus the
-still-unbuilt tail (`sync-main -> /gh-pr -> /gh-review -> up-to-date gate
+unit-tested. `run_role()` now dispatches over Bernstein's HTTP task-server
+API (`reasona_dev/bernstein_server.py`: one `bernstein start` per
+`run_pr_cycle()` call, `POST /tasks` per role dispatch, `GET /tasks/{id}`
+polling) instead of a fresh `bernstein run <plan> --auto-approve` subprocess
+per role -- the individual HTTP primitives (`POST /tasks`, `GET
+/tasks/{id}`, `GET /health`) are each live-verified (2026-08-18, real paid
+run: haiku agent spawned via a hand-posted task, committed, merged, task
+`done`, `result_summary` populated over HTTP -- see the `bernstein.yaml`
+placement bug this same test caught, above), but this module's own
+composition of them -- `run_pr_cycle()`'s single server serving every role
+dispatch across a whole cycle -- has not itself been run end-to-end yet.
+The remaining work: one real PR unit through `plan_compile.py`'s cycle-0
+dev step -> `pr_cycle.run_pr_cycle()` -> `gate_check.py` -> squash merge,
+on a real repository -- plus the still-unbuilt tail (`sync-main -> /gh-pr
+-> /gh-review -> up-to-date gate
 -> final_audit`, worker.md's last third) and bounded (vs. always-full)
 recheck routing.
