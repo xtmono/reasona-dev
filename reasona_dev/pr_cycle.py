@@ -40,6 +40,13 @@ run before a doomed PR gives up. Each is addressed by a different piece:
   decision is recorded, so the caps above can eventually be re-derived from
   measurement instead of inherited on faith.
 
+**Profiles are per PR unit, not per repo.** `profile` is a parameter here
+rather than something this driver resolves, because the resolution needs
+the unit's declared `files:` and the repo's `dev-profile-map:` -- both of
+which `plan_compile` already holds, and which it validates at compile time
+so a two-language unit is refused while the author still has the plan open.
+See `prompt_profile.resolve_unit_profile()`.
+
 **Human approval.** `approval_required` maps onto Bernstein's own per-task
 gate. It is deliberately a caller-supplied flag rather than something this
 module decides: the argument for gating is that the FIRST PR of a plan
@@ -80,7 +87,7 @@ from reasona_dev.finding_adapter import (
     parse_text_contract,
 )
 from reasona_dev.model_config import ResolvedModel
-from reasona_dev.prompt_profile import resolve_prompt
+from reasona_dev.prompt_profile import available_profiles, resolve_prompt
 
 # worker.md -> *Role I/O*: bugbot/compliance emit the external-skill KV wire
 # shape (`finding_adapter.py --input kv`); review/final_audit emit the `||`
@@ -318,6 +325,29 @@ def _run_dev_fix(
     )
 
 
+def _missing_prompt_reason(role: str, profile: str, workdir: Path) -> str:
+    """An abort message that says what to do about it.
+
+    Prompts resolve through exactly two layers with nothing packaged
+    underneath, so "not configured anywhere" is now a real and reachable
+    state rather than an impossible one -- and the bare form of this message
+    ("no review prompt for profile 'generic'") cannot be told apart from a
+    typo'd profile name. Naming both searched paths and what IS present
+    separates those two cases at the point of failure.
+    """
+    found = available_profiles(workdir)
+    if found:
+        have = "; ".join(f"{name} ({', '.join(roles)})" for name, roles in found.items())
+        detail = f"available: {have}"
+    else:
+        detail = "no prompt profile found in either layer"
+    return (
+        f"no {role} prompt for profile {profile!r} -- searched "
+        f"{workdir}/.reasona/prompts/{profile}/{role}.md then "
+        f"~/.reasona/prompts/{profile}/{role}.md; {detail}"
+    )
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "pr"
 
@@ -384,7 +414,10 @@ def run_pr_cycle(
 
     review_profile_prompt = resolve_prompt("review", profile=profile, workdir=workdir)
     if review_profile_prompt is None:
-        return CycleResult(verdict="ABORT", stage="review", reason=f"no review prompt for profile {profile!r}")
+        return CycleResult(
+            verdict="ABORT", stage="review",
+            reason=_missing_prompt_reason("review", profile, workdir),
+        )
     review_profile_prompt += memory_block
     # Absent `recheck.md` is not fatal -- it only means every cycle stays
     # FULL, which is the pre-existing behaviour. A profile opts into the
@@ -455,8 +488,10 @@ def run_pr_cycle(
         bugbot_prompt = resolve_prompt("bugbot", profile=profile, workdir=workdir)
         compliance_prompt = resolve_prompt("compliance", profile=profile, workdir=workdir)
         if bugbot_prompt is None or compliance_prompt is None:
+            missing = "bugbot" if bugbot_prompt is None else "compliance"
             return CycleResult(
-                verdict="ABORT", stage="scan", reason=f"no bugbot/compliance prompt for profile {profile!r}",
+                verdict="ABORT", stage="scan",
+                reason=_missing_prompt_reason(missing, profile, workdir),
                 review_cycles=review_cycles_used, role_results=role_results,
             )
         bugbot_prompt += memory_block

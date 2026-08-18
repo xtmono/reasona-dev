@@ -76,6 +76,7 @@ class PRUnit:
     files: list[str] = field(default_factory=list)
     section: str = ""
     unit_type: str | None = None
+    profile: str | None = None
     acceptance: list[AcceptanceCriterion] = field(default_factory=list)
 
 
@@ -163,6 +164,7 @@ def parse_manifest_units(plan_text: str) -> tuple[list[PRUnit], list[str]]:
                 files=files,
                 section=sections.get(index, ""),
                 unit_type=str(raw["type"]).strip() if raw.get("type") else None,
+                profile=str(raw["profile"]).strip() if raw.get("profile") else None,
                 acceptance=criteria,
             )
         )
@@ -277,6 +279,7 @@ def compile_to_bernstein_plan(
     write_acceptance: bool = True,
     max_pr_units: int = MAX_PR_UNITS,
     strict_plan: bool = True,
+    validate_profiles: bool = True,
 ) -> dict:
     """Return a dict matching Bernstein's plan.yaml schema (validated shape).
 
@@ -391,6 +394,28 @@ def compile_to_bernstein_plan(
             "first PR can reach the specification of the last. Pass max_pr_units=0 "
             "to opt out deliberately."
         )
+
+    # Resolve every unit's profile now, at compile time, rather than at
+    # dispatch. A unit whose files span two profiles is a plan defect, and a
+    # plan defect should surface while the author still has the plan open --
+    # not an hour into a run when `pr_cycle` reaches that stage.
+    if validate_profiles:
+        from reasona_dev import config_file
+        from reasona_dev.prompt_profile import ProfileConflict, resolve_unit_profile
+
+        project_cfg = config_file.load_project(workdir)
+        global_cfg = config_file.load_global()
+        conflicts: list[str] = []
+        for u in units:
+            try:
+                resolve_unit_profile(
+                    files=u.files, unit_profile=u.profile, unit_index=u.index,
+                    project_cfg=project_cfg, global_cfg=global_cfg,
+                )
+            except ProfileConflict as exc:
+                conflicts.append(str(exc))
+        if conflicts:
+            raise PlanError("\n\n".join(conflicts))
 
     # Acceptance criteria are consumed by the DRIVER before merge, not by
     # Bernstein's janitor (see reasona_dev/acceptance.py on why), so they are

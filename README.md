@@ -61,6 +61,7 @@ docs/ARCHITECTURE.md       4-layer architecture, verified against installed Bern
                               (a future reasona-plan gets its own `plan-models:` key, same file)
 .reasona/bernstein-template.yaml   committed copy of .bernstein/bernstein.yaml, kept purely as a real
                                      example of bernstein_config's project-local template shape
+.reasona/prompts/generic/     THIS repo's own prompt profile -- no packaged layer exists (see "Prompt profiles")
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step), anchors to workdir
   pr_cycle.py                 dev-ralf-faithful develop -> verify -> bug+compliance scan driver (worker.md)
@@ -71,8 +72,7 @@ reasona_dev/
   cycles_log.py                   append-only per-cycle finding log (.reasona/cycles.jsonl) -- the measurement substrate
   cycles_query.py                  attribution / budget / coverage queries -- what makes the log a decision
   memory.py                        repo-scoped priors GENERATED from cycles.jsonl, file-scoped retrieval
-  prompt_profile.py            project/language-selectable review/bugbot/compliance prompts (.reasona/prompts/<profile>/)
-  prompts/generic/               packaged default prompt profile (review/recheck/bugbot/compliance/final_audit.md)
+  prompt_profile.py            per-unit profile resolution + two-layer prompt lookup (.reasona/prompts/<profile>/)
   model_config.py            per-role model/adapter/effort priority chain + CONDUCTOR-COLLAPSE audit trail
   config_file.py              reasona-dev's own 2-layer config cascade (~/.reasona -> <workdir>/.reasona)
   bernstein_config.py          bootstraps + syncs a target repo's bernstein.yaml (see "Bootstrapping" below)
@@ -82,7 +82,7 @@ reasona_dev/
   squash.py                        squash message builder + guard
   plugin.py                         pluggy hookimpl (on_pre_task_create, on_agent_spawned)
   adapters/ocr.py                    OcrAdapter, registered via bernstein.adapters entry points
-tests/                      pytest, 214 cases, all passing
+tests/                      pytest, 233 cases, all passing
 ```
 
 ## Setup
@@ -182,23 +182,79 @@ operator's own `~/.reasona/reasona.yaml`.
 
 ## Prompt profiles
 
-review/bugbot/compliance/final_audit prompts are project- and
-language-specific (dev-ralf's Rust-monorepo setup is Rust-aware and dispatches to
-a target repo's own `ext-bugbot`/`ext-review` skills) -- they live as plain `.md`
-files under a named **profile**, resolved through the same
-flag > env var > project cfg > global cfg > default chain as everything
-else (`reasona_dev/prompt_profile.py`):
+review/recheck/bugbot/compliance/final_audit prompts are project- and
+language-specific -- they live as plain `.md` files under a named **profile**,
+resolved through exactly **two layers, project then global**:
 
 ```
-<workdir>/.reasona/prompts/<profile>/<role>.md   project-local (e.g. a target repo's own Rust profile)
-~/.reasona/prompts/<profile>/<role>.md           global (an operator's shared profile)
-reasona_dev/prompts/<profile>/<role>.md          packaged with reasona-dev (only "generic" ships today)
+<workdir>/.reasona/prompts/<profile>/<role>.md   project-local
+~/.reasona/prompts/<profile>/<role>.md           global (an operator's shared set)
 ```
 
-Select a profile via `--profile NAME`, `REASONA_DEV_PROFILE`, or
-`dev-profile:` in `reasona.yaml`. An unresolvable profile name returns no
-prompt (never silently falls back to `generic`) -- `pr_cycle.py` aborts
-rather than run with the wrong policy.
+There is deliberately no packaged third layer. Every other setting in this
+project resolves the same two ways (`reasona.yaml` via `config_file.py`, the
+Bernstein seed template via `bernstein_config.py`), and a copy living inside
+site-packages is the one layer an operator cannot see or edit -- so a repo
+that thought it had customized its review prompt could silently be running a
+shipped one for any role file it forgot to add. A repo with neither layer
+gets `None` and the cycle aborts, which is the same refusal an unknown
+profile name already gets.
+
+Precedence is **per file, not per profile directory**: a project overriding
+`review.md` still inherits the global `bugbot.md`.
+
+This repo commits its own `.reasona/prompts/generic/` -- it is what this repo
+runs on, and it doubles as the checked-in example to copy into
+`~/.reasona/prompts/generic/` when setting up the global layer.
+
+### Per-unit profiles, for repos with more than one language
+
+A single repo-wide profile cannot describe a monorepo whose Rust crates and
+Python services need different review policies -- and reviewing a Python
+service against Rust-aware prompts is worse than having no profile, because
+it produces confident findings from the wrong rulebook. So the profile is
+resolved **per PR unit**, from the `files:` that unit already declares:
+
+```yaml
+# <repo>/.reasona/reasona.yaml
+dev-profile: generic              # when nothing in the map matches
+dev-profile-map:
+  "crates/**": rust
+  "services/**/*.py": python
+  "web/**": typescript
+```
+
+```yaml
+# plan.md manifest
+pr_units:
+  - index: 3
+    files: [crates/flow/src/x.rs]     # -> rust, via the map
+  - index: 4
+    files: [crates/gen/build.rs]
+    profile: rust-buildscript          # explicit, wins outright
+```
+
+Resolution order: the unit's own `profile:` > `dev-profile-map:` glob match >
+`dev-profile:` > `"generic"`. Files matching nothing are ignored rather than
+counted as the default, so a Rust PR that also edits `README.md` is still a
+Rust PR.
+
+**A unit whose files map to two profiles is refused at compile time:**
+
+```
+$ reasona-dev compile-plan plan.md -o out.yaml
+reasona-dev: PR 3 spans 2 profiles:
+  crates/flow/src/x.rs -> rust
+  services/api/ingest.py -> python
+A single review policy cannot cover both. Either set `profile:` on PR 3
+explicitly, or split it into separate PR units.
+```
+
+Picking the most-specific glob or the majority language would be
+deterministic and would also mean half the change goes unreviewed by any
+rulebook that applies to it, silently. The check runs at compile time so the
+defect surfaces while the author still has the plan open, not an hour into a
+run.
 
 ## Quality budget, and why it is shaped this way
 

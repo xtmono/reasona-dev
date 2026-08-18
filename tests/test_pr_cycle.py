@@ -49,7 +49,7 @@ def _noop_stop_server(server, *, workdir):
     pass
 
 
-def test_clean_pass_no_fix_cycles(tmp_path):
+def test_clean_pass_no_fix_cycles(tmp_path, generic_prompts):
     script = [parse_text_contract(PASS_TEXT), None, None]  # review, bugbot, compliance
     script[1] = parse_text_contract(PASS_TEXT)
     script[2] = parse_text_contract(PASS_TEXT)
@@ -63,7 +63,7 @@ def test_clean_pass_no_fix_cycles(tmp_path):
     assert result.scan_cycles == 1
 
 
-def test_review_fix_required_then_passes(tmp_path):
+def test_review_fix_required_then_passes(tmp_path, generic_prompts):
     script = [
         parse_text_contract(MUST_FIX_TEXT),  # review c1: FIX_REQUIRED
         ReviewResult(role_status=RoleStatus.COMPLETE),  # dev fix (ignored, empty parse)
@@ -82,7 +82,7 @@ def test_review_fix_required_then_passes(tmp_path):
     assert any(r.role == "backend" for r in result.role_results)
 
 
-def test_review_budget_exhausted_fails(tmp_path):
+def test_review_budget_exhausted_fails(tmp_path, generic_prompts):
     # Same finding key every cycle -> RecurrenceTracker escalates once then
     # FAILs; well within MAX_REVIEW_CYCLES so budget itself isn't the
     # limiter here -- this exercises the ESCALATE_ONCE -> FAIL path.
@@ -106,7 +106,7 @@ def test_missing_review_prompt_aborts(tmp_path):
     assert result.stage == "review"
 
 
-def test_role_error_status_aborts_immediately(tmp_path):
+def test_role_error_status_aborts_immediately(tmp_path, generic_prompts):
     script = [ReviewResult(role_status=RoleStatus.ERROR)]
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
@@ -117,7 +117,7 @@ def test_role_error_status_aborts_immediately(tmp_path):
     assert result.stage == "review"
 
 
-def test_scan_stage_runs_bugbot_and_compliance_in_kv_shape(tmp_path):
+def test_scan_stage_runs_bugbot_and_compliance_in_kv_shape(tmp_path, generic_prompts):
     kv_pass = (
         "=== ext-bugbot RESULT ===\nVERDICT: PASS\nBLOCKING_JSON=[]\nNON_BLOCKING_JSON=[]\n=== END ===\n"
     )

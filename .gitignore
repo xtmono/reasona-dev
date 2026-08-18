@@ -9,14 +9,22 @@ __pycache__/
 # bernstein.yaml, kept purely as a real, checked-in example of what
 # reasona_dev.bernstein_config's project-local template looks like for
 # other repos (this repo itself doesn't consume it -- see README).
+# .reasona/prompts/ is this repo's own committed prompt profile -- prompts
+# resolve through exactly two layers (project then global, see
+# reasona_dev/prompt_profile.py), so a repo that runs reasona-dev on itself
+# has to carry real files here. It doubles as the checked-in example an
+# operator copies to ~/.reasona/prompts/ to set up their global layer.
 # Everything else under .reasona/ (model_config.json, gate_state.json,
-# review-*.json, ...) is a runtime artifact and stays ignored.
+# review-*.json, cycles.jsonl, memory/, ...) is a runtime artifact and
+# stays ignored.
 # .bernstein/bernstein.yaml (Bernstein's own project config -- not
 # reasona_dev's) is committed directly, not ignored -- no rule below needs
 # to mention it.
 .reasona/*
 !.reasona/reasona.yaml
 !.reasona/bernstein-template.yaml
+!.reasona/prompts/
+!.reasona/prompts/**
 .sdd/
 generated_plan.yaml
 

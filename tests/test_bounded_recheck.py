@@ -58,7 +58,7 @@ _FIX_THEN_PASS = [
 ]
 
 
-def test_bounded_route_uses_the_recheck_model_and_prompt(tmp_path, monkeypatch):
+def test_bounded_route_uses_the_recheck_model_and_prompt(tmp_path, generic_prompts, monkeypatch):
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "BOUNDED")
     fn = _recording_role_fn(_FIX_THEN_PASS)
 
@@ -79,7 +79,7 @@ def test_bounded_route_uses_the_recheck_model_and_prompt(tmp_path, monkeypatch):
     assert "|| contract: c" in reviewer_calls[1]["prompt"]
 
 
-def test_full_route_keeps_the_expensive_review_model(tmp_path, monkeypatch):
+def test_full_route_keeps_the_expensive_review_model(tmp_path, generic_prompts, monkeypatch):
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "FULL")
     fn = _recording_role_fn(_FIX_THEN_PASS)
 
@@ -109,7 +109,7 @@ def test_route_defaults_to_full_when_no_finding_files(tmp_path):
     assert pr_cycle._safe_recheck_route(tmp_path, "deadbeef", set()) == "FULL"
 
 
-def test_approval_flag_reaches_dev_fix_dispatch_only(tmp_path, monkeypatch):
+def test_approval_flag_reaches_dev_fix_dispatch_only(tmp_path, generic_prompts, monkeypatch):
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "FULL")
     fn = _recording_role_fn(_FIX_THEN_PASS)
 
@@ -125,7 +125,7 @@ def test_approval_flag_reaches_dev_fix_dispatch_only(tmp_path, monkeypatch):
     assert by_role["bugbot"] is False
 
 
-def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, monkeypatch):
+def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, generic_prompts, monkeypatch):
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "BOUNDED")
     monkeypatch.setattr(pr_cycle, "_changed_files", lambda *a, **k: {"src/a.rs"})
     script = [
@@ -150,7 +150,7 @@ def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, monkeypatch)
     assert "- src/a.rs" in bugbot_calls[1]["prompt"]
 
 
-def test_cycles_log_is_written_for_every_dispatch_and_decision(tmp_path, monkeypatch):
+def test_cycles_log_is_written_for_every_dispatch_and_decision(tmp_path, generic_prompts, monkeypatch):
     from reasona_dev import cycles_log
 
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "FULL")

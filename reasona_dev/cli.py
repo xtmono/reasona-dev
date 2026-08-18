@@ -97,6 +97,24 @@ def _cmd_acceptance(args: argparse.Namespace) -> int:
     return acceptance.main([args.criteria_file, args.workdir or "."])
 
 
+def _cmd_prompts(args: argparse.Namespace) -> int:
+    from reasona_dev.prompt_profile import available_profiles
+
+    workdir = args.workdir or "."
+    found = available_profiles(workdir)
+    if not found:
+        print(
+            f"no prompt profiles found.\nsearched: {workdir}/.reasona/prompts/ "
+            "then ~/.reasona/prompts/\n"
+            "copy this repo's .reasona/prompts/generic/ into either location to start.",
+            file=sys.stderr,
+        )
+        return 1
+    for name, roles in found.items():
+        print(f"{name}: {', '.join(roles)}")
+    return 0
+
+
 def _cmd_ship_gate(args: argparse.Namespace) -> int:
     from reasona_dev import ship_gate
 
@@ -156,6 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_accept.add_argument("--workdir", default=None, help="Directory to run criteria in (default: cwd)")
     p_accept.set_defaults(func=_cmd_acceptance)
+
+    p_prompts = sub.add_parser(
+        "prompts",
+        help="List prompt profiles visible from here (project layer then global layer)",
+    )
+    p_prompts.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_prompts.set_defaults(func=_cmd_prompts)
 
     p_ship = sub.add_parser(
         "ship-gate",
