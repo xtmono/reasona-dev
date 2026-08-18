@@ -1,26 +1,40 @@
-"""Bootstraps a target repo's `.bernstein/bernstein.yaml` from a local or
-global template.
+"""Bootstraps a target repo's `bernstein.yaml` from a local or global
+template.
 
-Bernstein's own seed/config loader (`cli/helpers.py:find_seed_file()`)
-checks, in order, `.bernstein/bernstein.yaml` / `.bernstein/bernstein.yml`
-THEN the repo-root `bernstein.yaml` / `bernstein.yml` -- both cwd-relative,
-no `~/.bernstein/` or other home-directory fallback in that function at
-all. `bernstein run` DOES accept an explicit `--seed PATH` override (so it
-alone could point straight at some other file), but bare `bernstein` ("run
-from bernstein.yaml or backlog") and `bernstein doctor` have no such flag
--- they always call `find_seed_file()` with no override available. A
-handful of OTHER, unrelated subsystems (`core/agents/warm_pool.py`,
-`core/routes/embedding.py`, `core/protocols/mcp/mcp_composition.py`, a
-couple of TUI settings modules) DO fall back to `~/.bernstein/
-bernstein.yaml`, but each only reads its own narrow section from it (e.g.
-warm_pool.py reads only the `warm_pool:` key) -- never the
-`role_model_policy`/`model_fallback`/`approval`/`worktree_setup` config
-`bernstein run` actually needs. Net result: a real, project-local
-`.bernstein/bernstein.yaml` (or repo-root `bernstein.yaml`) has to exist for
-every ad-hoc `bernstein` invocation to work, `--seed` or not -- so this
-module always produces one, at the `.bernstein/` location specifically
-(the one `find_seed_file()` checks FIRST, and a tidier place for it than
-cluttering the repo root).
+Bernstein's own seed/config loader (`cli/helpers.py:find_seed_file()`,
+used by the top-level `bernstein run`/`doctor` CLI parsing) checks, in
+order, `.bernstein/bernstein.yaml` THEN the repo-root `bernstein.yaml` --
+so `.bernstein/` looked like the right, tidier bootstrap target, and this
+module used to write there.
+
+**Confirmed by an actual paid `bernstein run` against a real repo (2026-08-18)
+that this is wrong for the file `bernstein run` needs to ACTUALLY execute
+with.** `bernstein run` launches its orchestrator as a background
+subprocess (`core/server/server_launch.py::_start_spawner`); when the seed
+path isn't explicitly propagated to it (confirmed: happens with the exact
+invocation this project uses, `bernstein run <plan> --auto-approve`, no
+`--from-plan` needed to trigger it), that subprocess does NOT call
+`find_seed_file()` at all -- it independently re-derives `workdir /
+"bernstein.yaml"`, a single hardcoded ROOT-only path with no `.bernstein/`
+check whatsoever. A repo with only `.bernstein/bernstein.yaml` gets
+"FATAL: no adapter configured" from the orchestrator subprocess, on
+repeat, until the watchdog gives up after 5 restarts -- zero agents ever
+spawn, silently (`_start_spawner`'s own docstring warns about exactly this
+class of bug). Moving the SAME file to the repo root fixed it immediately
+in the live test: agent spawned, task completed, verified via `GET
+/tasks/{id}`'s `result_summary`. So this module now bootstraps the
+**repo-root** `bernstein.yaml` -- the `.bernstein/` location remains
+recognized (still checked, still left alone if a repo already has it
+there -- `find_seed_file()` is still real and still prefers it for
+`doctor`/plan-validate-style invocations that never hit the buggy
+subprocess path), it's just no longer where THIS module writes a fresh
+one, because a repo that only has `.bernstein/bernstein.yaml` cannot
+actually execute a `bernstein run` against it correctly today.
+
+This repo's own `bernstein.yaml` stays at `.bernstein/` regardless (see
+README) -- this project never runs `bernstein run` against itself for real
+execution, only `doctor`/`plan validate` (neither spawns the buggy
+subprocess), so it never hits this bug and isn't worth churning back.
 
 What CAN be global is reasona-dev's own copy of it, and -- mirroring
 `reasona_dev.config_file`'s exact two-layer cascade for `reasona.yaml`
@@ -67,13 +81,17 @@ GLOBAL_BERNSTEIN_YAML = Path.home() / ".reasona" / "bernstein-template.yaml"
 
 
 def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
-    """Copy a template into `workdir/.bernstein/bernstein.yaml` if the target
-    repo has no seed file `find_seed_file()` would discover on its own.
+    """Copy a template into `workdir/bernstein.yaml` (repo root) if the
+    target repo has no seed file already, at either real location.
 
-    Existing-file check covers BOTH real locations Bernstein itself reads
-    (`.bernstein/bernstein.yaml` first, then the legacy repo-root
+    Existing-file check covers BOTH locations Bernstein's `find_seed_file()`
+    recognizes (`.bernstein/bernstein.yaml` first, then repo-root
     `bernstein.yaml`) -- a repo already using either convention is left
-    completely untouched, never given a second, redundant copy.
+    completely untouched, never given a second, redundant copy. Only when
+    NEITHER exists does this module write a fresh one -- to the repo
+    ROOT specifically, not `.bernstein/`, because only the root location is
+    confirmed to work with `bernstein run`'s background orchestrator
+    subprocess today (see module docstring for the live-verified bug).
 
     Source priority when neither exists: `<workdir>/.reasona/
     bernstein-template.yaml` (project-local template) -> `GLOBAL_BERNSTEIN_YAML`
@@ -82,25 +100,24 @@ def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
     `reasona.yaml`.
 
     Returns the path now in place (whichever already existed, or the
-    freshly-copied `.bernstein/bernstein.yaml`), or `None` if nothing was
+    freshly-copied repo-root `bernstein.yaml`), or `None` if nothing was
     available to copy from either (the caller still proceeds; `bernstein
     run` will surface its own "no seed file found" error if this is never
     resolved).
     """
     workdir = Path(workdir)
     dot_bernstein_target = workdir / ".bernstein" / "bernstein.yaml"
-    legacy_root_target = workdir / "bernstein.yaml"
+    root_target = workdir / "bernstein.yaml"
     if dot_bernstein_target.exists():
         return dot_bernstein_target
-    if legacy_root_target.exists():
-        return legacy_root_target
+    if root_target.exists():
+        return root_target
 
     local_template = workdir / ".reasona" / "bernstein-template.yaml"
     for source in (local_template, GLOBAL_BERNSTEIN_YAML):
         if source.is_file():
-            dot_bernstein_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(source, dot_bernstein_target)
-            return dot_bernstein_target
+            shutil.copy(source, root_target)
+            return root_target
     return None
 
 

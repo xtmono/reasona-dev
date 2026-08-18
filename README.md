@@ -123,27 +123,41 @@ full trace). A truly global `bernstein.yaml` isn't something Bernstein
 itself supports.
 
 `reasona_dev.bernstein_config.ensure_bernstein_yaml()` bootstraps
-`<workdir>/.bernstein/bernstein.yaml` automatically for any target repo
+`<workdir>/bernstein.yaml` (repo ROOT) automatically for any target repo
 that has neither location already (checked at both; whichever one already
 exists is left completely untouched, never duplicated), sourced from:
 
 ```
-<workdir>/.bernstein/bernstein.yaml   what Bernstein reads FIRST -- the bootstrap target
-<workdir>/bernstein.yaml              legacy location Bernstein also reads -- left alone if present
+<workdir>/.bernstein/bernstein.yaml   Bernstein reads this FIRST if present -- left alone, never the bootstrap target
+<workdir>/bernstein.yaml              the bootstrap target -- confirmed live (see below) to actually work
 <workdir>/.reasona/bernstein-template.yaml     project-local template (checked first when bootstrapping)
 ~/.reasona/bernstein-template.yaml             global template (checked second when bootstrapping)
 ```
 
-**This repo uses the `.bernstein/` layout for itself too** --
-`.bernstein/bernstein.yaml` is committed directly, the plain "already has
-one, so leave it alone" case above, not the template cascade -- this
-repo's own `bernstein doctor`/`bernstein run` never go through
-`ensure_bernstein_yaml()`'s copy logic at all. `.bernstein/` is preferred
-over the legacy repo-root location because `find_seed_file()` checks it
-first and it keeps the repo root tidier. `.reasona/bernstein-template.yaml`
-is ALSO committed here, as an identical copy -- not consumed by this repo,
-just a real, checked-in example of the shape a project-local template
-takes for every other repo.
+**Why root, not `.bernstein/`, despite `find_seed_file()` preferring
+`.bernstein/`:** a real, paid `bernstein run` against a scratch repo
+(2026-08-18) showed a repo with ONLY `.bernstein/bernstein.yaml` spawns
+ZERO agents -- `bernstein run`'s background orchestrator subprocess
+(`core/server/server_launch.py::_start_spawner`) does not call
+`find_seed_file()` at all; when the seed path isn't explicitly propagated
+to it (confirmed: happens with the exact invocation `reasona_dev.pr_cycle`
+uses, `bernstein run <plan> --auto-approve`), it independently re-derives
+`workdir / "bernstein.yaml"` -- root only, no `.bernstein/` check. The
+result is a silent "FATAL: no adapter configured" loop until the watchdog
+gives up. Moving the identical file to root fixed it immediately, verified
+by a real haiku agent completing a task and `GET /tasks/{id}`'s
+`result_summary` reflecting it. `.bernstein/` is still recognized (still
+checked first, still left alone if a repo already has it there -- it's
+real for `doctor`/plan-validate-style calls, which never hit the buggy
+subprocess), it's just not where a FRESH bootstrap writes anymore.
+
+**This repo's own `bernstein.yaml` stays at `.bernstein/` regardless** --
+this project never runs `bernstein run` against itself for real execution
+(only `doctor`/`plan validate`, neither of which spawns the buggy
+subprocess), so it never hits this bug and isn't worth churning back.
+`.reasona/bernstein-template.yaml` is ALSO committed here, as an identical
+copy -- not consumed by this repo, just a real, checked-in example of the
+shape a project-local template takes for every other repo.
 
 `.reasona/reasona.yaml` is a different, unrelated file: it's
 `reasona_dev.config_file`'s own project-local model-config layer (never
@@ -175,11 +189,15 @@ rather than run with the wrong policy.
 
 `reasona_dev/pr_cycle.py` (the dev-ralf-faithful develop -> verify ->
 bug+compliance scan driver, see `docs/ARCHITECTURE.md` §3.5.4) is built and
-unit-tested, but its `run_role()` boundary -- the actual `bernstein run`
-subprocess dispatch -- has NOT been run against a live server yet; that's
-real agent budget on a real repository, deliberately deferred. The
-remaining work is exactly that: one real PR unit through `plan_compile.py`'s
-cycle-0 dev step -> `pr_cycle.run_pr_cycle()` -> `gate_check.py` -> squash
-merge, on a real repository -- plus the still-unbuilt tail
-(`sync-main -> /gh-pr -> /gh-review -> up-to-date gate -> final_audit`,
-worker.md's last third) and bounded (vs. always-full) recheck routing.
+unit-tested. Its `run_role()` boundary's underlying mechanism -- a real
+`bernstein run <plan> --auto-approve` against a live server -- IS now
+live-verified (2026-08-18, real paid run: haiku agent spawned, committed,
+merged, task `done`, `result_summary` populated; see the `bernstein.yaml`
+placement bug this same test caught, above). `pr_cycle.py`'s own
+`run_role()` -- the file-handoff prompt convention specifically -- has not
+yet been run end-to-end itself. The remaining work: one real PR unit
+through `plan_compile.py`'s cycle-0 dev step -> `pr_cycle.run_pr_cycle()`
+-> `gate_check.py` -> squash merge, on a real repository -- plus the
+still-unbuilt tail (`sync-main -> /gh-pr -> /gh-review -> up-to-date gate
+-> final_audit`, worker.md's last third) and bounded (vs. always-full)
+recheck routing.

@@ -132,7 +132,7 @@ def test_bernstein_yaml_bootstrapped_from_global_template(tmp_path, monkeypatch)
         write_audit_trail=False,
     )
 
-    assert (target_repo / ".bernstein" / "bernstein.yaml").read_text() == "goal: from-global-template\n"
+    assert (target_repo / "bernstein.yaml").read_text() == "goal: from-global-template\n"
 
 
 def test_bernstein_yaml_disabled_writes_nothing(tmp_path, monkeypatch):
@@ -148,7 +148,7 @@ def test_bernstein_yaml_disabled_writes_nothing(tmp_path, monkeypatch):
         write_audit_trail=False, write_bernstein_yaml=False,
     )
 
-    assert not (target_repo / ".bernstein" / "bernstein.yaml").exists()
+    assert not (target_repo / "bernstein.yaml").exists()
 
 
 def test_policy_flags_reach_role_model_policy_sync(tmp_path, monkeypatch):
@@ -171,5 +171,5 @@ def test_policy_flags_reach_role_model_policy_sync(tmp_path, monkeypatch):
         policy_flags={"bugbot": "codex:o1:max"},
     )
 
-    text = (target_repo / ".bernstein" / "bernstein.yaml").read_text()
+    text = (target_repo / "bernstein.yaml").read_text()
     assert "bugbot:\n    provider: codex" in text
