@@ -194,9 +194,3 @@ def test_dev_step_has_no_completion_signal(tmp_path):
     for stage in plan["stages"]:
         assert "completion_signals" not in stage["steps"][0]
 
-
-def test_gate_check_reports_a_missing_verdict_without_a_traceback(tmp_path, capsys):
-    from reasona_dev import gate_check
-
-    assert gate_check.main([str(tmp_path / "absent.json")]) == 1
-    assert "no review result" in capsys.readouterr().err

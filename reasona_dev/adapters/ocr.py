@@ -27,6 +27,21 @@ all three):
 - **stdout is one JSON object** (`{status, comments[], failed[]}`), no PTY,
   no stream-json framing -- reasona_dev.finding_adapter.parse_ocr_result
   consumes it directly.
+
+**No reasona_dev module calls this, by design.** It is registered under the
+`bernstein.adapters` entry-point group (see pyproject.toml), so the consumer
+is Bernstein's own adapter registry, not this package: a role whose
+`role_model_policy.provider` is `ocr` is spawned through here without any
+reasona-dev code being involved. Grepping for a caller inside `reasona_dev/`
+finds nothing, and that is the correct state -- not dead code.
+
+What IS unbuilt is the reviewer that would use it. `.reasona/reasona.yaml`
+carries `review: claude:opus:high,ocr`, whose `,ocr` extra was meant to run
+OCR as an ADDITIONAL reviewer beside the primary one, merging both verdicts
+through `finding_adapter.merge()`. Nothing dispatches that second reviewer
+yet, so the extra is parsed and ignored. `parse_ocr_result` is the other half
+already in place: it maps OCR's `failed[]` to INCONCLUSIVE rather than to a
+synthetic finding, which is the one INCONCLUSIVE producer this project has.
 """
 
 from __future__ import annotations

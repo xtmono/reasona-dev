@@ -25,8 +25,8 @@ the real schema in the installed Bernstein 3.15.1 package
 architecture decision made in this design track: one PR unit compiles to
 one stage with one "implement" step; the develop -> verify -> fix ->
 recheck loop is NOT pre-declared here -- it is driven at runtime by
-`reasona_dev.cycle_gate.evaluate()` inside the `on_pre_task_create` hook,
-which spawns follow-up tasks as findings demand.
+`reasona_dev.cycle_gate.evaluate()` inside `reasona_dev.pr_cycle`, which
+dispatches follow-up tasks as findings demand.
 
 `dev`'s resolved adapter is written to the plan-level `cli:` key -- the
 step schema has `model`/`effort` fields but no per-step adapter override,
@@ -313,9 +313,9 @@ def compile_to_bernstein_plan(
     (confirmed: `core/tasks/task_lifecycle.py`'s `_verify_via_janitor` runs
     every `test_passes` check with `cwd=orch._workdir`, a single fixed
     project root, not a per-task worktree). Anchoring both to the same
-    `workdir` is what keeps `gate_check.py`'s `.reasona/review-<stage>.json`
-    convention and this audit trail landing in the same place regardless of
-    where the compile step happens to be invoked from.
+    `workdir` is what keeps every `.reasona/` artifact -- this audit trail,
+    `acceptance-<stage>.json`, `cycles.jsonl` -- landing in the same place
+    regardless of where the compile step happens to be invoked from.
 
     `write_bernstein_yaml` (default True) does two things, both in
     `bernstein_config.py`: (1) copies a local-or-global template into
@@ -429,9 +429,9 @@ def compile_to_bernstein_plan(
     for u in units:
         stage_name = _stage_name(u.index)
         # **No completion_signals on the dev step.** This used to carry
-        # `gate_check .reasona/review-<stage>.json`, from a design where the
-        # review verdict was the merge gate. Two facts, both since confirmed
-        # against the installed Bernstein source, make that unworkable:
+        # a `test_passes` signal reading a review verdict file, from a design
+        # where that verdict was the merge gate. Two facts, both since
+        # confirmed against the installed Bernstein source, make it unworkable:
         #
         #   1. The file does not exist yet. Review runs AFTER this step, in
         #      `pr_cycle`, so the janitor read a missing path, exited

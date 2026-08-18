@@ -2,7 +2,7 @@
 "Pipeline you run": ``develop -> verify (max 8 cycles) -> bug+compliance
 scan (parallel, max 8 cycles)``. The `sync-main -> /gh-pr -> /gh-review ->
 up-to-date gate -> conditional final audit -> squash-merge` tail is out of
-scope here (`reasona_dev.squash`/`gate_check` pick up after this returns).
+scope here (`reasona_dev.ship_gate` picks up after this returns).
 
 **Why this exists instead of a bigger `plan.yaml`.** The number of review
 cycles, whether bugbot+compliance even run, and whether a MUST_FIX
@@ -407,6 +407,11 @@ def run_pr_cycle(
     scan_budget = FixBudget()
     review_convergence = ConvergenceTracker()
     scan_convergence = ConvergenceTracker()
+    # Carried across cycles, reset the moment a stage produces a conclusive
+    # result. Passing a literal 0 (as this did) makes `evaluate`'s
+    # INCONCLUSIVE branch unable to ever reach its own cap.
+    review_inconclusive = 0
+    scan_inconclusive = 0
     role_results: list[RoleRunResult] = []
 
     def _log(stage: str, cycle: int, result: RoleRunResult, model: ResolvedModel) -> None:
@@ -481,7 +486,8 @@ def run_pr_cycle(
                 recurrence.record_post_fix(result.review_result.must_fix)
             decision = evaluate(
                 result.review_result, review_budget, "review", recurrence,
-                inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
+                inconclusive_attempts=review_inconclusive,
+                escalation_model=resolved["dev_escalation"].model,
                 convergence=review_convergence,
             )
             _log_decision("review", cycle, decision)
@@ -493,7 +499,9 @@ def run_pr_cycle(
                     review_cycles=cycle, role_results=role_results,
                 )
             if decision.action == "inconclusive_retry":
+                review_inconclusive += 1
                 continue  # re-run the SAME reviewer, no dev dispatch, no budget spend
+            review_inconclusive = 0  # conclusive result -- the streak is over
             # spawn_fix / spawn_fix_escalated
             pending_confirm = list(result.review_result.must_fix)
             finding_files = _finding_files(pending_confirm)
@@ -543,7 +551,8 @@ def run_pr_cycle(
                 recurrence.record_post_fix(merged.must_fix)
             decision = evaluate(
                 merged, scan_budget, "scan", recurrence,
-                inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
+                inconclusive_attempts=scan_inconclusive,
+                escalation_model=resolved["dev_escalation"].model,
                 convergence=scan_convergence,
             )
             _log_decision("scan", cycle, decision)
@@ -555,7 +564,9 @@ def run_pr_cycle(
                     review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
                 )
             if decision.action == "inconclusive_retry":
+                scan_inconclusive += 1
                 continue
+            scan_inconclusive = 0  # conclusive result -- the streak is over
             # spawn_fix / spawn_fix_escalated
             finding_files = _finding_files(merged.must_fix)
             pre_fix_head = _head_sha(workdir)

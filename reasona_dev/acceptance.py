@@ -54,8 +54,7 @@ on `agent/<id>`. An acceptance criterion placed there does not merely risk
 being wrong; it either fails always, or passes vacuously by testing the
 pre-existing code. The driver, by contrast, controls when and against which
 tree it runs, so the criterion executes where the PR's code demonstrably
-is. This mirrors how `gate_check.py` already sidesteps the same constraint
-by reading a file the driver itself wrote to that root.
+is.
 
 **What this deliberately does NOT do.** It does not validate that the
 criterion is the RIGHT one. A wrong AC deterministically approves a wrong
@@ -291,7 +290,7 @@ def load_criteria_file(path: str | Path) -> tuple[list[AcceptanceCriterion], boo
 
 
 def main(argv: list[str]) -> int:
-    """Pre-merge acceptance gate, same exit convention as `gate_check.py`.
+    """Pre-merge acceptance gate. Exit 0 passes, exit 1 fails.
 
         python3 -m reasona_dev.acceptance <acceptance.json> [workdir]
 

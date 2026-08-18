@@ -13,7 +13,7 @@ them. Adding a sixth reviewer would not have caught it; the judgment simply
 is not available at the diff level.
 
 That makes this the same architectural move the rest of this project is
-built on (`gate_check.py`, `cycle_gate.py`, `finding_adapter.py`): take a
+built on (`cycle_gate.py`, `finding_adapter.py`, `acceptance.py`): take a
 judgment out of the model and make it a computation. This module is the
 missing member of that family, not an addition to the review stack.
 
@@ -419,7 +419,7 @@ def evaluate(workdir: str | Path, *, base: str = "origin/main", head: str = "HEA
 
 
 def main(argv: list[str]) -> int:
-    """CLI, same shape as `gate_check.py`: exit 0 passes, exit 1 fails.
+    """CLI: exit 0 passes, exit 1 fails.
 
         python3 -m reasona_dev.structure_gate [workdir] [base] [head]
     """

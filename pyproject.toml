@@ -2,7 +2,12 @@
 name = "reasona-dev"
 version = "0.1.0"
 description = "Deterministic plan-to-PR pipeline. Bernstein orchestration substrate + the reasona finding contract."
-requires-python = ">=3.11"
+# >=3.12, not >=3.11: `bernstein` itself requires >=3.12, so a wider floor
+# here makes the project unresolvable ("No solution found ... bernstein
+# cannot be used") and `uv run` fails outright -- which is why every test
+# invocation had to use `--no-project`, leaving the ordinary install path
+# unverified.
+requires-python = ">=3.12"
 dependencies = [
     "pyyaml>=6.0",
     "bernstein>=3.15.1",

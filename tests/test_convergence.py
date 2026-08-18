@@ -104,3 +104,76 @@ def test_convergence_is_opt_in_and_absent_tracker_preserves_old_behaviour():
             _result(2, cycle=cycle), budget, "review", recurrence, inconclusive_attempts=0
         )
         assert decision.action == "spawn_fix"
+
+
+# --- INCONCLUSIVE bounding ---------------------------------------------------
+
+def test_inconclusive_aborts_at_the_cap_instead_of_retrying_forever():
+    """Regression: `evaluate`'s INCONCLUSIVE branch returns BEFORE the budget
+    check, so it spends nothing -- and `pr_cycle` passed a literal 0 for the
+    attempt count, so the cap was unreachable. A role stuck on INCONCLUSIVE
+    re-dispatched a real agent on an unbounded loop."""
+    from reasona_dev.cycle_gate import MAX_INCONCLUSIVE_ATTEMPTS
+
+    budget = FixBudget()
+    inconclusive = ReviewResult(role_status=RoleStatus.INCONCLUSIVE)
+
+    actions = []
+    for attempt in range(MAX_INCONCLUSIVE_ATTEMPTS + 1):
+        d = evaluate(
+            inconclusive, budget, "review", RecurrenceTracker(),
+            inconclusive_attempts=attempt,
+        )
+        actions.append(d.action)
+
+    assert actions[:MAX_INCONCLUSIVE_ATTEMPTS] == ["inconclusive_retry"] * MAX_INCONCLUSIVE_ATTEMPTS
+    assert actions[-1] == "abort"
+
+
+def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, generic_prompts):
+    """The counter has to live in the driver: `evaluate` is stateless, so a
+    caller that recomputes 0 every cycle can never reach the cap."""
+    from pathlib import Path
+
+    from reasona_dev.model_config import ResolvedModel
+    from reasona_dev.pr_cycle import RoleRunResult, run_pr_cycle
+
+    resolved = {
+        "dev": ResolvedModel("dev", "sonnet", "claude", "high", "d"),
+        "review": ResolvedModel("review", "opus", "claude", "high", "d"),
+        "recheck": ResolvedModel("recheck", "sonnet", "claude", "medium", "d"),
+        "bugbot": ResolvedModel("bugbot", "x", "kilo", "high", "d"),
+        "verify": ResolvedModel("verify", "sonnet", "claude", "high", "d"),
+        "dev_escalation": ResolvedModel("dev_escalation", "opus", "claude", "high", "d"),
+    }
+    calls = []
+
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+        calls.append(role)
+        return RoleRunResult(
+            role=role, cycle=cycle,
+            review_result=ReviewResult(role_status=RoleStatus.INCONCLUSIVE),
+            raw_output_path=Path("/dev/null"),
+        )
+
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
+        profile="generic", run_role_fn=_fn,
+        start_server_fn=lambda w, *, port: None,
+        stop_server_fn=lambda s, *, workdir: None,
+    )
+
+    # bounded, not infinite: 3 retries then abort
+    assert result.verdict == "FAIL"
+    assert "inconclusive retry budget exhausted" in result.reason
+    assert len(calls) == 4
+
+
+def test_a_conclusive_result_resets_the_inconclusive_streak():
+    """Two isolated blips must not add up to an abort."""
+    budget = FixBudget()
+    recurrence = RecurrenceTracker()
+    clean = ReviewResult(role_status=RoleStatus.COMPLETE)
+
+    # a conclusive cycle in between is what the driver uses to reset to 0
+    assert evaluate(clean, budget, "review", recurrence, inconclusive_attempts=2).action == "pass"

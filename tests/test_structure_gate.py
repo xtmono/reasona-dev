@@ -138,7 +138,7 @@ def test_forbidden_dependency_allows_the_same_import_elsewhere(tmp_path):
     assert structure_gate.evaluate(repo) == []
 
 
-def test_cli_exit_codes_match_gate_check_convention(tmp_path):
+def test_cli_exit_codes(tmp_path):
     clean = _repo(tmp_path / "clean", {"a.rs": "x\n"}, cfg="structure-gate:\n  max_file_lines:\n    limit: 20\n")
     assert structure_gate.main([str(clean)]) == 0
 

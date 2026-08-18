@@ -1,14 +1,17 @@
 """Deterministic cycle control: recheck routing, escalation, budget, fingerprints.
 
-Zero-LLM logic. This is the module `on_pre_task_create` (verified real hookspec
-in Bernstein 3.15.1, `plugins/hookspecs.py`) calls before a fix/recheck task is
-allowed to spawn. Ports dev-ralf's `cycle_gate.py` + the renewal contract
+Zero-LLM logic. `reasona_dev.pr_cycle` calls `evaluate()` before deciding
+whether to dispatch a fix or recheck. It ran inside a `on_pre_task_create`
+pluggy hook in an earlier design, where fix cycles were separate `bernstein
+run` invocations the driver could not see coming; the driver now owns the
+loop, so the decision happens where the budget and trackers already live
+(see `reasona_dev.plugin` on why the hook half was removed rather than kept
+alongside). Ports dev-ralf's `cycle_gate.py` + the renewal contract
 (dev-ralf-renewal-claude.md §3.5, §3.8, §3.9) onto Bernstein's task model.
 """
 
 from __future__ import annotations
 
-import hashlib
 import subprocess
 from dataclasses import dataclass, field
 
@@ -29,56 +32,22 @@ MAX_TOTAL_FIX_CYCLES = 16
 # non-convergence, bounded to one attempt, and always logged.
 ESCALATION_ATTEMPTS_ALLOWED = 1
 
-
-def three_dot_diff_hash(repo: str, base: str = "origin/main", head: str = "HEAD") -> str:
-    """diff_hash = hash(git diff --binary base...head), index lines stripped.
-
-    Stripping the `index <blob>..<blob>` header line makes the hash tolerant
-    of unrelated blob-id churn (dev-ralf-renewal-claude.md §3.6 implementation
-    note).
-    """
-    out = subprocess.run(
-        ["git", "-C", repo, "diff", "--binary", f"{base}...{head}"],
-        capture_output=True, text=True, check=True,
-    ).stdout
-    filtered = "\n".join(
-        line for line in out.splitlines() if not line.startswith("index ")
-    )
-    return hashlib.sha256(filtered.encode("utf-8", errors="surrogateescape")).hexdigest()
+# How many times a role may come back INCONCLUSIVE before the PR is given up
+# on. An INCONCLUSIVE role is one whose VERIFICATION did not run (dev-ralf-
+# renewal §6) -- re-running it is the right first response, but only a bounded
+# number of times: the condition is usually environmental (a tool missing, a
+# service down) and does not improve by asking again.
+MAX_INCONCLUSIVE_ATTEMPTS = 3
 
 
-def base_scope_hash(repo: str, changed_paths: list[str], base: str = "origin/main") -> str:
-    """hash of the origin/main blobs for every path the PR touches.
-
-    Distinguishes "main changed an unrelated file" (reusable) from "main
-    changed a file this PR also touches" (invalidates review -- semantic
-    conflict risk even when the PR's own diff is unchanged).
-    """
-    h = hashlib.sha256()
-    for path in sorted(changed_paths):
-        blob = subprocess.run(
-            ["git", "-C", repo, "rev-parse", f"{base}:{path}"],
-            capture_output=True, text=True,
-        )
-        h.update(path.encode())
-        h.update((blob.stdout.strip() if blob.returncode == 0 else "MISSING").encode())
-    return h.hexdigest()
-
-
-@dataclass
-class Fingerprint:
-    plan_unit_hash: str
-    patch_hash: str
-    base_scope_hash: str
-    head_sha: str
-    base_sha: str
-
-    def matches(self, other: "Fingerprint") -> bool:
-        return (
-            self.plan_unit_hash == other.plan_unit_hash
-            and self.patch_hash == other.patch_hash
-            and self.base_scope_hash == other.base_scope_hash
-        )
+# NOTE: review-reuse fingerprinting (`three_dot_diff_hash` / `base_scope_hash`
+# / a `Fingerprint` comparing plan-unit + patch + base-scope hashes) lived
+# here and was removed. It was never called and never tested: the design it
+# belonged to -- skip a re-review when the diff and its base are provably
+# unchanged -- was carried over from dev-ralf §3.6 but no caller in this
+# project ever reached it. Uncalled, untested code is a claim the codebase
+# cannot back; the design is recorded in docs/ARCHITECTURE.md and can be
+# rebuilt from there when there is a caller for it.
 
 
 @dataclass
@@ -214,7 +183,7 @@ def evaluate(
     convergence: ConvergenceTracker | None = None,
     convergence_window: int = 3,
 ) -> GateDecision:
-    """The single entry point `on_pre_task_create` calls before spawning a fix task.
+    """The single entry point `pr_cycle` calls before spawning a fix task.
 
     `convergence` is optional so existing callers keep their exact
     behaviour; when supplied, it adds the non-convergence exit described in
@@ -224,9 +193,22 @@ def evaluate(
     gate = result.gate()
 
     if gate == "INCONCLUSIVE":
-        if inconclusive_attempts >= 3:
-            return GateDecision("abort", "inconclusive retry budget exhausted (3 attempts)")
-        return GateDecision("inconclusive_retry", f"attempt {inconclusive_attempts + 1}/3")
+        # The caller MUST carry this count across cycles. It used to be passed
+        # as a literal 0 by `pr_cycle`, which made this branch return
+        # `inconclusive_retry` forever -- and because it returns before the
+        # budget check below, no budget was ever spent and no cap was ever
+        # reached. A role stuck on INCONCLUSIVE re-dispatched a real agent on
+        # an unbounded loop.
+        if inconclusive_attempts >= MAX_INCONCLUSIVE_ATTEMPTS:
+            return GateDecision(
+                "abort",
+                f"inconclusive retry budget exhausted ({MAX_INCONCLUSIVE_ATTEMPTS} attempts) "
+                "-- verification never ran, which is an environment problem, not a code one",
+            )
+        return GateDecision(
+            "inconclusive_retry",
+            f"attempt {inconclusive_attempts + 1}/{MAX_INCONCLUSIVE_ATTEMPTS}",
+        )
 
     if gate == "ERROR":
         return GateDecision("abort", "role/model unavailable -- hard blocker, never swap")
