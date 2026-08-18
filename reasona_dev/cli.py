@@ -39,7 +39,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from reasona_dev.plan_compile import write_plan_yaml
+from reasona_dev.plan_compile import MAX_PR_UNITS, write_plan_yaml
 
 _ROLE_FLAGS = ("dev", "review", "recheck", "bugbot", "verify", "final_audit")
 
@@ -61,19 +61,40 @@ def _collect_flags(args: argparse.Namespace, roles: tuple[str, ...]) -> dict[str
 
 
 def _cmd_compile_plan(args: argparse.Namespace) -> int:
+    from reasona_dev.plan_compile import PlanError
+
     plan_text = Path(args.plan_file).read_text(encoding="utf-8")
     flags = _collect_flags(args, _ROLE_FLAGS)
-    write_plan_yaml(
-        plan_text,
-        args.out,
-        plan_name=args.plan_name or Path(args.plan_file).stem,
-        description=args.description or f"Compiled from {args.plan_file}",
-        dev_flag=flags.get("dev"),
-        workdir=args.workdir,
-        policy_flags=flags,
-    )
+    try:
+        write_plan_yaml(
+            plan_text,
+            args.out,
+            plan_name=args.plan_name or Path(args.plan_file).stem,
+            description=args.description or f"Compiled from {args.plan_file}",
+            dev_flag=flags.get("dev"),
+            workdir=args.workdir,
+            policy_flags=flags,
+            max_pr_units=args.max_pr_units,
+        )
+    except PlanError as exc:
+        # A plan defect is the author's to fix, so it exits as a clean
+        # diagnostic rather than a traceback.
+        print(f"reasona-dev: {exc}", file=sys.stderr)
+        return 1
     print(f"wrote {args.out}", file=sys.stderr)
     return 0
+
+
+def _cmd_structure_gate(args: argparse.Namespace) -> int:
+    from reasona_dev import structure_gate
+
+    return structure_gate.main([args.workdir or ".", args.base, args.head])
+
+
+def _cmd_acceptance(args: argparse.Namespace) -> int:
+    from reasona_dev import acceptance
+
+    return acceptance.main([args.criteria_file, args.workdir or "."])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,8 +107,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--plan-name", default=None)
     p_plan.add_argument("--description", default=None)
     p_plan.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_plan.add_argument(
+        "--max-pr-units", type=int, default=MAX_PR_UNITS,
+        help=(
+            f"Refuse a plan with more than N PR units (default: {MAX_PR_UNITS}). "
+            "0 disables the cap. A large plan is a batch inside which nothing "
+            "learned in the first PR can reach the last one's specification."
+        ),
+    )
     _add_role_flags(p_plan, _ROLE_FLAGS)
     p_plan.set_defaults(func=_cmd_compile_plan)
+
+    p_struct = sub.add_parser(
+        "structure-gate",
+        help="Deterministic structural checks (file size, duplication, dependency direction)",
+    )
+    p_struct.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_struct.add_argument("--base", default="origin/main", help="Diff base for growth checks")
+    p_struct.add_argument("--head", default="HEAD", help="Diff head for growth checks")
+    p_struct.set_defaults(func=_cmd_structure_gate)
+
+    p_accept = sub.add_parser(
+        "acceptance",
+        help="Run a PR unit's acceptance criteria (pre-merge gate)",
+    )
+    p_accept.add_argument(
+        "criteria_file",
+        help="Path to .reasona/acceptance-<stage>.json, written by compile-plan",
+    )
+    p_accept.add_argument("--workdir", default=None, help="Directory to run criteria in (default: cwd)")
+    p_accept.set_defaults(func=_cmd_acceptance)
 
     return parser
 
