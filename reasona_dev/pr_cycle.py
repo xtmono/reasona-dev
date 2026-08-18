@@ -63,7 +63,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import cycles_log
+from reasona_dev import cycles_log, memory
 from reasona_dev.bernstein_server import ServerHandle, dispatch_task, poll_task, start_server, stop_server
 from reasona_dev.cycle_gate import (
     ConvergenceTracker,
@@ -332,6 +332,7 @@ def run_pr_cycle(
     port: int = 8052,
     approval_required: bool = False,
     stage_name: str | None = None,
+    files: list[str] | None = None,
     run_role_fn=run_role,
     start_server_fn=start_server,
     stop_server_fn=stop_server,
@@ -374,9 +375,17 @@ def run_pr_cycle(
             escalated_model=decision.escalated_model,
         )
 
+    # Priors derived from THIS repo's own recorded review history, scoped to
+    # the files this unit declares (`memory.select`). Empty when the unit
+    # declares no files, when nothing has recurred yet, or when nothing
+    # intersects -- so a fresh repo and an unrelated PR both get an unchanged
+    # prompt rather than a growing preamble.
+    memory_block = memory.render_for_prompt(memory.select(workdir, files or []))
+
     review_profile_prompt = resolve_prompt("review", profile=profile, workdir=workdir)
     if review_profile_prompt is None:
         return CycleResult(verdict="ABORT", stage="review", reason=f"no review prompt for profile {profile!r}")
+    review_profile_prompt += memory_block
     # Absent `recheck.md` is not fatal -- it only means every cycle stays
     # FULL, which is the pre-existing behaviour. A profile opts into the
     # cheaper path by shipping the file, and never silently gets a bounded
@@ -450,6 +459,8 @@ def run_pr_cycle(
                 verdict="ABORT", stage="scan", reason=f"no bugbot/compliance prompt for profile {profile!r}",
                 review_cycles=review_cycles_used, role_results=role_results,
             )
+        bugbot_prompt += memory_block
+        compliance_prompt += memory_block
 
         cycle = 0
         scope_suffix = ""
@@ -506,3 +517,11 @@ def run_pr_cycle(
         )
     finally:
         stop_server_fn(server, workdir=workdir)
+        # Regenerated from the records this cycle just appended, so the NEXT
+        # unit's priors already include whatever recurred in this one. In the
+        # `finally` because a failed cycle is exactly the one whose findings
+        # are worth carrying forward.
+        try:
+            memory.regenerate(workdir)
+        except Exception:  # noqa: BLE001 -- derived data, never worth failing a cycle over
+            pass

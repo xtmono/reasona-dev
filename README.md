@@ -64,18 +64,23 @@ docs/ARCHITECTURE.md       4-layer architecture, verified against installed Bern
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step), anchors to workdir
   pr_cycle.py                 dev-ralf-faithful develop -> verify -> bug+compliance scan driver (worker.md)
+  bernstein_server.py          Bernstein task-server HTTP client (start/stop, POST /tasks, GET /tasks/{id})
+  acceptance.py                 executable acceptance criteria -- the pre-merge gate that RUNS the plan's claims
+  structure_gate.py              deterministic structural checks (file size, duplication, dependency direction)
+  cycles_log.py                   append-only per-cycle finding log (.reasona/cycles.jsonl) -- the measurement substrate
+  memory.py                        repo-scoped priors GENERATED from cycles.jsonl, file-scoped retrieval
   prompt_profile.py            project/language-selectable review/bugbot/compliance prompts (.reasona/prompts/<profile>/)
-  prompts/generic/               packaged default prompt profile (review/bugbot/compliance/final_audit.md)
+  prompts/generic/               packaged default prompt profile (review/recheck/bugbot/compliance/final_audit.md)
   model_config.py            per-role model/adapter/effort priority chain + CONDUCTOR-COLLAPSE audit trail
   config_file.py              reasona-dev's own 2-layer config cascade (~/.reasona -> <workdir>/.reasona)
   bernstein_config.py          bootstraps + syncs a target repo's bernstein.yaml (see "Bootstrapping" below)
   finding_adapter.py           || text contract AND external-skill KV contract (`parse_kv_contract`) parsers
-  cycle_gate.py                  recheck routing, escalation, budget, fingerprints
+  cycle_gate.py                  recheck routing, escalation, budget, convergence, fingerprints
   gate_check.py                   completion_signals entry point -- the actual merge gate
   squash.py                        squash message builder + guard
   plugin.py                         pluggy hookimpl (on_pre_task_create, on_agent_spawned)
   adapters/ocr.py                    OcrAdapter, registered via bernstein.adapters entry points
-tests/                      pytest, 114 cases, all passing
+tests/                      pytest, 193 cases, all passing
 ```
 
 ## Setup
@@ -192,6 +197,86 @@ Select a profile via `--profile NAME`, `REASONA_DEV_PROFILE`, or
 `dev-profile:` in `reasona.yaml`. An unresolvable profile name returns no
 prompt (never silently falls back to `generic`) -- `pr_cycle.py` aborts
 rather than run with the wrong policy.
+
+## Quality budget, and why it is shaped this way
+
+A zero-base analysis of dev-ralf's 3.5-month production record (329,721 lines
+of Rust, 292 planned PR units) found the architecture sound and the budget
+misallocated: 30% of PR units were follow-up corrections and 27% of written
+lines were later deleted, *despite* a 16-fix-cycle budget spread over five
+review roles. The marginal return of another reviewer was already near zero.
+Three of the mechanisms here follow from that, and none of them add a
+reviewer:
+
+**Judgment a reviewer structurally cannot make goes to code.** Every review
+role reads a diff, so module size, cross-file duplication, and dependency
+direction are unreachable to all of them -- an 11,288-line file grows 200
+lines at a time and no single diff is refusable. `structure_gate.py` decides
+those by computation. Opt-in per repo via `structure-gate:` in
+`reasona.yaml`; waivers require a written reason.
+
+**Claims the plan makes get executed, not read.** The plan format already
+required "Tests (positive + negative)", as prose; a reviewer confirms such an
+item exists, never that it runs. `acceptance.py` moves it into the manifest
+as `acceptance: [{id, cmd, expect}]` and runs it as a pre-merge gate.
+`expect: exit_nonzero` is what makes the negative half statable at all.
+
+**The budget's three costs are separated.** The 8/8/16 cycle caps are a
+ceiling, not a spend. What costs money is how expensive each cycle is
+(`cycle_gate.recheck_route()` -- a fix confined to the files its findings
+named earns a BOUNDED confirm+regression pass on the cheaper `recheck` model
+instead of a full re-review) and how many cycles a doomed PR burns
+(`cycle_gate.ConvergenceTracker` -- `RecurrenceTracker` only fires when the
+SAME finding survives, so a PR emitting fresh findings every cycle used to
+run to the full cap; non-convergence now exits at 3).
+
+**Measurement comes before the next cut.** `cycles_log.py` records every
+dispatch and every gate decision to `.reasona/cycles.jsonl`, keyed by
+`Finding.key()`. Which role first caught a finding that mattered is then a
+query, not an opinion -- and that is the only honest basis for deciding which
+role to drop. Instrumenting before the first production run costs nothing;
+instrumenting after it is how dev-ralf ended up unable to answer the
+question.
+
+**Plans are capped at 5 PR units** (`plan_compile.MAX_PR_UNITS`). The two
+largest plans in the record (15 units each) are the two that produced
+second-order correction plans. A large plan is a batch inside which nothing
+learned in PR 1 can reach the specification of PR 12. Folding learning back
+mid-plan is the other half of the fix and is blocked on Bernstein's stage DAG
+being declared up front (docs/ARCHITECTURE.md §3.5.3).
+
+**One human gate, at one point.** `approval_required` maps onto Bernstein's
+own per-task `pending_approval` state. The argument for gating the FIRST PR
+of a plan is that it fixes the contract shapes every later PR inherits, and
+the observed correction plans are contract-shape errors propagating
+downstream. Roughly ten minutes per plan; not a return to reviewing
+everything.
+
+## Memory: generated, never written
+
+`.reasona/memory/*.md` holds priors about where defects have recurred in a
+repository -- derived by `memory.py` from `cycles.jsonl`, never hand-authored.
+That constraint is the design. A memory directory is the same kind of surface
+a skill document is, and skill documents bloat because entries are easy to add
+and nobody owns deleting one (dev-ralf's SKILL.md reached 472 lines, much of
+it explaining why superseded revisions were wrong, all of it loaded into every
+agent's context on every run).
+
+Generation gives three properties nobody has to maintain: a memory cannot
+drift from what happened, because it is computed from what happened; a pattern
+that stops recurring stops being written, because generation only reads the
+last N PR units; and retrieval is scoped by the `files:` a PR unit already
+declares, so an unrelated PR gets an unchanged prompt rather than a growing
+preamble.
+
+Clustering is exact -- same (path, symbol), or same normalized contract text,
+across distinct PR units. Paraphrases are deliberately not clustered: a memory
+shapes what the next reviewer looks for, so a wrong grouping actively
+misdirects attention, and missing a pattern costs less than inventing one.
+
+Anything a program can enforce does not belong here. That is `structure_gate`
+or an acceptance criterion, and writing it as a memory would be choosing to
+remind a model of something the pipeline could guarantee.
 
 ## Next
 

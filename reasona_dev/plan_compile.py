@@ -37,12 +37,14 @@ steps, a single plan-wide `cli:` is not a loss of expressiveness here.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
+from reasona_dev.acceptance import AcceptanceCriterion, parse_criteria
 from reasona_dev.model_config import ResolvedModel, resolve, write_resolved_config
 
 _PR_HEADING_RE = re.compile(r"^## PR (?P<index>[\w.]+):\s*(?P<title>.+)$", re.MULTILINE)
@@ -52,6 +54,18 @@ _FILES_TOKEN_RE = re.compile(
     r"(?:crates|src|docs|agent|config|tests|examples|scripts|\.github)/[\w./-]+"
     r"\.(?:rs|md|toml|yaml|yml|json|sh|py)"
 )
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<body>.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
+
+# Plan-size ceiling. dev-ralf's record shows the correlation directly: the
+# two largest plans (15 PR units each) are the two that produced SECOND-order
+# correction plans, while small plans did not. A large plan is a large batch,
+# and a batch is exactly the interval over which nothing learned in PR 1 can
+# reach the specification of PR 12 -- the follow-up plan is that feedback
+# arriving late and outside the document. Capping the batch is the cheap half
+# of the fix; folding learning back into the plan mid-run is the expensive
+# half and is blocked on Bernstein's stage DAG being declared up front
+# (docs/ARCHITECTURE.md §3.5.3).
+MAX_PR_UNITS = 5
 
 
 @dataclass
@@ -61,14 +75,114 @@ class PRUnit:
     depends_on: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     section: str = ""
+    unit_type: str | None = None
+    acceptance: list[AcceptanceCriterion] = field(default_factory=list)
+
+
+class PlanError(ValueError):
+    """A plan defect worth refusing to compile.
+
+    Raised only for conditions a human must fix in the plan document
+    (malformed acceptance criteria, a manifest/prose mismatch). Anything
+    recoverable is a warning instead -- see `compile_to_bernstein_plan`'s
+    `warnings` return path.
+    """
+
+
+def _parse_manifest(plan_text: str) -> tuple[dict | None, str]:
+    """Split a leading YAML frontmatter manifest from the prose body.
+
+    Returns `(manifest_or_None, body)`. A malformed frontmatter block is
+    treated as absent rather than fatal, so a plan that merely opens with a
+    `---` horizontal rule still parses through the prose fallback.
+    """
+    m = _FRONTMATTER_RE.match(plan_text)
+    if not m:
+        return None, plan_text
+    try:
+        data = yaml.safe_load(m.group("body"))
+    except yaml.YAMLError:
+        return None, plan_text
+    if not isinstance(data, dict) or not isinstance(data.get("pr_units"), list):
+        return None, plan_text
+    return data, plan_text[m.end():]
+
+
+def _sections_by_index(body: str) -> dict[str, str]:
+    headings = list(_PR_HEADING_RE.finditer(body))
+    out: dict[str, str] = {}
+    for i, m in enumerate(headings):
+        start = m.end()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(body)
+        out[m.group("index")] = body[start:end].strip()
+    return out
+
+
+def parse_manifest_units(plan_text: str) -> tuple[list[PRUnit], list[str]]:
+    """Manifest-driven extraction -- the authoritative path when a plan
+    carries YAML frontmatter.
+
+    dev-ralf's plan format already declares the manifest "authoritative;
+    the scheduler parses ONLY this for structure", but reasona-dev had
+    implemented only the prose fallback. Adding the manifest path here is
+    also what makes `acceptance:` expressible at all: it is structured data,
+    and the prose fallback has nowhere to put it.
+
+    Returns `(units, errors)`. Errors describe plan defects; the caller
+    decides whether to refuse.
+    """
+    manifest, body = _parse_manifest(plan_text)
+    if manifest is None:
+        return [], []
+
+    sections = _sections_by_index(body)
+    units: list[PRUnit] = []
+    errors: list[str] = []
+    for raw in manifest["pr_units"]:
+        if not isinstance(raw, dict):
+            errors.append("pr_units entry is not a mapping")
+            continue
+        index = str(raw.get("index", "")).strip()
+        if not index:
+            errors.append("pr_units entry has no index")
+            continue
+        criteria, ac_errors = parse_criteria(raw.get("acceptance"))
+        errors.extend(f"PR {index}: {e}" for e in ac_errors)
+        depends_on = [str(d).strip() for d in (raw.get("depends_on") or []) if str(d).strip()]
+        files = [str(f).strip() for f in (raw.get("files") or []) if str(f).strip()]
+        if index not in sections:
+            # The 1:1 manifest<->prose invariant the plan format states.
+            # A manifest entry with no section means the PR was declared but
+            # never specified, and the dev agent would receive an empty brief.
+            errors.append(f"PR {index}: manifest entry has no matching '## PR {index}:' section")
+        units.append(
+            PRUnit(
+                index=index,
+                title=str(raw.get("title", "")).strip() or f"PR {index}",
+                depends_on=depends_on,
+                files=files,
+                section=sections.get(index, ""),
+                unit_type=str(raw["type"]).strip() if raw.get("type") else None,
+                acceptance=criteria,
+            )
+        )
+    return units, errors
 
 
 def parse_plan_units(plan_text: str) -> list[PRUnit]:
-    """Fallback extraction (no YAML frontmatter manifest) -- dev-ralf's
-    `parse_plan.py` fast path (manifest-driven) is preferred when the plan
-    carries one; this covers the same fallback spec dev-ralf documents for
-    plans without a manifest.
+    """Manifest first, prose fallback second.
+
+    A plan carrying YAML frontmatter is parsed from it (authoritative, and
+    the only path that can carry `acceptance:`); a plan without one falls
+    back to `## PR <n>:` heading extraction, the same fallback spec
+    dev-ralf documents. Errors from the manifest path are dropped here --
+    `parse_manifest_units()` is the entry point for callers that want to
+    act on them.
     """
+    units, _ = parse_manifest_units(plan_text)
+    if units:
+        return units
+
     headings = list(_PR_HEADING_RE.finditer(plan_text))
     units: list[PRUnit] = []
     for i, m in enumerate(headings):
@@ -104,6 +218,49 @@ def _stage_name(pr_index: str) -> str:
     return f"pr-{pr_index}"
 
 
+def acceptance_path(workdir: str | Path, stage_name: str) -> Path:
+    """`<workdir>/.reasona/acceptance-<stage>.json` -- the same `.reasona/`
+    convention `review-<stage>.json` already uses, so the driver finds a
+    unit's criteria by stage name without needing the plan document again
+    at gate time.
+    """
+    return Path(workdir) / ".reasona" / f"acceptance-{stage_name}.json"
+
+
+def _write_acceptance_file(workdir: Path, stage_name: str, criteria: list[AcceptanceCriterion]) -> None:
+    """Write a unit's criteria, or REMOVE a stale file when it now has none.
+
+    A unit with no declared criteria writes nothing at all -- an empty file
+    and an absent one would mean the same thing to the gate, and creating
+    `.reasona/` for a plan that declared nothing is a surprising side
+    effect. The removal branch matters more than it looks: criteria deleted
+    from a plan must stop being enforced, and a lingering file from a
+    previous compile would keep gating on a contract the plan no longer
+    states.
+    """
+    path = acceptance_path(workdir, stage_name)
+    if not criteria:
+        if path.is_file():
+            path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "stage_name": stage_name,
+                "criteria": [
+                    {"id": c.id, "cmd": c.cmd, "expect": c.expect, "pattern": c.pattern,
+                     "timeout_s": c.timeout_s}
+                    for c in criteria
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
+
+
 def compile_to_bernstein_plan(
     plan_text: str,
     *,
@@ -117,6 +274,9 @@ def compile_to_bernstein_plan(
     audit_trail_path: str | None = None,
     write_bernstein_yaml: bool = True,
     policy_flags: dict[str, str] | None = None,
+    write_acceptance: bool = True,
+    max_pr_units: int = MAX_PR_UNITS,
+    strict_plan: bool = True,
 ) -> dict:
     """Return a dict matching Bernstein's plan.yaml schema (validated shape).
 
@@ -211,7 +371,34 @@ def compile_to_bernstein_plan(
             policy_resolved["dev"] = resolved_dev
             sync_role_model_policy(bernstein_yaml_path, policy_resolved)
 
-    units = parse_plan_units(plan_text)
+    manifest_units, manifest_errors = parse_manifest_units(plan_text)
+    if manifest_errors and strict_plan:
+        raise PlanError(
+            "plan has "
+            + str(len(manifest_errors))
+            + " defect(s):\n  - "
+            + "\n  - ".join(manifest_errors)
+        )
+    units = manifest_units or parse_plan_units(plan_text)
+
+    if max_pr_units and len(units) > max_pr_units:
+        # Refused, not warned: the correlation this cap is drawn from is
+        # between plan SIZE and second-order correction plans, and a warning
+        # that can be scrolled past does not change the size of anything.
+        raise PlanError(
+            f"plan declares {len(units)} PR units, over the {max_pr_units}-unit limit. "
+            "Split it: a large plan is a batch inside which nothing learned in the "
+            "first PR can reach the specification of the last. Pass max_pr_units=0 "
+            "to opt out deliberately."
+        )
+
+    # Acceptance criteria are consumed by the DRIVER before merge, not by
+    # Bernstein's janitor (see reasona_dev/acceptance.py on why), so they are
+    # written beside the other `.reasona/` runtime artifacts rather than
+    # embedded in the plan step.
+    if write_acceptance:
+        for u in units:
+            _write_acceptance_file(workdir, _stage_name(u.index), u.acceptance)
 
     stages = []
     for u in units:

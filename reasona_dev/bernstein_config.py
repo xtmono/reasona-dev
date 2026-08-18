@@ -1,70 +1,32 @@
 """Bootstraps a target repo's `bernstein.yaml` from a local or global
-template.
+template, and keeps its `role_model_policy` in sync.
 
-Bernstein's own seed/config loader (`cli/helpers.py:find_seed_file()`,
-used by the top-level `bernstein run`/`doctor` CLI parsing) checks, in
-order, `.bernstein/bernstein.yaml` THEN the repo-root `bernstein.yaml`.
-`bernstein run` ALSO launches its orchestrator as a background subprocess
-(`core/server/server_launch.py::_start_spawner`) that does NOT call
-`find_seed_file()` at all -- when the seed path isn't explicitly propagated
-to it (confirmed: happens with the exact invocation this project uses,
-`bernstein run <plan> --auto-approve`, no `--from-plan` needed to trigger
-it), it independently re-derives `workdir / "bernstein.yaml"`, a single
-hardcoded ROOT-only path with no `.bernstein/` check whatsoever.
+Bernstein disagrees with itself about where the seed file lives:
+`find_seed_file()` checks `.bernstein/bernstein.yaml` first, while `bernstein
+run`'s background orchestrator subprocess bypasses that function entirely and
+re-derives a root-only `workdir/bernstein.yaml`. A repo satisfying only the
+first spawns zero agents, silently. So a fresh bootstrap writes the real file
+to `.bernstein/bernstein.yaml` and creates the repo-root `bernstein.yaml` as a
+relative symlink to it -- one file, both lookups satisfied. The investigation
+behind this, including the live verification, is in docs/ARCHITECTURE.md
+§3.5.3; it is not repeated here.
 
-**Confirmed by an actual paid `bernstein run` against a real repo
-(2026-08-18):** a repo with ONLY `.bernstein/bernstein.yaml` gets "FATAL:
-no adapter configured" from that orchestrator subprocess, on repeat, until
-the watchdog gives up after 5 restarts -- zero agents ever spawn, silently
-(`_start_spawner`'s own docstring warns about exactly this class of bug).
-So Bernstein's two lookup paths disagree: `find_seed_file()` wants
-`.bernstein/` checked first; the orchestrator subprocess's fallback wants
-root, exclusively.
+Template cascade (mirrors `reasona_dev.config_file`'s two layers for
+`reasona.yaml`). Named `bernstein-template.yaml` so it reads as the source
+copied FROM, not a second copy of the real file:
 
-**Fix: satisfy both by construction, not by picking a side.** The real
-file is written to `.bernstein/bernstein.yaml` (what `find_seed_file()`
-prefers), and `<workdir>/bernstein.yaml` is created as a **relative
-symlink** pointing at it. A symlink is transparent to `Path.exists()` /
-`Path.read_text()` -- confirmed live (no cost: a direct, non-spawning
-orchestrator invocation) that the background subprocess's hardcoded
-root-only lookup resolves the symlink and parses the seed correctly, no
-different from a real file there. Both code paths now read the exact same
-content from the exact same underlying file -- no duplicate source of
-truth, no picking one location and letting the other silently break.
+    <workdir>/.reasona/bernstein-template.yaml   project-local (checked first)
+    ~/.reasona/bernstein-template.yaml           global (GLOBAL_BERNSTEIN_YAML)
 
-What CAN be global is reasona-dev's own copy of the template, and --
-mirroring `reasona_dev.config_file`'s exact two-layer cascade for
-`reasona.yaml` -- it too has a project-local layer above the global one.
-Named `bernstein-template.yaml`, not `bernstein.yaml`, specifically so it
-reads as "the source this gets COPIED from" rather than looking like a
-second copy of the real, Bernstein-readable file:
+A repo that already has a seed file at either real location is left
+untouched. This repo itself is that case -- it commits
+`.bernstein/bernstein.yaml` directly, and needs no root symlink because it
+only ever runs `doctor`/`plan validate` against itself, neither of which
+spawns the subprocess with the root-only lookup.
 
-    <workdir>/.reasona/bernstein-template.yaml   project-local template (checked first)
-    ~/.reasona/bernstein-template.yaml           global template (GLOBAL_BERNSTEIN_YAML)
-
-`ensure_bernstein_yaml()` copies whichever template wins into a target
-repo's `<workdir>/.bernstein/bernstein.yaml` (with the root symlink) the
-first time reasona-dev compiles a plan against that repo -- and ONLY if
-that repo doesn't already have a seed file at either real location, so a
-repo that already has its own `.bernstein/bernstein.yaml` OR root
-`bernstein.yaml` (symlink or not) is left completely untouched.
-
-This project's own repo commits BOTH: `.bernstein/bernstein.yaml` directly
-(the plain "already has one" case above -- so its own `bernstein doctor`/
-`bernstein run` invocations never touch the template cascade at all) AND
-`.reasona/bernstein-template.yaml` (identical content, committed purely so
-this repo's own template doubles as a real, checked-in example other
-repos' project-local template can be copied from). This repo does NOT get
-a root symlink -- it never runs `bernstein run` against itself for real
-execution (only `doctor`/`plan validate`, neither of which spawns the
-buggy subprocess), so it never needs one.
-
-`sync_role_model_policy()` handles a different, ongoing concern: even a
-`bernstein.yaml` that's already in place can have a `role_model_policy`
-that has drifted out of sync with what `reasona_dev.model_config` now
-resolves (this happened for real -- see its docstring). It patches just
-the `provider:` values in place, every `compile-plan` run, leaving
-everything else in the file (including its comments) untouched.
+`sync_role_model_policy()` addresses a separate, ongoing concern: a
+`role_model_policy` already in place can drift from what
+`reasona_dev.model_config` now resolves. See its own docstring.
 """
 
 from __future__ import annotations

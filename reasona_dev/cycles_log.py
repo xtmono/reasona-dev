@@ -75,6 +75,15 @@ def cycles_path(workdir: str | Path) -> Path:
     return Path(workdir) / ".reasona" / "cycles.jsonl"
 
 
+# Contract text is stored truncated. It has to be stored at all because
+# `reasona_dev.memory` groups recurrences by it -- the finding key alone
+# cannot, since it hashes path+symbol+contract together and so never matches
+# across two different files. It has to be truncated because this file is
+# meant to be kept indefinitely, and an untruncated model-written paragraph
+# per finding is what would eventually make that impractical.
+_MAX_CONTRACT_CHARS = 300
+
+
 def _finding_rows(result: ReviewResult) -> list[dict]:
     return [
         {
@@ -84,6 +93,7 @@ def _finding_rows(result: ReviewResult) -> list[dict]:
             "path": f.path,
             "line": f.line,
             "symbol": f.symbol,
+            "contract": (f.contract or "")[:_MAX_CONTRACT_CHARS] or None,
             # Carried because a MUST_FIX with incomplete evidence is a
             # different quality signal than one with full contract/scenario/
             # fix -- attribution should be able to tell them apart rather
