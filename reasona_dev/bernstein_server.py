@@ -226,6 +226,7 @@ def dispatch_task(
     cli: str,
     raw_output_path: Path,
     approval_required: bool = False,
+    max_turns: int | None = None,
 ) -> str:
     """`POST /tasks` for one role dispatch. Returns the new task's id.
 
@@ -233,6 +234,16 @@ def dispatch_task(
     the plan step: the orchestrator considers this task done only once
     `raw_output_path` is non-empty, the same file the description instructs
     the agent to write its full output to as its last action.
+
+    `max_turns` raises the agent's turn budget for this dispatch
+    (`TaskCreate.max_turns`). It matters most for review-type roles: the
+    review prompt asks the agent to enumerate every checklist item and every
+    named file/symbol, grep the diff for secrets, AND then write a complete
+    report as its final action. Observed live on a three-unit repo, the
+    default budget ran out during exploration -- `[RESULT]
+    subtype=error_max_turns turns=23` -- so the agent never reached the write
+    step and the role came back ERROR with nothing to say about why. Left
+    unset, Bernstein/the adapter picks its own default.
 
     `approval_required` is Bernstein's own per-task human gate
     (`TaskCreate.approval_required`, confirmed against the installed
@@ -252,6 +263,8 @@ def dispatch_task(
     }
     if approval_required:
         body["approval_required"] = True
+    if max_turns is not None:
+        body["max_turns"] = max_turns
     response = _request(handle, "POST", "/tasks", body)
     return response["id"]
 

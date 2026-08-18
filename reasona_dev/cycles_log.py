@@ -114,6 +114,7 @@ def record_dispatch(
     model: str,
     adapter: str,
     result: ReviewResult,
+    error_detail: str | None = None,
 ) -> None:
     """Append one role dispatch's outcome. Never raises.
 
@@ -144,6 +145,11 @@ def record_dispatch(
             "must_fix_count": len(result.must_fix),
             "advisory_count": len(result.advisory),
             "contract_mismatch": result.contract_mismatch,
+            # Why an ERROR happened, when the caller knows. `gate` alone
+            # cannot distinguish an agent that ran out of turns from one
+            # whose model was unavailable, and a measurement substrate that
+            # records only the former loses the case worth acting on.
+            "error_detail": error_detail,
             "findings": _finding_rows(result),
         }
         with path.open("a", encoding="utf-8") as f:

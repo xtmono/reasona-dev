@@ -96,12 +96,22 @@ from reasona_dev.prompt_profile import available_profiles, resolve_prompt
 # contract, and the table turned that valid output into a hard scan abort.
 
 
+# Turn budget for a role dispatch. The review prompt enumerates every
+# checklist item and named symbol, greps the diff, and only then writes its
+# report -- the write is the LAST action, so a budget that runs out during
+# exploration loses the entire result rather than truncating it. Observed
+# live: a reviewer on a three-unit repo died at `error_max_turns turns=23`
+# having done the analysis and written nothing.
+DEFAULT_ROLE_MAX_TURNS = 60
+
+
 @dataclass
 class RoleRunResult:
     role: str
     cycle: int
     review_result: ReviewResult
     raw_output_path: Path
+    error_detail: str | None = None
 
 
 @dataclass
@@ -147,6 +157,7 @@ def run_role(
     rundir: Path,
     cycle: int,
     approval_required: bool = False,
+    max_turns: int | None = DEFAULT_ROLE_MAX_TURNS,
 ) -> RoleRunResult:
     """Dispatch one role once against the shared, already-running
     `server`, via `POST /tasks`, then poll `GET /tasks/{id}` to completion.
@@ -177,6 +188,7 @@ def run_role(
         model=model.model, effort=model.effort, cli=model.adapter,
         raw_output_path=raw_output_path,
         approval_required=approval_required,
+        max_turns=max_turns,
     )
     task = poll_task(server, task_id, output_path=raw_output_path)
 
@@ -185,10 +197,23 @@ def run_role(
     # task can reach `done` without the agent having written anything.
     # Only the second of those is an error here.
     if not raw_output_path.is_file():
+        # Carry WHY. `cycle_gate` turns any ERROR into the same
+        # "role/model unavailable" abort, which is the right gate decision
+        # and a useless diagnostic on its own -- an agent that died on
+        # `error_max_turns` and one whose model was misconfigured are the
+        # same string. The task's own terminal fields are the only thing
+        # available here, so they go into the record.
+        detail = (
+            f"no output at {raw_output_path.name}; "
+            f"task status={task.get('status')!r} "
+            f"terminal_reason={task.get('terminal_reason')!r} "
+            f"result_summary={str(task.get('result_summary'))[:120]!r}"
+        )
         return RoleRunResult(
             role=role, cycle=cycle,
             review_result=ReviewResult(role_status=RoleStatus.ERROR),
             raw_output_path=raw_output_path,
+            error_detail=detail,
         )
 
     text = raw_output_path.read_text(encoding="utf-8")
@@ -425,7 +450,7 @@ def run_pr_cycle(
         cycles_log.record_dispatch(
             workdir=workdir, stage_name=stage_name, stage=stage, cycle=cycle,
             role=result.role, model=model.model, adapter=model.adapter,
-            result=result.review_result,
+            result=result.review_result, error_detail=result.error_detail,
         )
 
     def _log_decision(stage: str, cycle: int, decision) -> None:

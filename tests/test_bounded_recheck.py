@@ -189,7 +189,7 @@ def test_raw_output_path_given_to_the_agent_is_absolute(tmp_path, monkeypatch):
     seen = {}
 
     def fake_dispatch(handle, *, role, title, description, model, effort, cli,
-                      raw_output_path, approval_required=False):
+                      raw_output_path, approval_required=False, max_turns=None):
         seen["path"] = raw_output_path
         seen["description"] = description
         Path(raw_output_path).write_text(PASS_TEXT)
@@ -207,3 +207,27 @@ def test_raw_output_path_given_to_the_agent_is_absolute(tmp_path, monkeypatch):
     assert Path(seen["path"]).is_absolute()
     # and the instruction the agent actually reads carries that absolute path
     assert str(seen["path"]) in seen["description"]
+
+
+def test_a_missing_output_file_records_why_not_just_that(tmp_path, monkeypatch):
+    """`cycle_gate` collapses every ERROR into the same abort string, so an
+    agent that died on max_turns and one whose model was misconfigured read
+    identically. The task's own terminal fields are the only diagnostic
+    available at this point."""
+    from reasona_dev import pr_cycle as pc
+
+    monkeypatch.setattr(pc, "dispatch_task", lambda *a, **k: "t1")
+    monkeypatch.setattr(
+        pc, "poll_task",
+        lambda *a, **k: {"status": "failed", "terminal_reason": None,
+                         "result_summary": "agent exhausted its turn budget"},
+    )
+
+    r = pc.run_role(
+        server=None, workdir=tmp_path, role="reviewer", title="t", prompt="p",
+        model=_RESOLVED["review"], rundir=tmp_path / "run", cycle=1,
+    )
+
+    assert r.review_result.role_status.value == "ERROR"
+    assert "status='failed'" in r.error_detail
+    assert "turn budget" in r.error_detail

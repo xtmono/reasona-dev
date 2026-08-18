@@ -114,3 +114,37 @@ def test_ordinary_timeout_still_fires_for_a_stuck_agent(monkeypatch):
 
     with pytest.raises(TimeoutError, match="terminal status"):
         poll_task(_handle(), "t1", poll_interval=0.0, timeout=50.0)
+
+
+def test_max_turns_reaches_the_task_body(monkeypatch):
+    """The review prompt writes its report as its LAST action, so a turn
+    budget that runs out during exploration loses the whole result rather
+    than truncating it. Observed live: `error_max_turns turns=23` with the
+    analysis done and nothing written."""
+    captured = {}
+
+    def fake_urlopen(req, timeout=30):
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse({"id": "t1"})
+
+    monkeypatch.setattr(bernstein_server.urllib.request, "urlopen", fake_urlopen)
+    dispatch_task(
+        _handle(), role="reviewer", title="t", description="d", model="haiku",
+        effort="low", cli="claude", raw_output_path="/tmp/x", max_turns=60,
+    )
+    assert captured["body"]["max_turns"] == 60
+
+
+def test_max_turns_is_omitted_when_unset(monkeypatch):
+    """Left unset, Bernstein/the adapter keeps its own default."""
+    captured = {}
+    monkeypatch.setattr(
+        bernstein_server.urllib.request, "urlopen",
+        lambda req, timeout=30: (captured.__setitem__("body", json.loads(req.data)),
+                                 _FakeResponse({"id": "t1"}))[1],
+    )
+    dispatch_task(
+        _handle(), role="reviewer", title="t", description="d", model="haiku",
+        effort="low", cli="claude", raw_output_path="/tmp/x",
+    )
+    assert "max_turns" not in captured["body"]
