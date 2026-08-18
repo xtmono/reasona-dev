@@ -133,6 +133,8 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
             base=args.base,
             head=args.head,
             approve_first_unit=not args.no_approval,
+            ship=args.ship or args.merge,
+            merge=args.merge,
         )
     except PlanError as exc:
         print(f"reasona-dev: {exc}", file=sys.stderr)
@@ -221,6 +223,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--no-approval", action="store_true",
         help="Do not require human approval on the plan's first PR unit",
+    )
+    p_run.add_argument(
+        "--ship", action="store_true",
+        help=(
+            "Run the merge tail for each passing unit: sync-main, conditional "
+            "final audit, squash-message guard, and PR creation. Stops at an "
+            "open PR unless --merge is also given."
+        ),
+    )
+    p_run.add_argument(
+        "--merge", action="store_true",
+        help=(
+            "Squash-merge each unit whose PR passes the up-to-date gate. "
+            "Implies --ship. Off by default: a squash-merge rewrites a real "
+            "default branch and is not something to discover after the fact."
+        ),
     )
     _add_role_flags(p_run, _ROLE_FLAGS)
     p_run.set_defaults(func=_cmd_run_plan)

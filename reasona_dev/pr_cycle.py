@@ -112,6 +112,13 @@ class CycleResult:
     review_cycles: int = 0
     scan_cycles: int = 0
     role_results: list[RoleRunResult] = field(default_factory=list)
+    # Carried out so the merge tail can continue the SAME budget and
+    # recurrence state rather than starting fresh. A final audit that got its
+    # own budget would let a PR spend 8+8+2 fix cycles while every stage
+    # reports itself within cap, and a fresh RecurrenceTracker would forget
+    # that a finding the audit raises had already survived a fix earlier.
+    budget: FixBudget | None = None
+    recurrence: RecurrenceTracker | None = None
 
 
 def _build_role_description(prompt: str, raw_output_path: Path) -> str:
@@ -586,6 +593,7 @@ def run_pr_cycle(
         return CycleResult(
             verdict="PASS", stage="scan", reason="review + bug/compliance scan clean",
             review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
+            budget=scan_budget, recurrence=recurrence,
         )
     finally:
         if owns_server:

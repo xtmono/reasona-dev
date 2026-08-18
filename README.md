@@ -44,7 +44,7 @@ $ python3 -c "from bernstein.adapters.registry import get_adapter; \
 | `cascade_router.py` off switch | Confirmed dead code -- no call sites anywhere in the installed package outside its own file. Live initial-model-selection path is `bandit_router.py`, a different (lower-risk) concern. |
 | `bandit_router.py` scope | Default routing mode is `static` (`BERNSTEIN_ROUTING` env var, unset here) -- the bandit object isn't even instantiated unless explicitly turned on. Even when on, its tier floor (`haiku < sonnet < opus`) is Claude-only (`router_applicable()`) and is skipped entirely for other adapters. Not a concern for this project's default config. |
 | `model_fallback.strike_limit: 0` | Was a bug in the first draft -- `should_fallback = consecutive_errors >= strike_limit`, and errors start at 0, so `0` fires immediately. Fixed: `fallback_chain: []` alone disables it; `strike_limit` left unset. |
-| Merge-gating hook | Confirmed no dedicated hookspec exists (`on_pre_task_create` and `on_pre_tool_use` are the only two that can block). Merge/completion gating is a `completion_signals: [{type: test_passes, ...}]` concern, not a hook -- `reasona_dev/gate_check.py` is that entry point, wired automatically by `plan_compile.py`. |
+| Merge-gating hook | Confirmed no dedicated hookspec exists (`on_pre_task_create` and `on_pre_tool_use` are the only two that can block), and `completion_signals` cannot substitute: they run at the project root BEFORE the agent's branch merges, so they cannot see the code they would gate (§3.8). Gating is `reasona_dev/ship_gate.py`, run by the driver after the merge. |
 | `agy`/`ocr` adapters | `agy` turned out to already be a native Bernstein adapter ("Antigravity CLI") -- same binary and flags dev-ralf's `dispatch.md` already documents. Only `ocr` needed writing; `reasona_dev/adapters/ocr.py` is registered via `bernstein.adapters` entry points and resolves through Bernstein's own `get_adapter()`. |
 | Per-role model config | Ported dev-ralf's `flag > env var > fallback > default` priority chain (`DEV_RALF_*` -> `REASONA_DEV_*`) as `reasona_dev/model_config.py`, since bandit routing being off means nothing else picks a model. Caught and fixed a real asymmetry bug in the first draft: `bugbot`/`final_audit` must fall back only to the `VERIFY_MODEL` **env var/config slot**, never to `verify`'s fully-resolved value -- only `recheck` inherits `review`'s resolved outcome. |
 | **CREDIT-BURN on retry -- NOT resolved** | `_choose_retry_escalation` (`core/tasks/task_lifecycle.py`) is a fourth, independent model-selection path: bumps the model up `haiku -> sonnet -> opus` on a task's 2nd+ retry. `role_model_policy` only guards non-Claude-adapter roles (confirmed via docstring); the `terminal_reason == "model_error"` exemption is unreachable (nothing in the package ever sets that value); `max_retries` has no config surface in either `plan_schema.py` or `seed_config.py`. See `docs/ARCHITECTURE.md` §3.6 for the full trace and candidate next steps. |
@@ -70,6 +70,7 @@ reasona_dev/
   acceptance.py                 executable acceptance criteria -- RUNS the plan's own claims
   structure_gate.py              deterministic structural checks (file size, duplication, dependency direction)
   ship_gate.py                    THE pre-merge verdict: review AND acceptance AND structure, composed
+  merge_tail.py                    sync-main -> final audit -> squash guard -> PR -> squash-merge
   cycles_log.py                   append-only per-cycle finding log (.reasona/cycles.jsonl) -- the measurement substrate
   cycles_query.py                  attribution / budget / coverage queries -- what makes the log a decision
   memory.py                        repo-scoped priors GENERATED from cycles.jsonl, file-scoped retrieval
@@ -79,7 +80,6 @@ reasona_dev/
   bernstein_config.py          bootstraps + syncs a target repo's bernstein.yaml (see "Bootstrapping" below)
   finding_adapter.py           || text contract AND external-skill KV contract (`parse_kv_contract`) parsers
   cycle_gate.py                  recheck routing, escalation, budget, convergence, fingerprints
-  gate_check.py                   completion_signals entry point -- the actual merge gate
   squash.py                        squash message builder + guard
   plugin.py                         pluggy hookimpl (on_pre_task_create, on_agent_spawned)
   adapters/ocr.py                    OcrAdapter, registered via bernstein.adapters entry points
@@ -458,18 +458,33 @@ defence is to treat the output FILE as the completion indicator -- which was
 always the real contract here, since `result_summary` never carried the
 agent's report.
 
-Two things remain.
+**The merge tail is built** (`reasona_dev/merge_tail.py`): sync-main ->
+conditional final audit -> squash-message guard -> PR creation -> up-to-date
+gate -> squash-merge. It consumes `ship_gate`'s verdict rather than
+re-deciding, and every step fails by name -- `gh` missing, `gh`
+unauthenticated, a sync conflict, a rejected squash title, a PR behind its
+base -- instead of degrading into a quiet skip.
 
-**1. The merge tail.** `sync-main -> /gh-pr -> /gh-review -> up-to-date gate
--> final_audit -> squash-merge` (worker.md's last third). `ship_gate` returns
-a verdict rather than merging and `orchestrate.run_plan` records it per unit,
-so this tail consumes both rather than reimplementing either. `final_audit`
-has a resolved model, a prompt, and now a whitelist entry -- but no dispatch
-site.
+```
+reasona-dev run-plan plan.md --ship          # stop at an open PR
+reasona-dev run-plan plan.md --merge         # ...and squash-merge it
+```
 
-**2. Two decisions deferred to measurement, not judgment.** Both are blocked
-on data that only accumulated runs produce, and both now have the exact query
-that decides them (`reasona-dev cycles-report`):
+Merging is off by default. A squash-merge rewrites a real default branch, so
+it is something the caller asks for, not something they discover afterwards.
+
+`final_audit` now has a dispatch site, and it is conditional: a unit that
+passed review and both scan roles on its first cycle has been read by three
+independent roles with nothing found, and a fresh whole-PR audit there mostly
+re-derives that. The audit earns its cost where fixes accumulated -- each fix
+is a change no reviewer saw in its final combined form. It runs under the
+`"final"` stage of the SAME `FixBudget` the review and scan stages spent, so
+a PR cannot quietly buy 8+8+2 fix cycles while every stage reports itself
+within cap.
+
+**One thing remains: two decisions deferred to measurement, not judgment.**
+Both are blocked on data that only accumulated runs produce, and both have
+the exact query that decides them (`reasona-dev cycles-report`):
 
 - *Which review role to drop* -- the `unique` column. A role with high
   `duplicate` and near-zero `unique` is the candidate.

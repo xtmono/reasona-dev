@@ -47,10 +47,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import config_file, ship_gate
+from reasona_dev import config_file, merge_tail as merge_tail_mod, ship_gate
 from reasona_dev.bernstein_server import ServerHandle, start_server, stop_server
 from reasona_dev.model_config import ResolvedModel
 from reasona_dev.plan_compile import PRUnit, PlanError, _stage_name, parse_manifest_units, parse_plan_units
+from reasona_dev.cycle_gate import FixBudget, RecurrenceTracker
+from reasona_dev.merge_tail import TailResult
 from reasona_dev.pr_cycle import CycleResult, run_pr_cycle
 from reasona_dev.prompt_profile import (
     ProfileConflict,
@@ -85,6 +87,7 @@ class UnitOutcome:
     reason: str
     cycle_result: CycleResult | None = None
     ship_decision: ShipDecision | None = None
+    tail: TailResult | None = None
 
 
 @dataclass
@@ -212,8 +215,11 @@ def run_plan(
     base: str = "origin/main",
     head: str = "HEAD",
     approve_first_unit: bool = True,
+    ship: bool = False,
+    merge: bool = False,
     run_pr_cycle_fn=run_pr_cycle,
     ship_gate_fn=ship_gate.evaluate,
+    merge_tail_fn=merge_tail_mod.run_merge_tail,
     start_server_fn=start_server,
     stop_server_fn=stop_server,
 ) -> PlanRunResult:
@@ -269,10 +275,28 @@ def run_plan(
                     workdir, up.stage_name,
                     cycle_verdict=cycle.verdict, base=base, head=head,
                 )
+                tail: TailResult | None = None
+                if decision.passed and ship:
+                    tail = merge_tail_fn(
+                        server=server, workdir=workdir, stage_name=up.stage_name,
+                        pr_title=f"{up.title}", unit_type=up.unit.unit_type,
+                        profile=up.profile, resolved=resolved,
+                        rundir=rundir / up.stage_name, ship_decision=decision,
+                        budget=cycle.budget or FixBudget(),
+                        recurrence=cycle.recurrence or RecurrenceTracker(),
+                        base=base, merge=merge,
+                    )
+                if tail is not None and tail.blocked:
+                    status, reason = "failed", tail.reason
+                elif tail is not None:
+                    status, reason = "shipped", tail.reason
+                else:
+                    status = "shipped" if decision.passed else "failed"
+                    reason = decision.reason
                 outcome = UnitOutcome(
                     stage_name=up.stage_name, profile=up.profile,
-                    status="shipped" if decision.passed else "failed",
-                    reason=decision.reason, cycle_result=cycle, ship_decision=decision,
+                    status=status, reason=reason,
+                    cycle_result=cycle, ship_decision=decision, tail=tail,
                 )
             result.outcomes.append(outcome)
             by_index[up.index] = outcome

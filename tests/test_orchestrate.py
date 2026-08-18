@@ -324,3 +324,63 @@ def test_render_names_status_and_profile_per_unit(tmp_path):
     assert "1 shipped" not in out  # nothing shipped
     assert "pr-3 (python)" in out
     assert "skipped" in out
+
+
+# --- merge tail wiring ------------------------------------------------------
+
+def _tail_ok(stage_name):
+    from reasona_dev.merge_tail import MERGED, TailResult
+    return TailResult(stage_name=stage_name, status=MERGED, reason="squash-merged",
+                      pr_url=f"https://gh/pr/{stage_name}")
+
+
+def _tail_blocked(stage_name):
+    from reasona_dev.merge_tail import BLOCKED, TailResult
+    return TailResult(stage_name=stage_name, status=BLOCKED, reason="merge conflict")
+
+
+def test_the_tail_is_not_run_unless_ship_is_requested(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+    called = []
+    _run(tmp_path, cycle_fn, ship_fn,
+         merge_tail_fn=lambda **kw: called.append(1))
+    assert called == []
+
+
+def test_ship_runs_the_tail_for_every_passing_unit(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+    seen = []
+
+    def tail_fn(**kw):
+        seen.append(kw["stage_name"])
+        return _tail_ok(kw["stage_name"])
+
+    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, merge_tail_fn=tail_fn)
+    assert seen == ["pr-1", "pr-2", "pr-3"]
+    assert result.passed
+
+
+def test_a_blocked_tail_fails_the_unit_and_skips_its_dependents(tmp_path):
+    """A unit whose merge was refused did not ship, so anything depending on
+    its contract is reviewing against something that is not on main."""
+    cycle_fn, ship_fn = _recorder()
+
+    def tail_fn(**kw):
+        return _tail_blocked(kw["stage_name"]) if kw["stage_name"] == "pr-1" else _tail_ok(kw["stage_name"])
+
+    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, merge_tail_fn=tail_fn)
+    statuses = {o.stage_name: o.status for o in result.outcomes}
+    assert statuses == {"pr-1": "failed", "pr-2": "skipped", "pr-3": "skipped"}
+    assert "merge conflict" in result.outcomes[0].reason
+
+
+def test_the_tail_receives_the_units_type_for_the_squash_title(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+    seen = {}
+
+    def tail_fn(**kw):
+        seen[kw["stage_name"]] = (kw["unit_type"], kw["merge"])
+        return _tail_ok(kw["stage_name"])
+
+    _run(tmp_path, cycle_fn, ship_fn, ship=True, merge=True, merge_tail_fn=tail_fn)
+    assert seen["pr-1"][1] is True
