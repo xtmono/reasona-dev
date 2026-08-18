@@ -79,6 +79,14 @@ def _ensure_root_link(workdir: Path) -> None:
     elif not root.exists():
         root.symlink_to(target)
     _ensure_gitignored(workdir, "bernstein.yaml")
+    # Runtime artifacts must not be tracked either. An agent works in a git
+    # worktree of the SAME repo, so a tracked `.reasona/runs/` is visible to
+    # it -- observed live: an agent ran `git add .reasona/runs/.../x.raw.txt
+    # && git commit`, and the merge-back then materialised the file in the
+    # project root AFTER the driver had already looked for it and recorded
+    # the role as ERROR.
+    for entry in (".reasona/runs/", ".reasona/cycles.jsonl", ".reasona/memory/", ".sdd/"):
+        _ensure_gitignored(workdir, entry)
 
 
 def _ensure_gitignored(workdir: Path, entry: str) -> None:

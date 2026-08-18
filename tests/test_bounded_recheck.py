@@ -159,16 +159,17 @@ def test_the_path_given_to_the_agent_is_absolute_and_carries_a_turn_budget(tmp_p
     instructions resolves against THAT tree -- observed: it wrote into its own
     worktree, spent its remaining turns hunting for the file the driver was
     asking about, and died on `error_max_turns` while the driver reported
-    ERROR. The turn budget travels as `complexity` because the plan-step
-    schema has no `max_turns` field; Bernstein derives the budget from it.
+    ERROR. The turn budget travels as `scope`: the plan-step schema has no
+    `max_turns` field, and `complexity` -- the obvious substitute -- maps to
+    a budget through a function Bernstein never calls.
     """
     from reasona_dev import bernstein_dispatch, pr_cycle as pc
 
     seen = {}
 
-    def fake_write_plan(*, path, role, title, description, model, effort, cli, complexity):
+    def fake_write_plan(*, path, role, title, description, model, effort, cli, scope):
         seen["description"] = description
-        seen["complexity"] = complexity
+        seen["scope"] = scope
 
     def fake_run(plan_path, workdir, *, port=8052, timeout=3600):
         marker = "to the file `"
@@ -187,7 +188,7 @@ def test_the_path_given_to_the_agent_is_absolute_and_carries_a_turn_budget(tmp_p
     )
 
     assert Path(seen["path"]).is_absolute()
-    assert seen["complexity"] == "high"
+    assert seen["scope"] == "large"
     assert r.review_result.gate() == "PASS"
 
 

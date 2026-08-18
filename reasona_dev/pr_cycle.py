@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from reasona_dev import cycles_log, memory
-from reasona_dev.bernstein_dispatch import DEFAULT_ROLE_COMPLEXITY, run_plan_file, write_role_plan
+from reasona_dev.bernstein_dispatch import DEFAULT_ROLE_SCOPE, run_plan_file, write_role_plan
 from reasona_dev.cycle_gate import (
     ConvergenceTracker,
     FixBudget,
@@ -123,7 +123,7 @@ def run_role(
     rundir: Path,
     cycle: int,
     port: int = 8052,
-    complexity: str = DEFAULT_ROLE_COMPLEXITY,
+    scope: str = DEFAULT_ROLE_SCOPE,
 ) -> RoleRunResult:
     """Dispatch one role once via `bernstein run` on a one-step plan.
 
@@ -157,7 +157,7 @@ def run_role(
         path=plan_path, role=role, title=title,
         description=_build_role_description(prompt, raw_output_path),
         model=model.model, effort=model.effort, cli=model.adapter,
-        complexity=complexity,
+        scope=scope,
     )
     dispatch = run_plan_file(plan_path, workdir, port=port)
 
