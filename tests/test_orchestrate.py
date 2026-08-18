@@ -116,8 +116,6 @@ def test_conflicts_surface_before_anything_runs(tmp_path):
         run_plan(
             workdir=_repo(tmp_path), plan_text=plan, resolved=_RESOLVED,
             rundir=tmp_path / "run",
-            start_server_fn=lambda w, *, port: started.append(1),
-            stop_server_fn=lambda s, *, workdir: None,
         )
     assert started == []
 
@@ -187,8 +185,6 @@ def _run(tmp_path, cycle_fn, ship_fn, plan=MIXED_PLAN, **kw):
     return run_plan(
         workdir=_repo(tmp_path), plan_text=plan, resolved=_RESOLVED,
         rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
-        start_server_fn=lambda w, *, port: "SERVER",
-        stop_server_fn=lambda s, *, workdir: None,
         **kw,
     )
 
@@ -206,20 +202,6 @@ def test_unit_files_are_passed_through_for_memory_retrieval(tmp_path):
     _run(tmp_path, cycle_fn, ship_fn)
     by_stage = {c["stage_name"]: c["files"] for c in cycle_fn.calls}
     assert by_stage["pr-3"] == ["services/api/ingest.py"]
-
-
-def test_one_server_is_shared_across_every_unit(tmp_path):
-    """Paying the bootstrap once per unit is as arbitrary as once per role."""
-    cycle_fn, ship_fn = _recorder()
-    starts, stops = [], []
-    run_plan(
-        workdir=_repo(tmp_path), plan_text=MIXED_PLAN, resolved=_RESOLVED,
-        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
-        start_server_fn=lambda w, *, port: starts.append("s") or "SERVER",
-        stop_server_fn=lambda s, *, workdir: stops.append(s),
-    )
-    assert len(starts) == 1 and len(stops) == 1
-    assert all(c["server"] == "SERVER" for c in cycle_fn.calls)
 
 
 def test_all_units_shipping_is_a_passing_plan(tmp_path):
@@ -287,23 +269,6 @@ def test_each_unit_gets_its_own_rundir(tmp_path):
     _run(tmp_path, cycle_fn, ship_fn)
     rundirs = [c["rundir"].name for c in cycle_fn.calls]
     assert rundirs == ["pr-1", "pr-2", "pr-3"]
-
-
-def test_server_is_stopped_even_when_a_unit_raises(tmp_path):
-    stops = []
-
-    def boom(**kw):
-        raise RuntimeError("dispatch exploded")
-
-    with pytest.raises(RuntimeError):
-        run_plan(
-            workdir=_repo(tmp_path), plan_text=MIXED_PLAN, resolved=_RESOLVED,
-            rundir=tmp_path / "run", run_pr_cycle_fn=boom,
-            ship_gate_fn=lambda *a, **k: _pass_ship(),
-            start_server_fn=lambda w, *, port: "SERVER",
-            stop_server_fn=lambda s, *, workdir: stops.append(s),
-        )
-    assert stops == ["SERVER"]
 
 
 def test_render_names_status_and_profile_per_unit(tmp_path):

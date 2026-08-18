@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from reasona_dev import pr_cycle
@@ -28,7 +29,7 @@ MUST_FIX_TEXT = (
 def _recording_role_fn(script):
     calls = []
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
         calls.append({
             "role": role, "title": title, "prompt": prompt, "model": model.model,
             "cycle": cycle,
@@ -41,12 +42,6 @@ def _recording_role_fn(script):
     return _fn
 
 
-def _noop_start(workdir, *, port):
-    return None
-
-
-def _noop_stop(server, *, workdir):
-    pass
 
 
 _FIX_THEN_PASS = [
@@ -65,7 +60,6 @@ def test_bounded_route_uses_the_recheck_model_and_prompt(tmp_path, generic_promp
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
 
     assert result.verdict == "PASS"
@@ -86,7 +80,6 @@ def test_full_route_keeps_the_expensive_review_model(tmp_path, generic_prompts, 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
 
     reviewer_calls = [c for c in fn.calls if c["role"] == "reviewer"]
@@ -125,7 +118,6 @@ def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, generic_prom
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
 
     bugbot_calls = [c for c in fn.calls if c["role"] == "bugbot"]
@@ -143,7 +135,6 @@ def test_cycles_log_is_written_for_every_dispatch_and_decision(tmp_path, generic
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
 
     rows = cycles_log.read_records(tmp_path)
@@ -161,57 +152,64 @@ def test_cycles_log_is_written_for_every_dispatch_and_decision(tmp_path, generic
     assert first["findings"][0]["path"] == "src/a.rs"
 
 
-def test_raw_output_path_given_to_the_agent_is_absolute(tmp_path, monkeypatch):
-    """The agent runs in a per-task worktree, so a relative path in its
-    instructions resolves against that tree and the driver never sees the
-    file. Live-observed: the agent wrote into its worktree, burned its turns
-    looking for it, and the role came back ERROR."""
-    import os
+def test_the_path_given_to_the_agent_is_absolute_and_carries_a_turn_budget(tmp_path, monkeypatch):
+    """Two live regressions in one dispatch.
 
-    from reasona_dev import bernstein_server, pr_cycle as pc
+    The agent runs in a per-task worktree, so a relative path in its
+    instructions resolves against THAT tree -- observed: it wrote into its own
+    worktree, spent its remaining turns hunting for the file the driver was
+    asking about, and died on `error_max_turns` while the driver reported
+    ERROR. The turn budget travels as `complexity` because the plan-step
+    schema has no `max_turns` field; Bernstein derives the budget from it.
+    """
+    from reasona_dev import bernstein_dispatch, pr_cycle as pc
 
     seen = {}
 
-    def fake_dispatch(handle, *, role, title, description, model, effort, cli,
-                      raw_output_path, max_turns=None):
-        seen["path"] = raw_output_path
+    def fake_write_plan(*, path, role, title, description, model, effort, cli, complexity):
         seen["description"] = description
-        Path(raw_output_path).write_text(PASS_TEXT)
-        return "t1"
+        seen["complexity"] = complexity
 
-    monkeypatch.setattr(pc, "dispatch_task", fake_dispatch)
-    monkeypatch.setattr(pc, "poll_task", lambda *a, **k: {"status": "done"})
+    def fake_run(plan_path, workdir, *, port=8052, timeout=3600):
+        marker = "to the file `"
+        start = seen["description"].index(marker) + len(marker)
+        seen["path"] = seen["description"][start:seen["description"].index("`", start)]
+        Path(seen["path"]).write_text(PASS_TEXT)
+        return bernstein_dispatch.DispatchResult(returncode=0, stderr_tail="")
+
+    monkeypatch.setattr(pc, "write_role_plan", fake_write_plan)
+    monkeypatch.setattr(pc, "run_plan_file", fake_run)
     monkeypatch.chdir(tmp_path)
 
-    pc.run_role(
-        server=None, workdir=Path("."), role="reviewer", title="t",
-        prompt="p", model=_RESOLVED["review"], rundir=Path("./run"), cycle=1,
+    r = pc.run_role(
+        workdir=Path("."), role="reviewer", title="t", prompt="p",
+        model=_RESOLVED["review"], rundir=Path("./run"), cycle=1,
     )
 
     assert Path(seen["path"]).is_absolute()
-    # and the instruction the agent actually reads carries that absolute path
-    assert str(seen["path"]) in seen["description"]
+    assert seen["complexity"] == "high"
+    assert r.review_result.gate() == "PASS"
 
 
 def test_a_missing_output_file_records_why_not_just_that(tmp_path, monkeypatch):
     """`cycle_gate` collapses every ERROR into the same abort string, so an
-    agent that died on max_turns and one whose model was misconfigured read
-    identically. The task's own terminal fields are the only diagnostic
-    available at this point."""
-    from reasona_dev import pr_cycle as pc
+    agent that died on its turn budget and one whose adapter was
+    misconfigured read identically. The run's exit code and stderr tail are
+    the only diagnostic available once the artifact is absent."""
+    from reasona_dev import bernstein_dispatch, pr_cycle as pc
 
-    monkeypatch.setattr(pc, "dispatch_task", lambda *a, **k: "t1")
+    monkeypatch.setattr(pc, "write_role_plan", lambda **k: None)
     monkeypatch.setattr(
-        pc, "poll_task",
-        lambda *a, **k: {"status": "failed", "terminal_reason": None,
-                         "result_summary": "agent exhausted its turn budget"},
+        pc, "run_plan_file",
+        lambda *a, **k: bernstein_dispatch.DispatchResult(
+            returncode=1, stderr_tail="agent exhausted its turn budget"),
     )
 
     r = pc.run_role(
-        server=None, workdir=tmp_path, role="reviewer", title="t", prompt="p",
+        workdir=tmp_path, role="reviewer", title="t", prompt="p",
         model=_RESOLVED["review"], rundir=tmp_path / "run", cycle=1,
     )
 
     assert r.review_result.role_status.value == "ERROR"
-    assert "status='failed'" in r.error_detail
+    assert "exit=1" in r.error_detail
     assert "turn budget" in r.error_detail

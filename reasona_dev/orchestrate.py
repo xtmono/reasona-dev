@@ -25,11 +25,6 @@ after the upstream unit is fixed. Skipped is a distinct outcome from failed
 -- conflating them would report a plan as five failures when one unit broke
 and four were never run.
 
-**One server for the plan.** Started once here and passed into every
-`run_pr_cycle` call. Same reasoning that moved role dispatch off per-role
-subprocesses -- the bootstrap is real work, and paying it once per unit is
-as arbitrary as paying it once per role.
-
 **Profile conflicts surface before anything runs.** Every unit's profile is
 resolved up front, so a plan with a two-language unit is refused before the
 first agent spawns rather than after four units have already merged.
@@ -41,7 +36,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from reasona_dev import config_file, merge_tail as merge_tail_mod, ship_gate
-from reasona_dev.bernstein_server import ServerHandle, start_server, stop_server
 from reasona_dev.model_config import ResolvedModel
 from reasona_dev.plan_compile import PRUnit, PlanError, _stage_name, parse_manifest_units, parse_plan_units
 from reasona_dev.cycle_gate import FixBudget, RecurrenceTracker
@@ -212,8 +206,6 @@ def run_plan(
     run_pr_cycle_fn=run_pr_cycle,
     ship_gate_fn=ship_gate.evaluate,
     merge_tail_fn=merge_tail_mod.run_merge_tail,
-    start_server_fn=start_server,
-    stop_server_fn=stop_server,
 ) -> PlanRunResult:
     """review -> scan -> ship, per unit, in dependency order.
 
@@ -232,9 +224,7 @@ def run_plan(
 
     known = {u.index for u in units}
     by_index: dict[str, UnitOutcome] = {}
-    server: ServerHandle | None = start_server_fn(workdir, port=port)
-    try:
-        for up in units:
+    for up in units:
             blocked_by = _blocking_dependency(up, by_index, known)
             if blocked_by is not None:
                 outcome = UnitOutcome(
@@ -253,7 +243,6 @@ def run_plan(
                 profile=up.profile,
                 stage_name=up.stage_name,
                 files=up.unit.files,
-                server=server,
             )
 
             if cycle.verdict not in ("PASS", "PASS_WITH_NOTES"):
@@ -269,7 +258,7 @@ def run_plan(
                 tail: TailResult | None = None
                 if decision.passed and ship:
                     tail = merge_tail_fn(
-                        server=server, workdir=workdir, stage_name=up.stage_name,
+                        workdir=workdir, stage_name=up.stage_name,
                         pr_title=f"{up.title}", unit_type=up.unit.unit_type,
                         profile=up.profile, resolved=resolved,
                         rundir=rundir / up.stage_name, ship_decision=decision,
@@ -291,7 +280,4 @@ def run_plan(
                 )
             result.outcomes.append(outcome)
             by_index[up.index] = outcome
-    finally:
-        if server is not None:
-            stop_server_fn(server, workdir=workdir)
     return result

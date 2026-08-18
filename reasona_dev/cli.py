@@ -191,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("plan_file", help="Path to the plan document (manifest form)")
     p_run.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
     p_run.add_argument("--rundir", default=None, help="Where role outputs land (default: <workdir>/.reasona/runs)")
-    p_run.add_argument("--port", type=int, default=8052, help="Port for the shared Bernstein server")
+    p_run.add_argument("--port", type=int, default=8052, help="Port each `bernstein run` dispatch binds (reused sequentially)")
     p_run.add_argument("--base", default="origin/main")
     p_run.add_argument("--head", default="HEAD")
     p_run.add_argument(

@@ -148,7 +148,7 @@ def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, generic
     }
     calls = []
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
         calls.append(role)
         return RoleRunResult(
             role=role, cycle=cycle,
@@ -159,8 +159,6 @@ def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, generic
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
         profile="generic", run_role_fn=_fn,
-        start_server_fn=lambda w, *, port: None,
-        stop_server_fn=lambda s, *, workdir: None,
     )
 
     # bounded, not infinite: 3 retries then abort

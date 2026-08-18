@@ -40,7 +40,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from reasona_dev import cycles_log, squash
-from reasona_dev.bernstein_server import ServerHandle
 from reasona_dev.cycle_gate import FixBudget, RecurrenceTracker, evaluate
 from reasona_dev.model_config import ResolvedModel
 from reasona_dev.pr_cycle import RoleRunResult, _build_fix_prompt, _run_dev_fix, run_role
@@ -227,7 +226,6 @@ def should_run_final_audit(budget: FixBudget) -> bool:
 
 def run_final_audit(
     *,
-    server: ServerHandle,
     workdir: Path,
     stage_name: str,
     pr_title: str,
@@ -266,7 +264,7 @@ def run_final_audit(
     while True:
         cycle += 1
         result = run_role_fn(
-            server=server, workdir=workdir, role="compliance",
+            workdir=workdir, role="compliance",
             title=f"{pr_title} -- final audit c{cycle}",
             prompt=prompt, model=resolved["final_audit"], rundir=rundir, cycle=cycle,
         )
@@ -299,7 +297,7 @@ def run_final_audit(
             return False, "final audit inconclusive -- verification did not run", dispatches
 
         fix = _run_dev_fix(
-            server=server, workdir=workdir, pr_title=pr_title,
+            workdir=workdir, pr_title=pr_title,
             findings=result.review_result.must_fix, dev_model=resolved["dev"],
             escalated_model=decision.escalated_model, rundir=rundir,
             cycle=cycle, run_role_fn=run_role_fn,
@@ -311,7 +309,6 @@ def run_final_audit(
 
 def run_merge_tail(
     *,
-    server: ServerHandle,
     workdir: str | Path,
     stage_name: str,
     pr_title: str,
@@ -353,7 +350,7 @@ def run_merge_tail(
     audit: RoleRunResult | None = None
     if should_run_final_audit(budget):
         passed, audit_reason, dispatches = run_final_audit(
-            server=server, workdir=workdir, stage_name=stage_name, pr_title=pr_title,
+            workdir=workdir, stage_name=stage_name, pr_title=pr_title,
             profile=profile, resolved=resolved, rundir=rundir, budget=budget,
             recurrence=recurrence, run_role_fn=run_role_fn,
         )

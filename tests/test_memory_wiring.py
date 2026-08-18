@@ -29,7 +29,7 @@ PASS_TEXT = "VERDICT: PASS\n"
 def _recording_role_fn():
     calls = []
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
         calls.append({"role": role, "prompt": prompt})
         return RoleRunResult(
             role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
@@ -40,12 +40,6 @@ def _recording_role_fn():
     return _fn
 
 
-def _noop_start(workdir, *, port):
-    return None
-
-
-def _noop_stop(server, *, workdir):
-    pass
 
 
 def _seed_recurrence(workdir, path="crates/flow/src/a.rs"):
@@ -71,7 +65,6 @@ def test_matching_priors_are_injected_into_review_and_scan_prompts(tmp_path, gen
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 3", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", files=["crates/flow/src/b.rs"], run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
 
     by_role = {c["role"]: c["prompt"] for c in fn.calls}
@@ -87,7 +80,6 @@ def test_unrelated_files_get_an_unchanged_prompt(tmp_path, generic_prompts):
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 3", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", files=["crates/unrelated/src/z.rs"], run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
 
     assert all("PRIOR OBSERVATIONS" not in c["prompt"] for c in fn.calls)
@@ -102,7 +94,6 @@ def test_unit_declaring_no_files_gets_an_unchanged_prompt(tmp_path, generic_prom
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 3", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
 
     assert all("PRIOR OBSERVATIONS" not in c["prompt"] for c in fn.calls)
@@ -113,7 +104,6 @@ def test_fresh_repo_gets_an_unchanged_prompt(tmp_path, generic_prompts):
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", files=["crates/flow/src/a.rs"], run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
     assert all("PRIOR OBSERVATIONS" not in c["prompt"] for c in fn.calls)
 
@@ -134,7 +124,7 @@ def test_memory_is_regenerated_after_the_cycle(tmp_path, generic_prompts):
     )
     assert memory.derive(tmp_path) == []  # one unit only, below threshold
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
         result = (
             ReviewResult(
                 role_status=RoleStatus.COMPLETE,
@@ -152,7 +142,6 @@ def test_memory_is_regenerated_after_the_cycle(tmp_path, generic_prompts):
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 2", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", stage_name="pr-2", files=["crates/flow/src/a.rs"], run_role_fn=_fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
 
     # now observed in pr-1 and pr-2 -> a memory file exists on disk
@@ -167,6 +156,5 @@ def test_memory_regeneration_failure_never_fails_the_cycle(tmp_path, generic_pro
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
     )
     assert result.verdict == "PASS"

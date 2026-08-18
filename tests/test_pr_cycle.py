@@ -32,7 +32,7 @@ def _stub_role_fn(*, script):
     """
     calls = {"n": 0}
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
         idx = calls["n"]
         calls["n"] += 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)
@@ -41,12 +41,6 @@ def _stub_role_fn(*, script):
     return _fn
 
 
-def _noop_start_server(workdir, *, port):
-    return None
-
-
-def _noop_stop_server(server, *, workdir):
-    pass
 
 
 def test_clean_pass_no_fix_cycles(tmp_path, generic_prompts):
@@ -56,7 +50,6 @@ def test_clean_pass_no_fix_cycles(tmp_path, generic_prompts):
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=_stub_role_fn(script=script),
-        start_server_fn=_noop_start_server, stop_server_fn=_noop_stop_server,
     )
     assert result.verdict == "PASS"
     assert result.review_cycles == 1
@@ -74,7 +67,6 @@ def test_review_fix_required_then_passes(tmp_path, generic_prompts):
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=_stub_role_fn(script=script),
-        start_server_fn=_noop_start_server, stop_server_fn=_noop_stop_server,
     )
     assert result.verdict == "PASS"
     assert result.review_cycles == 2
@@ -90,7 +82,6 @@ def test_review_budget_exhausted_fails(tmp_path, generic_prompts):
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=_stub_role_fn(script=script),
-        start_server_fn=_noop_start_server, stop_server_fn=_noop_stop_server,
     )
     assert result.verdict == "FAIL"
     assert result.stage == "review"
@@ -100,7 +91,6 @@ def test_missing_review_prompt_aborts(tmp_path):
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="nonexistent-profile", run_role_fn=_stub_role_fn(script=[]),
-        start_server_fn=_noop_start_server, stop_server_fn=_noop_stop_server,
     )
     assert result.verdict == "ABORT"
     assert result.stage == "review"
@@ -111,7 +101,6 @@ def test_role_error_status_aborts_immediately(tmp_path, generic_prompts):
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=_stub_role_fn(script=script),
-        start_server_fn=_noop_start_server, stop_server_fn=_noop_stop_server,
     )
     assert result.verdict == "FAIL"  # cycle_gate.evaluate(): ERROR -> abort action -> CycleResult FAIL
     assert result.stage == "review"
@@ -131,6 +120,5 @@ def test_scan_stage_runs_bugbot_and_compliance_in_kv_shape(tmp_path, generic_pro
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=_stub_role_fn(script=script),
-        start_server_fn=_noop_start_server, stop_server_fn=_noop_stop_server,
     )
     assert result.verdict == "PASS"
