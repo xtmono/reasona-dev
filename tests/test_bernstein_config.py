@@ -28,10 +28,11 @@ def _resolved(**adapters: str) -> dict[str, ResolvedModel]:
     }
 
 
-def test_copies_global_template_to_repo_root_when_target_missing(tmp_path, monkeypatch):
-    # Root, not .bernstein/ -- confirmed by a live `bernstein run` (see
-    # bernstein_config.py's module docstring) that only the root location
-    # works with the background orchestrator subprocess today.
+def test_bootstraps_dot_bernstein_and_symlinks_root(tmp_path, monkeypatch):
+    # The real file lands at .bernstein/ (what find_seed_file() prefers);
+    # root is a relative symlink to it, satisfying the background
+    # orchestrator subprocess's hardcoded root-only fallback too (see
+    # bernstein_config.py's module docstring).
     global_yaml = tmp_path / "global-bernstein.yaml"
     global_yaml.write_text("goal: test\ncli: claude\n")
     monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
@@ -41,15 +42,16 @@ def test_copies_global_template_to_repo_root_when_target_missing(tmp_path, monke
 
     result = bernstein_config.ensure_bernstein_yaml(workdir)
 
-    assert result == workdir / "bernstein.yaml"
+    assert result == workdir / ".bernstein" / "bernstein.yaml"
+    assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: test\ncli: claude\n"
+    assert (workdir / "bernstein.yaml").is_symlink()
     assert (workdir / "bernstein.yaml").read_text() == "goal: test\ncli: claude\n"
-    assert not (workdir / ".bernstein").exists()
+    assert not (workdir / "bernstein.yaml").readlink().is_absolute()
 
 
 def test_never_overwrites_existing_dot_bernstein_file(tmp_path, monkeypatch):
     # A repo already using .bernstein/bernstein.yaml (e.g. this repo
-    # itself) is left alone -- ensure_bernstein_yaml() never duplicates it
-    # to root even though root is now the write target for FRESH bootstraps.
+    # itself) is left alone -- no root symlink is added on top of it.
     global_yaml = tmp_path / "global-bernstein.yaml"
     global_yaml.write_text("goal: from-global\n")
     monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
@@ -92,9 +94,9 @@ def test_project_local_template_beats_global_template(tmp_path, monkeypatch):
 
     result = bernstein_config.ensure_bernstein_yaml(workdir)
 
-    assert result == workdir / "bernstein.yaml"
-    assert (workdir / "bernstein.yaml").read_text() == "goal: from-project-local\n"
-    assert not (workdir / ".bernstein").exists()
+    assert result == workdir / ".bernstein" / "bernstein.yaml"
+    assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: from-project-local\n"
+    assert (workdir / "bernstein.yaml").is_symlink()
 
 
 def test_returns_none_when_nothing_exists(tmp_path, monkeypatch):

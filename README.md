@@ -123,33 +123,41 @@ full trace). A truly global `bernstein.yaml` isn't something Bernstein
 itself supports.
 
 `reasona_dev.bernstein_config.ensure_bernstein_yaml()` bootstraps
-`<workdir>/bernstein.yaml` (repo ROOT) automatically for any target repo
-that has neither location already (checked at both; whichever one already
-exists is left completely untouched, never duplicated), sourced from:
+`<workdir>/.bernstein/bernstein.yaml` automatically for any target repo
+that has neither real location already (checked at both; whichever one
+already exists is left completely untouched, never duplicated), sourced
+from:
 
 ```
-<workdir>/.bernstein/bernstein.yaml   Bernstein reads this FIRST if present -- left alone, never the bootstrap target
-<workdir>/bernstein.yaml              the bootstrap target -- confirmed live (see below) to actually work
+<workdir>/.bernstein/bernstein.yaml   Bernstein reads this FIRST if present -- left alone, never overwritten; the bootstrap TARGET for fresh repos
+<workdir>/bernstein.yaml              a fresh bootstrap creates this as a relative SYMLINK to .bernstein/bernstein.yaml (see below); a repo that already has a real file here is left alone
 <workdir>/.reasona/bernstein-template.yaml     project-local template (checked first when bootstrapping)
 ~/.reasona/bernstein-template.yaml             global template (checked second when bootstrapping)
 ```
 
-**Why root, not `.bernstein/`, despite `find_seed_file()` preferring
-`.bernstein/`:** a real, paid `bernstein run` against a scratch repo
-(2026-08-18) showed a repo with ONLY `.bernstein/bernstein.yaml` spawns
-ZERO agents -- `bernstein run`'s background orchestrator subprocess
-(`core/server/server_launch.py::_start_spawner`) does not call
-`find_seed_file()` at all; when the seed path isn't explicitly propagated
-to it (confirmed: happens with the exact invocation `reasona_dev.pr_cycle`
-uses, `bernstein run <plan> --auto-approve`), it independently re-derives
-`workdir / "bernstein.yaml"` -- root only, no `.bernstein/` check. The
-result is a silent "FATAL: no adapter configured" loop until the watchdog
-gives up. Moving the identical file to root fixed it immediately, verified
-by a real haiku agent completing a task and `GET /tasks/{id}`'s
-`result_summary` reflecting it. `.bernstein/` is still recognized (still
-checked first, still left alone if a repo already has it there -- it's
-real for `doctor`/plan-validate-style calls, which never hit the buggy
-subprocess), it's just not where a FRESH bootstrap writes anymore.
+**Why a symlink, not a plain choice of one location:** Bernstein disagrees
+with itself about where the seed file lives. `find_seed_file()` (used by
+bare `bernstein`/`doctor`/top-level `run` CLI parsing) checks
+`.bernstein/bernstein.yaml` FIRST. But `bernstein run`'s background
+orchestrator subprocess (`core/server/server_launch.py::_start_spawner`)
+does NOT call `find_seed_file()` at all -- when the seed path isn't
+explicitly propagated to it (confirmed: happens with the exact invocation
+`reasona_dev.pr_cycle` uses, `bernstein run <plan> --auto-approve`), it
+independently re-derives `workdir / "bernstein.yaml"`, root only, with no
+`.bernstein/` check whatsoever. A real, paid `bernstein run` against a
+scratch repo (2026-08-18) confirmed this: a repo with ONLY
+`.bernstein/bernstein.yaml` spawns ZERO agents, looping "FATAL: no adapter
+configured" until the watchdog gives up. Rather than pick one location and
+break the other caller, `ensure_bernstein_yaml()` now writes the real file
+at `.bernstein/bernstein.yaml` (what `find_seed_file()` prefers) and
+creates `<workdir>/bernstein.yaml` as a relative symlink to it -- a symlink
+is transparent to `Path.exists()`/`.read_text()`, so the orchestrator
+subprocess's hardcoded root lookup resolves it exactly like a real file
+would (confirmed for free via a direct, non-spawning invocation of
+Bernstein's own orchestrator module: `resolved seed_path=.../.bernstein/
+bernstein.yaml (from --seed-path=None, exists=True)`, then correctly
+proceeding past the earlier FATAL point). One source file now satisfies
+both of Bernstein's lookup paths.
 
 **This repo's own `bernstein.yaml` stays at `.bernstein/` regardless** --
 this project never runs `bernstein run` against itself for real execution

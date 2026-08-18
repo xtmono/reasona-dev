@@ -132,6 +132,8 @@ def test_bernstein_yaml_bootstrapped_from_global_template(tmp_path, monkeypatch)
         write_audit_trail=False,
     )
 
+    assert (target_repo / ".bernstein" / "bernstein.yaml").read_text() == "goal: from-global-template\n"
+    assert (target_repo / "bernstein.yaml").is_symlink()
     assert (target_repo / "bernstein.yaml").read_text() == "goal: from-global-template\n"
 
 

@@ -3,63 +3,61 @@ template.
 
 Bernstein's own seed/config loader (`cli/helpers.py:find_seed_file()`,
 used by the top-level `bernstein run`/`doctor` CLI parsing) checks, in
-order, `.bernstein/bernstein.yaml` THEN the repo-root `bernstein.yaml` --
-so `.bernstein/` looked like the right, tidier bootstrap target, and this
-module used to write there.
+order, `.bernstein/bernstein.yaml` THEN the repo-root `bernstein.yaml`.
+`bernstein run` ALSO launches its orchestrator as a background subprocess
+(`core/server/server_launch.py::_start_spawner`) that does NOT call
+`find_seed_file()` at all -- when the seed path isn't explicitly propagated
+to it (confirmed: happens with the exact invocation this project uses,
+`bernstein run <plan> --auto-approve`, no `--from-plan` needed to trigger
+it), it independently re-derives `workdir / "bernstein.yaml"`, a single
+hardcoded ROOT-only path with no `.bernstein/` check whatsoever.
 
-**Confirmed by an actual paid `bernstein run` against a real repo (2026-08-18)
-that this is wrong for the file `bernstein run` needs to ACTUALLY execute
-with.** `bernstein run` launches its orchestrator as a background
-subprocess (`core/server/server_launch.py::_start_spawner`); when the seed
-path isn't explicitly propagated to it (confirmed: happens with the exact
-invocation this project uses, `bernstein run <plan> --auto-approve`, no
-`--from-plan` needed to trigger it), that subprocess does NOT call
-`find_seed_file()` at all -- it independently re-derives `workdir /
-"bernstein.yaml"`, a single hardcoded ROOT-only path with no `.bernstein/`
-check whatsoever. A repo with only `.bernstein/bernstein.yaml` gets
-"FATAL: no adapter configured" from the orchestrator subprocess, on
-repeat, until the watchdog gives up after 5 restarts -- zero agents ever
-spawn, silently (`_start_spawner`'s own docstring warns about exactly this
-class of bug). Moving the SAME file to the repo root fixed it immediately
-in the live test: agent spawned, task completed, verified via `GET
-/tasks/{id}`'s `result_summary`. So this module now bootstraps the
-**repo-root** `bernstein.yaml` -- the `.bernstein/` location remains
-recognized (still checked, still left alone if a repo already has it
-there -- `find_seed_file()` is still real and still prefers it for
-`doctor`/plan-validate-style invocations that never hit the buggy
-subprocess path), it's just no longer where THIS module writes a fresh
-one, because a repo that only has `.bernstein/bernstein.yaml` cannot
-actually execute a `bernstein run` against it correctly today.
+**Confirmed by an actual paid `bernstein run` against a real repo
+(2026-08-18):** a repo with ONLY `.bernstein/bernstein.yaml` gets "FATAL:
+no adapter configured" from that orchestrator subprocess, on repeat, until
+the watchdog gives up after 5 restarts -- zero agents ever spawn, silently
+(`_start_spawner`'s own docstring warns about exactly this class of bug).
+So Bernstein's two lookup paths disagree: `find_seed_file()` wants
+`.bernstein/` checked first; the orchestrator subprocess's fallback wants
+root, exclusively.
 
-This repo's own `bernstein.yaml` stays at `.bernstein/` regardless (see
-README) -- this project never runs `bernstein run` against itself for real
-execution, only `doctor`/`plan validate` (neither spawns the buggy
-subprocess), so it never hits this bug and isn't worth churning back.
+**Fix: satisfy both by construction, not by picking a side.** The real
+file is written to `.bernstein/bernstein.yaml` (what `find_seed_file()`
+prefers), and `<workdir>/bernstein.yaml` is created as a **relative
+symlink** pointing at it. A symlink is transparent to `Path.exists()` /
+`Path.read_text()` -- confirmed live (no cost: a direct, non-spawning
+orchestrator invocation) that the background subprocess's hardcoded
+root-only lookup resolves the symlink and parses the seed correctly, no
+different from a real file there. Both code paths now read the exact same
+content from the exact same underlying file -- no duplicate source of
+truth, no picking one location and letting the other silently break.
 
-What CAN be global is reasona-dev's own copy of it, and -- mirroring
-`reasona_dev.config_file`'s exact two-layer cascade for `reasona.yaml`
--- it too has a project-local layer above the global one. Named
-`bernstein-template.yaml`, not `bernstein.yaml`, specifically so it reads
-as "the source this gets COPIED from" rather than looking like a second
-copy of the real, Bernstein-readable file:
+What CAN be global is reasona-dev's own copy of the template, and --
+mirroring `reasona_dev.config_file`'s exact two-layer cascade for
+`reasona.yaml` -- it too has a project-local layer above the global one.
+Named `bernstein-template.yaml`, not `bernstein.yaml`, specifically so it
+reads as "the source this gets COPIED from" rather than looking like a
+second copy of the real, Bernstein-readable file:
 
     <workdir>/.reasona/bernstein-template.yaml   project-local template (checked first)
     ~/.reasona/bernstein-template.yaml           global template (GLOBAL_BERNSTEIN_YAML)
 
-`ensure_bernstein_yaml()` copies whichever one wins into a target repo's
-`<workdir>/.bernstein/bernstein.yaml` the first time reasona-dev compiles a
-plan against that repo -- and ONLY if that repo doesn't already have a
-seed file Bernstein would find on its own (checked at BOTH real locations,
-`.bernstein/bernstein.yaml` and the legacy repo-root `bernstein.yaml`), so
-a repo that already has either kept from before this module existed is
-left untouched. This project's own repo commits BOTH: `.bernstein/
-bernstein.yaml` directly (the plain "already has one" case above -- so its
-own `bernstein doctor`/`bernstein run` invocations never touch the
-template cascade at all) AND `.reasona/bernstein-template.yaml` (identical
-content, committed purely so this repo's own template doubles as a real,
-checked-in example other repos' project-local template can be copied
-from). The local/global template cascade itself exists for every OTHER
-target repo reasona-dev bootstraps.
+`ensure_bernstein_yaml()` copies whichever template wins into a target
+repo's `<workdir>/.bernstein/bernstein.yaml` (with the root symlink) the
+first time reasona-dev compiles a plan against that repo -- and ONLY if
+that repo doesn't already have a seed file at either real location, so a
+repo that already has its own `.bernstein/bernstein.yaml` OR root
+`bernstein.yaml` (symlink or not) is left completely untouched.
+
+This project's own repo commits BOTH: `.bernstein/bernstein.yaml` directly
+(the plain "already has one" case above -- so its own `bernstein doctor`/
+`bernstein run` invocations never touch the template cascade at all) AND
+`.reasona/bernstein-template.yaml` (identical content, committed purely so
+this repo's own template doubles as a real, checked-in example other
+repos' project-local template can be copied from). This repo does NOT get
+a root symlink -- it never runs `bernstein run` against itself for real
+execution (only `doctor`/`plan validate`, neither of which spawns the
+buggy subprocess), so it never needs one.
 
 `sync_role_model_policy()` handles a different, ongoing concern: even a
 `bernstein.yaml` that's already in place can have a `role_model_policy`
@@ -81,17 +79,21 @@ GLOBAL_BERNSTEIN_YAML = Path.home() / ".reasona" / "bernstein-template.yaml"
 
 
 def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
-    """Copy a template into `workdir/bernstein.yaml` (repo root) if the
-    target repo has no seed file already, at either real location.
+    """Bootstrap `<workdir>/.bernstein/bernstein.yaml` (+ a root symlink to
+    it) if the target repo has no seed file at either real location yet.
 
     Existing-file check covers BOTH locations Bernstein's `find_seed_file()`
     recognizes (`.bernstein/bernstein.yaml` first, then repo-root
-    `bernstein.yaml`) -- a repo already using either convention is left
-    completely untouched, never given a second, redundant copy. Only when
-    NEITHER exists does this module write a fresh one -- to the repo
-    ROOT specifically, not `.bernstein/`, because only the root location is
-    confirmed to work with `bernstein run`'s background orchestrator
-    subprocess today (see module docstring for the live-verified bug).
+    `bernstein.yaml`) -- a repo already using either convention (as a real
+    file OR a symlink) is left completely untouched, never given a second,
+    redundant copy.
+
+    Only when NEITHER exists: copies a template into
+    `<workdir>/.bernstein/bernstein.yaml`, then creates `<workdir>/
+    bernstein.yaml` as a RELATIVE symlink (`.bernstein/bernstein.yaml`) --
+    relative so it survives being cloned/moved to a different absolute
+    path. This satisfies both of Bernstein's disagreeing lookup paths (see
+    module docstring) from one underlying file.
 
     Source priority when neither exists: `<workdir>/.reasona/
     bernstein-template.yaml` (project-local template) -> `GLOBAL_BERNSTEIN_YAML`
@@ -100,10 +102,10 @@ def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
     `reasona.yaml`.
 
     Returns the path now in place (whichever already existed, or the
-    freshly-copied repo-root `bernstein.yaml`), or `None` if nothing was
-    available to copy from either (the caller still proceeds; `bernstein
-    run` will surface its own "no seed file found" error if this is never
-    resolved).
+    freshly-bootstrapped `.bernstein/bernstein.yaml`), or `None` if nothing
+    was available to copy from either (the caller still proceeds;
+    `bernstein run` will surface its own "no seed file found" error if this
+    is never resolved).
     """
     workdir = Path(workdir)
     dot_bernstein_target = workdir / ".bernstein" / "bernstein.yaml"
@@ -116,8 +118,10 @@ def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
     local_template = workdir / ".reasona" / "bernstein-template.yaml"
     for source in (local_template, GLOBAL_BERNSTEIN_YAML):
         if source.is_file():
-            shutil.copy(source, root_target)
-            return root_target
+            dot_bernstein_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source, dot_bernstein_target)
+            root_target.symlink_to(Path(".bernstein") / "bernstein.yaml")
+            return dot_bernstein_target
     return None
 
 
@@ -126,7 +130,11 @@ def sync_role_model_policy(bernstein_yaml_path: str | Path, resolved: dict[str, 
     in place to match `resolved`'s adapters -- text-level surgery, not a
     YAML re-serialize, so every comment in the file (and this project's
     `bernstein.yaml` carries a lot of them, e.g. the whole CREDIT-BURN
-    writeup) survives byte-for-byte untouched.
+    writeup) survives byte-for-byte untouched. Works the same whether
+    `bernstein_yaml_path` is a real file or a symlink to one (`Path.
+    read_text()`/`write_text()` follow symlinks transparently) -- editing
+    through the root symlink `ensure_bernstein_yaml()` creates edits the
+    same underlying `.bernstein/bernstein.yaml` either way.
 
     This is what closes the manual half of the gap
     `tests/test_bernstein_yaml_consistency.py` could previously only
