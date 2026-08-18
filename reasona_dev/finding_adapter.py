@@ -131,7 +131,11 @@ class ReviewResult:
         return "PASS"
 
 
-_SECTION_RE = re.compile(r"^(MUST_FIX|ADVISORY):\s*$", re.MULTILINE)
+# Tolerant of a markdown heading and a missing colon. A real reviewer wrote
+# `## MUST_FIX`, the strict form did not match, `current_disposition` stayed
+# None, and EVERY item under it was dropped -- the role reported PASS with two
+# findings sitting in its output.
+_SECTION_RE = re.compile(r"^\s*#{0,6}\s*(MUST_FIX|ADVISORY)\s*:?\s*$", re.MULTILINE)
 # Tolerances here are not politeness -- each one was a finding LOST in a live
 # run, and a lost MUST_FIX makes the review gate report PASS on output that
 # found a CRITICAL. Observed in one real reviewer response, both at once:
@@ -158,6 +162,25 @@ _ITEM_RE = re.compile(
     r"(?:\s+\[?(?P<symbol>[A-Za-z_][\w:]*)\]?)?"
     + rf"(?:\s*{_NOTE_DASH}\s*(?P<inline_note>.+?))?" +
     r"\s*$"
+)
+
+# The catch-all. Anything that opens with a severity tag inside a
+# MUST_FIX/ADVISORY section IS a finding, whatever else the model did with
+# the rest of the line.
+#
+# Widening `_ITEM_RE` one rendering at a time does not converge: one live run
+# produced `[delete]`, `[keys function]` (a bracketed symbol WITH a space),
+# `(no test file)`, `:9-10` (a line RANGE), and an em dash -- and each miss
+# was silent, so a MUST_FIX became "no findings" and the gate reported PASS.
+# For a gate whose failure mode is a false PASS, "I could not parse this" must
+# never render as "there was nothing here".
+#
+# So the strict shape is tried first (it extracts path/line/symbol properly),
+# and anything else that still looks like an item becomes a finding carrying
+# the raw remainder, flagged `contract_incomplete`. Section membership decides
+# disposition exactly as before, so an unparsed line in MUST_FIX still blocks.
+_LOOSE_ITEM_RE = re.compile(
+    r"^-\s*\[(?P<severity>CRITICAL|HIGH|MEDIUM|LOW)\]\s*(?P<rest>\S.*?)\s*$"
 )
 
 _EVIDENCE_RE = re.compile(r"^\s*\|\|\s*(?P<key>contract|scenario|fix|note):\s*(?P<val>.+)$")
@@ -215,6 +238,24 @@ def parse_text_contract(text: str) -> ReviewResult:
                 # field still wins over the shorthand.
                 note=item.group("inline_note"),
                 raw=raw_line,
+            )
+            continue
+
+        loose = _LOOSE_ITEM_RE.match(raw_line)
+        if loose and current_disposition is not None:
+            _flush()
+            rest = loose.group("rest")
+            # First whitespace token is the best available path guess; the
+            # whole remainder is kept as the note so nothing is thrown away.
+            current = Finding(
+                disposition=current_disposition,
+                severity=Severity(loose.group("severity")),
+                path=rest.split()[0],
+                line=None,
+                symbol=None,
+                note=rest,
+                raw=raw_line,
+                contract_incomplete=True,
             )
             continue
 

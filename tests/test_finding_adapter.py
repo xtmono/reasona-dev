@@ -1,3 +1,5 @@
+import pytest
+
 from reasona_dev.finding_adapter import (
     Disposition,
     RoleStatus,
@@ -310,3 +312,62 @@ def test_prompts_no_longer_teach_the_bracketed_notation():
             continue
         assert "path[:line] [symbol]" not in text, f"{md.name} still shows the ambiguous notation"
         assert "NOT wrapped in brackets" in text, f"{md.name} does not state the symbol rule"
+
+
+# --- never drop silently -----------------------------------------------------
+
+def test_a_markdown_section_heading_is_recognized():
+    """LIVE REGRESSION: a reviewer wrote `## MUST_FIX`. The strict
+    `MUST_FIX:` form did not match, so no disposition was ever set and EVERY
+    item under it was dropped -- the role reported PASS with two findings
+    sitting in its own output."""
+    out = "## MUST_FIX\n\n- [CRITICAL] src/a.py\n\n## ADVISORY\n\n- [LOW] src/b.py\n\nVERDICT: FAIL\n"
+    r = parse_text_contract(out)
+    assert r.gate() == "FIX_REQUIRED"
+    assert len(r.must_fix) == 1 and len(r.advisory) == 1
+
+
+@pytest.mark.parametrize("line,expected_path", [
+    ("- [HIGH] src/store.py:9-10 [keys function]", "src/store.py:9-10"),
+    ("- [HIGH] src/store.py (no test file)", "src/store.py"),
+    ("- [CRITICAL] src/a.py :: something odd", "src/a.py"),
+])
+def test_an_unparseable_item_still_becomes_a_finding(line, expected_path):
+    """Widening the strict shape one rendering at a time does not converge --
+    one live run produced a bracketed symbol WITH a space, a parenthetical, a
+    line RANGE and an em dash. For a gate whose failure mode is a false PASS,
+    "I could not parse this" must never render as "there was nothing here"."""
+    r = parse_text_contract(f"MUST_FIX:\n{line}\n\nVERDICT: FAIL\n")
+    assert r.gate() == "FIX_REQUIRED"
+    assert len(r.must_fix) == 1
+    f = r.must_fix[0]
+    assert f.path == expected_path
+    assert f.contract_incomplete is True   # evidence was not extractable
+    assert f.raw == line                   # nothing thrown away
+
+
+def test_section_membership_still_decides_disposition_for_loose_items():
+    """An unparsed line in ADVISORY must NOT block; one in MUST_FIX must."""
+    out = "MUST_FIX:\n\nADVISORY:\n- [LOW] src/a.py (some prose)\n\nVERDICT: PASS\n"
+    r = parse_text_contract(out)
+    assert r.gate() == "PASS_WITH_NOTES"
+    assert len(r.must_fix) == 0 and len(r.advisory) == 1
+
+
+def test_a_well_formed_item_still_takes_the_structured_path():
+    """The catch-all is a fallback, not a replacement -- path/line/symbol and
+    the evidence fields must still be extracted when they are there."""
+    out = (
+        "MUST_FIX:\n- [HIGH] src/a.rs:10 rotate_token\n"
+        "  || contract: c\n  || scenario: s\n  || fix: f\n\nVERDICT: FAIL\n"
+    )
+    f = parse_text_contract(out).must_fix[0]
+    assert (f.path, f.line, f.symbol) == ("src/a.rs", 10, "rotate_token")
+    assert f.contract_incomplete is False
+
+
+def test_a_severity_line_outside_any_section_is_not_invented_into_a_finding():
+    """The catch-all keys off section membership; prose elsewhere in the
+    report must not become findings."""
+    out = "Some preamble mentioning - [HIGH] nothing in particular\n\nVERDICT: PASS\n"
+    assert parse_text_contract(out).gate() == "PASS"
