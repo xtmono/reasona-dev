@@ -97,6 +97,25 @@ def _cmd_acceptance(args: argparse.Namespace) -> int:
     return acceptance.main([args.criteria_file, args.workdir or "."])
 
 
+def _cmd_ship_gate(args: argparse.Namespace) -> int:
+    from reasona_dev import ship_gate
+
+    decision = ship_gate.evaluate(
+        args.workdir or ".", args.stage,
+        cycle_verdict=args.cycle_verdict, base=args.base, head=args.head,
+        record=not args.no_record,
+    )
+    print(decision.render(), file=sys.stderr)
+    return 0 if decision.passed else 1
+
+
+def _cmd_cycles_report(args: argparse.Namespace) -> int:
+    from reasona_dev import cycles_query
+
+    print(cycles_query.render(args.workdir or ".", include_effective=args.effective))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reasona-dev")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -137,6 +156,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_accept.add_argument("--workdir", default=None, help="Directory to run criteria in (default: cwd)")
     p_accept.set_defaults(func=_cmd_acceptance)
+
+    p_ship = sub.add_parser(
+        "ship-gate",
+        help="The composed pre-merge verdict: review AND acceptance AND structure",
+    )
+    p_ship.add_argument("stage", help="Stage name, e.g. pr-1")
+    p_ship.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_ship.add_argument(
+        "--cycle-verdict", default=None,
+        help="The review/scan verdict from pr_cycle (PASS/PASS_WITH_NOTES/FAIL). Omitted = not asserted.",
+    )
+    p_ship.add_argument("--base", default="origin/main")
+    p_ship.add_argument("--head", default="HEAD")
+    p_ship.add_argument(
+        "--no-record", action="store_true",
+        help="Do not append to cycles.jsonl (dry run / re-evaluation)",
+    )
+    p_ship.set_defaults(func=_cmd_ship_gate)
+
+    p_report = sub.add_parser(
+        "cycles-report",
+        help="Attribution, budget, and acceptance-coverage queries over cycles.jsonl",
+    )
+    p_report.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_report.add_argument(
+        "--effective", action="store_true",
+        help="Also report the APPROXIMATE 'file touched again within 7d' proxy (base-rate caveat applies)",
+    )
+    p_report.set_defaults(func=_cmd_cycles_report)
 
     return parser
 

@@ -191,6 +191,88 @@ def record_decision(
         pass
 
 
+def record_acceptance(
+    *,
+    workdir: str | Path,
+    stage_name: str,
+    results: list[dict],
+    declared: bool,
+) -> None:
+    """Append a PR unit's acceptance-criteria outcome.
+
+    This is the row that makes the four-way attribution split computable at
+    all. Findings alone answer "which gate caught something"; joining them
+    against AC outcomes on `stage_name` answers the question that actually
+    decides the review budget -- whether a gate caught anything an executable
+    criterion would not have caught by itself.
+
+    `declared=False` (a unit whose plan named no criteria) is recorded
+    rather than skipped: AC coverage is the measurement that decides when
+    an undeclared unit should stop being a warning and start being a
+    refusal, and a row that is never written cannot be counted.
+    """
+    try:
+        path = cycles_path(workdir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "schema_version": SCHEMA_VERSION,
+            "ts": time.time(),
+            "head_sha": _head_sha(Path(workdir)),
+            "stage_name": stage_name,
+            "kind": "acceptance",
+            "declared": declared,
+            "passed": all(r.get("passed") for r in results) if results else declared is False,
+            "criteria": [
+                {
+                    "id": r.get("id"),
+                    "expect": r.get("expect"),
+                    "passed": r.get("passed"),
+                    "exit_code": r.get("exit_code"),
+                    "error": r.get("error"),
+                }
+                for r in results
+            ],
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def record_ship(
+    *,
+    workdir: str | Path,
+    stage_name: str,
+    passed: bool,
+    gates: dict[str, bool],
+    reason: str,
+) -> None:
+    """Append the composed pre-merge verdict and which sub-gate decided it.
+
+    Recorded separately from the individual gates because "what stopped this
+    unit from shipping" is a question about the composition, and a reader
+    reconstructing it from three independent rows would have to re-implement
+    the composition rule to do so.
+    """
+    try:
+        path = cycles_path(workdir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "schema_version": SCHEMA_VERSION,
+            "ts": time.time(),
+            "head_sha": _head_sha(Path(workdir)),
+            "stage_name": stage_name,
+            "kind": "ship",
+            "passed": passed,
+            "gates": gates,
+            "reason": reason,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def read_records(workdir: str | Path) -> list[dict]:
     """Every record, in append order. Malformed lines are skipped rather
     than raising -- a partially-written final line (killed mid-run) must

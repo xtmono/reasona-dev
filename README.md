@@ -65,9 +65,11 @@ reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step), anchors to workdir
   pr_cycle.py                 dev-ralf-faithful develop -> verify -> bug+compliance scan driver (worker.md)
   bernstein_server.py          Bernstein task-server HTTP client (start/stop, POST /tasks, GET /tasks/{id})
-  acceptance.py                 executable acceptance criteria -- the pre-merge gate that RUNS the plan's claims
+  acceptance.py                 executable acceptance criteria -- RUNS the plan's own claims
   structure_gate.py              deterministic structural checks (file size, duplication, dependency direction)
+  ship_gate.py                    THE pre-merge verdict: review AND acceptance AND structure, composed
   cycles_log.py                   append-only per-cycle finding log (.reasona/cycles.jsonl) -- the measurement substrate
+  cycles_query.py                  attribution / budget / coverage queries -- what makes the log a decision
   memory.py                        repo-scoped priors GENERATED from cycles.jsonl, file-scoped retrieval
   prompt_profile.py            project/language-selectable review/bugbot/compliance prompts (.reasona/prompts/<profile>/)
   prompts/generic/               packaged default prompt profile (review/recheck/bugbot/compliance/final_audit.md)
@@ -80,7 +82,7 @@ reasona_dev/
   squash.py                        squash message builder + guard
   plugin.py                         pluggy hookimpl (on_pre_task_create, on_agent_spawned)
   adapters/ocr.py                    OcrAdapter, registered via bernstein.adapters entry points
-tests/                      pytest, 193 cases, all passing
+tests/                      pytest, 214 cases, all passing
 ```
 
 ## Setup
@@ -230,13 +232,42 @@ instead of a full re-review) and how many cycles a doomed PR burns
 SAME finding survives, so a PR emitting fresh findings every cycle used to
 run to the full cap; non-convergence now exits at 3).
 
+**One gate, not three available ones.** `ship_gate.py` is the single
+pre-merge verdict: `review AND acceptance AND structure`, by conjunction, with
+no weighting and no override. Three separately-runnable checks would have left
+the pipeline in the state this whole analysis criticized -- "a reviewer asserts
+completeness" and "an operator remembers to run the completeness check" are the
+same failure with a different actor. All three still report even after one
+fails, so an author fixes everything in one round.
+
+    reasona-dev ship-gate pr-3 --cycle-verdict PASS
+
 **Measurement comes before the next cut.** `cycles_log.py` records every
-dispatch and every gate decision to `.reasona/cycles.jsonl`, keyed by
-`Finding.key()`. Which role first caught a finding that mattered is then a
-query, not an opinion -- and that is the only honest basis for deciding which
-role to drop. Instrumenting before the first production run costs nothing;
-instrumenting after it is how dev-ralf ended up unable to answer the
-question.
+dispatch, gate decision, acceptance outcome, and ship verdict to
+`.reasona/cycles.jsonl`, keyed by `Finding.key()`. `cycles_query.py` is the
+other half -- a log with no query cannot discharge a single deferred decision,
+so the deferral would be permanent by construction rather than by evidence:
+
+    reasona-dev cycles-report
+
+    role attribution (exact)
+      role          first  dup  uniq  total
+      reviewer         4    1     3      4
+      bugbot           1    0     1      1
+      compliance       0    1     0      1        <- unique=0: the drop candidate
+
+    acceptance coverage: 2/3 units declare criteria (67%), 1 passed, 1 failed
+    gate vs acceptance (units with declared criteria only)
+      gate_only=1  acceptance_only=1  both=0  neither=0
+
+`unique` matters more than `first_catch` -- first-catch is resolved by dispatch
+order, so a role that runs second in the same cycle is structurally
+disadvantaged by it. A role with high `duplicate` and near-zero `unique` is the
+one to drop, and the table supports that conclusion directly rather than
+requiring interpretation. The one heuristic (`--effective`, "a later commit
+touched the same file") is off by default and reported separately: the original
+analysis measured that proxy at 84% against a 77% control base rate, i.e.
+almost entirely base rate.
 
 **Plans are capped at 5 PR units** (`plan_compile.MAX_PR_UNITS`). The two
 largest plans in the record (15 units each) are the two that produced
