@@ -241,3 +241,72 @@ def test_detection_keys_off_literal_markers_only():
     # prose that merely mentions the marker word is still text
     prosey = "MUST_FIX:\n\nADVISORY:\n- [LOW] a.py -- mentions BLOCKING_JSON in passing\n\nVERDICT: PASS\n"
     assert parse_role_output(prosey).role_status is RoleStatus.COMPLETE
+
+
+# --- renderings observed in real reviewer output -----------------------------
+
+def test_a_bracketed_symbol_is_not_dropped():
+    """LIVE REGRESSION, and the worst failure this parser can have: a reviewer
+    correctly reported a missing function as CRITICAL, wrote the symbol as
+    `[delete]` because the prompt's own notation spells the optional field
+    `[symbol]`, the line failed to match, and the cycle recorded
+    `gate=PASS mf=0` -- a false PASS on a review that had found real
+    missing code. Only the acceptance gate caught it."""
+    out = (
+        "MUST_FIX:\n"
+        "- [CRITICAL] src/store.py [delete]\n"
+        "  || contract: delete() must exist\n"
+        "  || scenario: AttributeError on import\n"
+        "  || fix: add it\n"
+        "\nVERDICT: FAIL\n"
+    )
+    r = parse_text_contract(out)
+    assert r.gate() == "FIX_REQUIRED"
+    assert len(r.must_fix) == 1
+    assert r.must_fix[0].symbol == "delete"      # brackets stripped, not kept
+    assert r.must_fix[0].path == "src/store.py"
+
+
+def test_an_em_dash_separates_an_advisory_description():
+    """Same live output, second dropped finding: the model used `—` where the
+    prompt shows `--`."""
+    for dash in ("--", "—", "–"):
+        out = f"MUST_FIX:\n\nADVISORY:\n- [LOW] src/store.py {dash} no dedicated test file\n\nVERDICT: PASS\n"
+        r = parse_text_contract(out)
+        assert len(r.advisory) == 1, dash
+        assert r.advisory[0].note == "no dedicated test file"
+
+
+def test_bare_symbol_and_ascii_dash_still_parse():
+    """The documented shape must keep working -- the tolerances are additive."""
+    out = (
+        "MUST_FIX:\n- [HIGH] src/a.rs:10 rotate_token\n"
+        "  || contract: c\n  || scenario: s\n  || fix: f\n"
+        "\nADVISORY:\n- [MEDIUM] src/b.rs:88 parse_ttl -- boundary handling\n\nVERDICT: FAIL\n"
+    )
+    r = parse_text_contract(out)
+    assert r.must_fix[0].symbol == "rotate_token"
+    assert r.must_fix[0].line == 10
+    assert r.advisory[0].note == "boundary handling"
+
+
+def test_a_bracketed_symbol_with_an_em_dash_note_parses():
+    """Both tolerances at once, which is how they actually arrived."""
+    out = "MUST_FIX:\n\nADVISORY:\n- [LOW] src/a.py [helper] — could be simpler\n\nVERDICT: PASS\n"
+    r = parse_text_contract(out)
+    assert r.advisory[0].symbol == "helper"
+    assert r.advisory[0].note == "could be simpler"
+
+
+def test_prompts_no_longer_teach_the_bracketed_notation():
+    """The parser now tolerates it, but the prompt should not be the thing
+    producing it -- a meta-notation a model can reproduce literally is a
+    defect in the prompt, not just in the parser."""
+    from pathlib import Path
+
+    for md in sorted((Path(__file__).resolve().parent.parent / ".reasona" / "prompts" / "generic").glob("*.md")):
+        text = md.read_text()
+        if "MUST_FIX:" not in text:
+            continue
+        assert "path[:line] [symbol]" not in text, f"{md.name} still shows the ambiguous notation"
+        assert "NOT wrapped in brackets" in text, f"{md.name} does not state the symbol rule"

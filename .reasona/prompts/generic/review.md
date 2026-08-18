@@ -23,13 +23,18 @@ Report findings in this exact shape -- do not report a verdict, report
 findings; section membership is what gates, not your judgment:
 
 MUST_FIX:
-- [CRITICAL|HIGH] path[:line] [symbol]
+- [CRITICAL] src/session.rs:142 rotate_token
   || contract: <the requirement or invariant this violates>
   || scenario: <a concrete input/state that reproduces the failure>
   || fix: <the minimal correct change>
 
 ADVISORY:
-- [MEDIUM|LOW] path[:line] [symbol] -- <description>
+- [MEDIUM] src/util.rs:88 parse_ttl -- <description>
+
+Follow that item shape exactly: `- [SEVERITY] <path>[:<line>] [<symbol>]`
+where the line number and symbol are optional. Write the symbol as a bare
+name, NOT wrapped in brackets, and separate an ADVISORY description with a
+plain ASCII `--`. Severity is one of CRITICAL, HIGH, MEDIUM, LOW.
 
 Last line (parsing anchor only -- the MUST_FIX/ADVISORY sections above are
 authoritative, not this line): VERDICT: PASS or VERDICT: FAIL

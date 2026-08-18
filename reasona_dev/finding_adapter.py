@@ -132,20 +132,34 @@ class ReviewResult:
 
 
 _SECTION_RE = re.compile(r"^(MUST_FIX|ADVISORY):\s*$", re.MULTILINE)
-# The trailing `-- <description>` is what `review.md` instructs for ADVISORY
-# items, and this regex used to have no provision for it -- so every advisory
-# written in the documented form failed to match and was dropped silently.
-# Found by a live run: a real reviewer emitted two ADVISORY lines in exactly
-# the shape the prompt asked for and the parser returned zero. Advisories do
-# not gate (PASS vs PASS_WITH_NOTES), so nothing failed loudly; they simply
-# never reached cycles.jsonl or memory, which is the worse outcome for a
-# measurement substrate.
+# Tolerances here are not politeness -- each one was a finding LOST in a live
+# run, and a lost MUST_FIX makes the review gate report PASS on output that
+# found a CRITICAL. Observed in one real reviewer response, both at once:
+#
+#   - [CRITICAL] src/store.py [delete]
+#   - [LOW] src/store.py — No dedicated test file present. ...
+#
+# The first writes the symbol in brackets, because the prompt's own notation
+# spells the optional field as `[symbol]` and a model can reasonably
+# reproduce that literally. The second separates its description with an em
+# dash instead of the ASCII `--` the prompt shows. Neither line matched, both
+# findings vanished, and the cycle recorded `gate=PASS mf=0` for a review
+# that had correctly identified missing code. Only the acceptance gate caught
+# it.
+#
+# The rule this settles: where a model's rendering is a reasonable reading of
+# the prompt, the PARSER accommodates it. A contract whose failure mode is a
+# silent false PASS cannot also be strict about punctuation.
+_NOTE_DASH = r"(?:--|—|–)"
 _ITEM_RE = re.compile(
     r"^-\s*\[(?P<severity>CRITICAL|HIGH|MEDIUM|LOW)\]\s*"
     r"(?P<path>\S+?)(?::(?P<line>\d+))?"
-    r"(?:\s+(?P<symbol>[A-Za-z_][\w:]*))?"
-    r"(?:\s*--\s*(?P<inline_note>.+?))?\s*$"
+    # symbol, bare or bracketed
+    r"(?:\s+\[?(?P<symbol>[A-Za-z_][\w:]*)\]?)?"
+    + rf"(?:\s*{_NOTE_DASH}\s*(?P<inline_note>.+?))?" +
+    r"\s*$"
 )
+
 _EVIDENCE_RE = re.compile(r"^\s*\|\|\s*(?P<key>contract|scenario|fix|note):\s*(?P<val>.+)$")
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\s*$", re.MULTILINE)
 
