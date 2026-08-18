@@ -35,15 +35,27 @@ gate can honestly assert:
     stdout_matches  stdout matches `pattern` -- the shape of a value
 
 **Why this runs in reasona-dev's driver, not as a Bernstein
-`completion_signals` entry.** Bernstein evaluates completion signals with
-`orch._workdir` -- one fixed project root, confirmed in
-`core/tasks/task_lifecycle.py` (`verify_task_completion(task, orch._workdir)`
-at :3915), never the per-task worktree the agent actually worked in. An AC
-placed there would be asking a checkout about code that may not be in it.
-The driver, by contrast, controls when and against which tree it runs, so
-the criterion executes where the PR's code demonstrably is. This mirrors
-how `gate_check.py` already sidesteps the same constraint by reading a file
-the driver itself wrote to that root.
+`completion_signals` entry.** Two facts about Bernstein's completion path,
+both traced in the installed 3.15.1 source, rule that placement out:
+
+1. Signals are evaluated against `orch._workdir` -- one fixed project root
+   (`task_lifecycle.py:3916`, `executor.submit(verify_task_completion,
+   task, orch._workdir)`), never the per-task worktree the agent worked in.
+2. That evaluation happens BEFORE the agent's branch is merged. The janitor
+   future is resolved at `task_lifecycle.py:4055`
+   (`_resolve_janitor_result`); the merge happens afterwards, inside
+   `_reap_and_cleanup_session` at :3061 (`orch._spawner.
+   reap_completed_agent(...)`), and is in fact CONDITIONAL on the janitor
+   having already passed (:3076).
+
+So at the moment a `test_passes` command runs, the PR's code is
+definitively not in the tree the command runs against -- it is still only
+on `agent/<id>`. An acceptance criterion placed there does not merely risk
+being wrong; it either fails always, or passes vacuously by testing the
+pre-existing code. The driver, by contrast, controls when and against which
+tree it runs, so the criterion executes where the PR's code demonstrably
+is. This mirrors how `gate_check.py` already sidesteps the same constraint
+by reading a file the driver itself wrote to that root.
 
 **What this deliberately does NOT do.** It does not validate that the
 criterion is the RIGHT one. A wrong AC deterministically approves a wrong
