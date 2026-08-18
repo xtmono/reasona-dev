@@ -60,6 +60,27 @@ def _collect_flags(args: argparse.Namespace, roles: tuple[str, ...]) -> dict[str
     return {role: val for role in roles if (val := getattr(args, role, None))}
 
 
+def _workdir(args: argparse.Namespace) -> Path:
+    """The target repo, ALWAYS absolute.
+
+    Resolved once here rather than in each subcommand, because the two used
+    to disagree: `compile-plan` passed `None` through to `plan_compile`,
+    which defaulted to `Path.cwd()` (absolute), while every other subcommand
+    substituted the literal `"."` (relative). A relative workdir is not
+    merely untidy -- it propagates into the path handed to an agent, and an
+    agent runs inside a per-task git worktree where a relative path resolves
+    against THAT tree, not the project root the driver reads from. Observed
+    live: the agent wrote its report into its own worktree, spent its
+    remaining turns hunting for the file the driver was asking about, and
+    died on `error_max_turns` while the driver recorded the role as ERROR.
+
+    `run_role` also resolves its own rundir, so that specific path is
+    defended twice on purpose. Absorbing it at the entry point is what keeps
+    a NEW caller from having to rediscover the rule.
+    """
+    return Path(args.workdir or ".").resolve()
+
+
 def _cmd_compile_plan(args: argparse.Namespace) -> int:
     from reasona_dev.plan_compile import PlanError
 
@@ -72,7 +93,7 @@ def _cmd_compile_plan(args: argparse.Namespace) -> int:
             plan_name=args.plan_name or Path(args.plan_file).stem,
             description=args.description or f"Compiled from {args.plan_file}",
             dev_flag=flags.get("dev"),
-            workdir=args.workdir,
+            workdir=_workdir(args),
             policy_flags=flags,
         )
     except PlanError as exc:
@@ -87,13 +108,13 @@ def _cmd_compile_plan(args: argparse.Namespace) -> int:
 def _cmd_acceptance(args: argparse.Namespace) -> int:
     from reasona_dev import acceptance
 
-    return acceptance.main([args.criteria_file, args.workdir or "."])
+    return acceptance.main([args.criteria_file, str(_workdir(args))])
 
 
 def _cmd_prompts(args: argparse.Namespace) -> int:
     from reasona_dev.prompt_profile import available_profiles
 
-    workdir = args.workdir or "."
+    workdir = _workdir(args)
     found = available_profiles(workdir)
     if not found:
         print(
@@ -113,7 +134,7 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
     from reasona_dev.model_config import resolve_all
     from reasona_dev.plan_compile import PlanError
 
-    workdir = args.workdir or "."
+    workdir = _workdir(args)
     plan_text = Path(args.plan_file).read_text(encoding="utf-8")
     resolved = resolve_all(workdir=workdir, flags=_collect_flags(args, _ROLE_FLAGS))
     try:
@@ -121,7 +142,7 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
             workdir=workdir,
             plan_text=plan_text,
             resolved=resolved,
-            rundir=Path(args.rundir) if args.rundir else Path(workdir) / ".reasona" / "runs",
+            rundir=Path(args.rundir).resolve() if args.rundir else workdir / ".reasona" / "runs",
             port=args.port,
             base=args.base,
             head=args.head,
@@ -139,7 +160,7 @@ def _cmd_ship_gate(args: argparse.Namespace) -> int:
     from reasona_dev import ship_gate
 
     decision = ship_gate.evaluate(
-        args.workdir or ".", args.stage,
+        _workdir(args), args.stage,
         cycle_verdict=args.cycle_verdict, record=not args.no_record,
     )
     print(decision.render(), file=sys.stderr)
@@ -149,7 +170,7 @@ def _cmd_ship_gate(args: argparse.Namespace) -> int:
 def _cmd_cycles_report(args: argparse.Namespace) -> int:
     from reasona_dev import cycles_query
 
-    print(cycles_query.render(args.workdir or ".", include_effective=args.effective))
+    print(cycles_query.render(_workdir(args), include_effective=args.effective))
     return 0
 
 
@@ -162,7 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("-o", "--out", required=True, help="Output path for the compiled plan.yaml")
     p_plan.add_argument("--plan-name", default=None)
     p_plan.add_argument("--description", default=None)
-    p_plan.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_plan.add_argument("--workdir", default=None, help="Target repository root, resolved to an absolute path (default: cwd)")
     _add_role_flags(p_plan, _ROLE_FLAGS)
     p_plan.set_defaults(func=_cmd_compile_plan)
 
@@ -174,14 +195,14 @@ def build_parser() -> argparse.ArgumentParser:
         "criteria_file",
         help="Path to .reasona/acceptance-<stage>.json, written by compile-plan",
     )
-    p_accept.add_argument("--workdir", default=None, help="Directory to run criteria in (default: cwd)")
+    p_accept.add_argument("--workdir", default=None, help="Directory to run criteria in, resolved to an absolute path (default: cwd)")
     p_accept.set_defaults(func=_cmd_acceptance)
 
     p_prompts = sub.add_parser(
         "prompts",
         help="List prompt profiles visible from here (project layer then global layer)",
     )
-    p_prompts.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_prompts.add_argument("--workdir", default=None, help="Target repository root, resolved to an absolute path (default: cwd)")
     p_prompts.set_defaults(func=_cmd_prompts)
 
     p_run = sub.add_parser(
@@ -189,7 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run every PR unit through review -> scan -> ship, in dependency order",
     )
     p_run.add_argument("plan_file", help="Path to the plan document (manifest form)")
-    p_run.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_run.add_argument("--workdir", default=None, help="Target repository root, resolved to an absolute path (default: cwd)")
     p_run.add_argument("--rundir", default=None, help="Where role outputs land (default: <workdir>/.reasona/runs)")
     p_run.add_argument("--port", type=int, default=8052, help="Port each `bernstein run` dispatch binds (reused sequentially)")
     p_run.add_argument("--base", default="origin/main")
@@ -218,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="The composed pre-merge verdict: review AND acceptance AND structure",
     )
     p_ship.add_argument("stage", help="Stage name, e.g. pr-1")
-    p_ship.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_ship.add_argument("--workdir", default=None, help="Target repository root, resolved to an absolute path (default: cwd)")
     p_ship.add_argument(
         "--cycle-verdict", default=None,
         help="The review/scan verdict from pr_cycle (PASS/PASS_WITH_NOTES/FAIL). Omitted = not asserted.",
@@ -233,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cycles-report",
         help="Attribution, budget, and acceptance-coverage queries over cycles.jsonl",
     )
-    p_report.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_report.add_argument("--workdir", default=None, help="Target repository root, resolved to an absolute path (default: cwd)")
     p_report.add_argument(
         "--effective", action="store_true",
         help="Also report the APPROXIMATE 'file touched again within 7d' proxy (base-rate caveat applies)",
