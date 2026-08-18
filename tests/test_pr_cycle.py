@@ -32,7 +32,7 @@ def _stub_role_fn(*, script):
     """
     calls = {"n": 0}
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
         idx = calls["n"]
         calls["n"] += 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)

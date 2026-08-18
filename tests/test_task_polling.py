@@ -25,36 +25,6 @@ def _handle():
     return ServerHandle(process=None, base_url="http://127.0.0.1:8052", token="t")
 
 
-def test_approval_required_is_omitted_by_default(monkeypatch):
-    captured = {}
-
-    def fake_urlopen(req, timeout=30):
-        captured["body"] = json.loads(req.data)
-        return _FakeResponse({"id": "t1"})
-
-    monkeypatch.setattr(bernstein_server.urllib.request, "urlopen", fake_urlopen)
-    dispatch_task(
-        _handle(), role="reviewer", title="t", description="d", model="opus",
-        effort="high", cli="claude", raw_output_path="/tmp/x",
-    )
-    assert "approval_required" not in captured["body"]
-
-
-def test_approval_required_reaches_the_task_body(monkeypatch):
-    captured = {}
-
-    def fake_urlopen(req, timeout=30):
-        captured["body"] = json.loads(req.data)
-        return _FakeResponse({"id": "t1"})
-
-    monkeypatch.setattr(bernstein_server.urllib.request, "urlopen", fake_urlopen)
-    dispatch_task(
-        _handle(), role="backend", title="t", description="d", model="sonnet",
-        effort="high", cli="claude", raw_output_path="/tmp/x", approval_required=True,
-    )
-    assert captured["body"]["approval_required"] is True
-
-
 def test_pending_approval_is_not_treated_as_terminal(monkeypatch):
     """Regression: `pending_approval` used to be absent from both the
     terminal set and any special handling, so an approval-gated task

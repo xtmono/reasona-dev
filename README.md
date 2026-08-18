@@ -66,10 +66,9 @@ reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step), anchors to workdir
   orchestrate.py              runs a whole plan: units in dependency order, each under its own profile
   pr_cycle.py                 dev-ralf-faithful develop -> verify -> bug+compliance scan driver (worker.md)
-  bernstein_server.py          Bernstein task-server HTTP client (start/stop, POST /tasks, GET /tasks/{id})
+  bernstein_dispatch.py        one-step plan.yaml + `bernstein run` -- one role dispatch, synchronous
   acceptance.py                 executable acceptance criteria -- RUNS the plan's own claims
-  structure_gate.py              deterministic structural checks (file size, duplication, dependency direction)
-  ship_gate.py                    THE pre-merge verdict: review AND acceptance AND structure, composed
+  ship_gate.py                    THE pre-merge verdict: review AND acceptance, composed
   merge_tail.py                    sync-main -> final audit -> squash guard -> PR -> squash-merge
   cycles_log.py                   append-only per-cycle finding log (.reasona/cycles.jsonl) -- the measurement substrate
   cycles_query.py                  attribution / budget / coverage queries -- what makes the log a decision
@@ -180,6 +179,8 @@ shape a project-local template takes for every other repo.
 read by Bernstein itself), committed here under its `dev-models:` key so
 running this repo's tests or tooling doesn't depend on whatever's in the
 operator's own `~/.reasona/reasona.yaml`.
+
+See `docs/INSTALL.md` for installation and configuration.
 
 ## Prompt profiles
 
@@ -295,6 +296,40 @@ Bernstein plan.yaml whose stages carry it, and Bernstein's own scheduler runs
 that DAG. Owning it here would mean re-implementing a scheduler that already
 runs.
 
+## How a role is dispatched
+
+Each role dispatch is a one-step `plan.yaml` executed by `bernstein run` --
+the same CLI surface an operator types by hand. Synchronous: the run spawns,
+executes, merges and exits, so there is no server whose lifetime this project
+has to own.
+
+It was briefly an HTTP path instead (`bernstein serve` + `bernstein worker`,
+`POST /tasks`), chosen to avoid paying Bernstein's bootstrap per dispatch.
+The premise was never measured, and when it was, it did not hold: **~1.0s of
+bootstrap against ~90s for the agent it starts.** What the premise cost was
+three of the defects found in live verification, all from running Bernstein
+in a shape it does not support -- `bernstein start` is a seed bootstrap not a
+bare server, the raw orchestrator self-stops on quiescence by design, and
+completion had to be inferred from the artifact because Bernstein's
+orphan-completion path parks finished work at `claimed` forever. Batch mode
+has none of them, and Bernstein's own watchdog, retry and worktree salvage
+supervise each dispatch.
+
+**Turn budget is the only resource control, declared as `complexity`.**
+`Task.max_turns` is reachable only over HTTP -- the plan-step schema has no
+such field -- but Bernstein derives the budget from a step's `complexity`
+(low=20 / medium=40 / high=80 / critical=120) and the claude adapter forwards
+it to `--max-turns`. Live, a reviewer died at 23 turns having completed its
+analysis and written nothing: the review prompt writes its report as its LAST
+action, so a budget that runs out during exploration loses the whole result
+rather than truncating it.
+
+**Cost capping is deliberately not attempted.** `--hard-budget` exists but
+cannot fire on this path -- the agent reports its own spend in its runner log
+(`[RESULT] ... cost=$0.1736`) while `runtime/costs/*.json` records
+`spent_usd: 0.0`, and Bernstein's own retrospective logs the gap. A cap that
+cannot observe spend is not a cap.
+
 ## Quality budget, and why it is shaped this way
 
 A zero-base analysis of dev-ralf's 3.5-month production record (329,721 lines
@@ -304,13 +339,6 @@ lines were later deleted, *despite* a 16-fix-cycle budget spread over five
 review roles. The marginal return of another reviewer was already near zero.
 Three of the mechanisms here follow from that, and none of them add a
 reviewer:
-
-**Judgment a reviewer structurally cannot make goes to code.** Every review
-role reads a diff, so module size, cross-file duplication, and dependency
-direction are unreachable to all of them -- an 11,288-line file grows 200
-lines at a time and no single diff is refusable. `structure_gate.py` decides
-those by computation. Opt-in per repo via `structure-gate:` in
-`reasona.yaml`; waivers require a written reason.
 
 **Claims the plan makes get executed, not read.** The plan format already
 required "Tests (positive + negative)", as prose; a reviewer confirms such an
@@ -364,19 +392,31 @@ touched the same file") is off by default and reported separately: the original
 analysis measured that proxy at 84% against a 77% control base rate, i.e.
 almost entirely base rate.
 
-**Plans are capped at 5 PR units** (`plan_compile.MAX_PR_UNITS`). The two
-largest plans in the record (15 units each) are the two that produced
-second-order correction plans. A large plan is a batch inside which nothing
-learned in PR 1 can reach the specification of PR 12. Folding learning back
-mid-plan is the other half of the fix and is blocked on Bernstein's stage DAG
-being declared up front (docs/ARCHITECTURE.md §3.5.3).
+**Three mechanisms were built from this analysis and then removed.** They are
+recorded here because the reasoning that removed them is as much a result as
+the reasoning that built them:
 
-**One human gate, at one point.** `approval_required` maps onto Bernstein's
-own per-task `pending_approval` state. The argument for gating the FIRST PR
-of a plan is that it fixes the contract shapes every later PR inherits, and
-the observed correction plans are contract-shape errors propagating
-downstream. Roughly ten minutes per plan; not a return to reviewing
-everything.
+- *A structural gate* (file size, single-PR growth, cross-file duplication,
+  dependency direction, public-API growth). The judgment is real -- a
+  diff-reading reviewer cannot see an 11,288-line file grow 200 lines at a
+  time. But its checks are not equally suited to being a hard gate: a
+  refactor that splits a file improves the size check while tripping the
+  growth check, and waivers were repo-scoped and permanent where a refactor's
+  exemption is unit-scoped and temporary. Enforcing it as built would have
+  produced reflexive waivers, which is the failure it existed to prevent.
+- *A 5-unit plan cap.* Drawn from a correlation with N=2 (the two largest
+  plans produced second-order corrections), and the mechanism it claimed --
+  learning from PR 1 cannot reach PR 12's specification -- is not fixed by
+  splitting: plan B written before plan A runs has the same problem, and
+  nothing enforced sequential authoring. It fragmented the dependency DAG
+  across documents in exchange for a proxy. The real fix is mid-plan
+  revision, which Bernstein's up-front stage DAG blocks.
+- *A first-unit human approval gate.* It fired only when the first unit
+  needed a dev fix, so a clean first PR was never gated at all -- backwards
+  from the intent of approving the contract shape. Nothing surfaced the wait
+  to the operator (the notification callback had no production caller), and
+  it gated a fix task's effect rather than the merge. `--merge` defaulting to
+  off is the actual human gate, and that is a default, not an approval.
 
 ## Memory: generated, never written
 

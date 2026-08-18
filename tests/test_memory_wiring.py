@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from reasona_dev import cycles_log, memory, pr_cycle
 from reasona_dev.finding_adapter import (
     Disposition,
@@ -12,7 +10,6 @@ from reasona_dev.finding_adapter import (
     parse_text_contract,
 )
 from reasona_dev.model_config import ResolvedModel
-from reasona_dev.plan_compile import MAX_PR_UNITS, PlanError, compile_to_bernstein_plan
 from reasona_dev.pr_cycle import RoleRunResult, run_pr_cycle
 
 _RESOLVED = {
@@ -27,47 +24,12 @@ _RESOLVED = {
 PASS_TEXT = "VERDICT: PASS\n"
 
 
-def _plan_with(n: int) -> str:
-    return "\n".join(
-        f"## PR {i}: unit {i}\ntype: feat\ndepends_on: none\n\n- [ ] do {i}\n"
-        for i in range(1, n + 1)
-    )
-
-
-# --- plan size cap ----------------------------------------------------------
-
-def test_plan_at_the_limit_compiles(tmp_path):
-    plan = compile_to_bernstein_plan(
-        _plan_with(MAX_PR_UNITS), plan_name="s", description="d", workdir=tmp_path,
-        write_audit_trail=False, write_bernstein_yaml=False,
-    )
-    assert len(plan["stages"]) == MAX_PR_UNITS
-
-
-def test_oversized_plan_is_refused_not_warned(tmp_path):
-    """The observed correlation is between plan SIZE and second-order
-    correction plans; a warning does not change the size of anything."""
-    with pytest.raises(PlanError, match="over the 5-unit limit"):
-        compile_to_bernstein_plan(
-            _plan_with(MAX_PR_UNITS + 1), plan_name="s", description="d", workdir=tmp_path,
-            write_audit_trail=False, write_bernstein_yaml=False,
-        )
-
-
-def test_the_cap_can_be_opted_out_of_deliberately(tmp_path):
-    plan = compile_to_bernstein_plan(
-        _plan_with(12), plan_name="s", description="d", workdir=tmp_path,
-        write_audit_trail=False, write_bernstein_yaml=False, max_pr_units=0,
-    )
-    assert len(plan["stages"]) == 12
-
-
 # --- memory wiring ----------------------------------------------------------
 
 def _recording_role_fn():
     calls = []
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
         calls.append({"role": role, "prompt": prompt})
         return RoleRunResult(
             role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
@@ -172,7 +134,7 @@ def test_memory_is_regenerated_after_the_cycle(tmp_path, generic_prompts):
     )
     assert memory.derive(tmp_path) == []  # one unit only, below threshold
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
         result = (
             ReviewResult(
                 role_status=RoleStatus.COMPLETE,

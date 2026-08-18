@@ -56,18 +56,6 @@ _FILES_TOKEN_RE = re.compile(
 )
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<body>.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 
-# Plan-size ceiling. dev-ralf's record shows the correlation directly: the
-# two largest plans (15 PR units each) are the two that produced SECOND-order
-# correction plans, while small plans did not. A large plan is a large batch,
-# and a batch is exactly the interval over which nothing learned in PR 1 can
-# reach the specification of PR 12 -- the follow-up plan is that feedback
-# arriving late and outside the document. Capping the batch is the cheap half
-# of the fix; folding learning back into the plan mid-run is the expensive
-# half and is blocked on Bernstein's stage DAG being declared up front
-# (docs/ARCHITECTURE.md §3.5.3).
-MAX_PR_UNITS = 5
-
-
 @dataclass
 class PRUnit:
     index: str
@@ -277,7 +265,6 @@ def compile_to_bernstein_plan(
     write_bernstein_yaml: bool = True,
     policy_flags: dict[str, str] | None = None,
     write_acceptance: bool = True,
-    max_pr_units: int = MAX_PR_UNITS,
     strict_plan: bool = True,
     validate_profiles: bool = True,
 ) -> dict:
@@ -383,17 +370,6 @@ def compile_to_bernstein_plan(
             + "\n  - ".join(manifest_errors)
         )
     units = manifest_units or parse_plan_units(plan_text)
-
-    if max_pr_units and len(units) > max_pr_units:
-        # Refused, not warned: the correlation this cap is drawn from is
-        # between plan SIZE and second-order correction plans, and a warning
-        # that can be scrolled past does not change the size of anything.
-        raise PlanError(
-            f"plan declares {len(units)} PR units, over the {max_pr_units}-unit limit. "
-            "Split it: a large plan is a batch inside which nothing learned in the "
-            "first PR can reach the specification of the last. Pass max_pr_units=0 "
-            "to opt out deliberately."
-        )
 
     # Resolve every unit's profile now, at compile time, rather than at
     # dispatch. A unit whose files span two profiles is a plan defect, and a

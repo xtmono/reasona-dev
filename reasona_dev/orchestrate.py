@@ -25,13 +25,6 @@ after the upstream unit is fixed. Skipped is a distinct outcome from failed
 -- conflating them would report a plan as five failures when one unit broke
 and four were never run.
 
-**Approval on the first unit only.** The argument for a human gate is that
-the FIRST PR of a plan fixes contract shapes every later PR inherits, and
-the correction plans observed in dev-ralf's record are those shapes
-propagating downstream. `pr_cycle` deliberately left this to its caller
-because it sees one unit at a time and cannot know which is first. This
-module can, so this is where that decision lives.
-
 **One server for the plan.** Started once here and passed into every
 `run_pr_cycle` call. Same reasoning that moved role dispatch off per-role
 subprocesses -- the bootstrap is real work, and paying it once per unit is
@@ -214,7 +207,6 @@ def run_plan(
     port: int = 8052,
     base: str = "origin/main",
     head: str = "HEAD",
-    approve_first_unit: bool = True,
     ship: bool = False,
     merge: bool = False,
     run_pr_cycle_fn=run_pr_cycle,
@@ -242,7 +234,7 @@ def run_plan(
     by_index: dict[str, UnitOutcome] = {}
     server: ServerHandle | None = start_server_fn(workdir, port=port)
     try:
-        for position, up in enumerate(units):
+        for up in units:
             blocked_by = _blocking_dependency(up, by_index, known)
             if blocked_by is not None:
                 outcome = UnitOutcome(
@@ -261,7 +253,6 @@ def run_plan(
                 profile=up.profile,
                 stage_name=up.stage_name,
                 files=up.unit.files,
-                approval_required=approve_first_unit and position == 0,
                 server=server,
             )
 

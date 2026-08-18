@@ -100,7 +100,7 @@ def test_audit_is_skipped_when_the_profile_defines_no_prompt(tmp_path):
 def test_audit_runs_on_the_final_audit_model(tmp_path, generic_prompts):
     seen = {}
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
         seen["model"] = model.model
         seen["role"] = role
         return RoleRunResult(role=role, cycle=cycle,
@@ -121,7 +121,7 @@ def test_audit_findings_spend_the_final_stage_budget(tmp_path, generic_prompts):
     the audit's own fix loop."""
     budget = FixBudget()
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
         result = (
             parse_text_contract(MUST_FIX_TEXT) if role == "compliance"
             else ReviewResult(role_status=RoleStatus.COMPLETE)
@@ -214,7 +214,7 @@ def test_a_failing_audit_blocks_before_a_pr_is_created(tmp_path, monkeypatch, ge
     budget = FixBudget()
     budget.spend("review")  # earns an audit
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.ERROR),
                              raw_output_path=Path("/dev/null"))

@@ -28,10 +28,10 @@ MUST_FIX_TEXT = (
 def _recording_role_fn(script):
     calls = []
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
         calls.append({
             "role": role, "title": title, "prompt": prompt, "model": model.model,
-            "cycle": cycle, "approval_required": approval_required,
+            "cycle": cycle,
         })
         idx = len(calls) - 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)
@@ -109,22 +109,6 @@ def test_route_defaults_to_full_when_no_finding_files(tmp_path):
     assert pr_cycle._safe_recheck_route(tmp_path, "deadbeef", set()) == "FULL"
 
 
-def test_approval_flag_reaches_dev_fix_dispatch_only(tmp_path, generic_prompts, monkeypatch):
-    monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "FULL")
-    fn = _recording_role_fn(_FIX_THEN_PASS)
-
-    run_pr_cycle(
-        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", approval_required=True, run_role_fn=fn,
-        start_server_fn=_noop_start, stop_server_fn=_noop_stop,
-    )
-
-    by_role = {c["role"]: c["approval_required"] for c in fn.calls}
-    assert by_role["backend"] is True      # the dispatch that changes code
-    assert by_role["reviewer"] is False    # read-only roles are never gated
-    assert by_role["bugbot"] is False
-
-
 def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, generic_prompts, monkeypatch):
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "BOUNDED")
     monkeypatch.setattr(pr_cycle, "_changed_files", lambda *a, **k: {"src/a.rs"})
@@ -189,7 +173,7 @@ def test_raw_output_path_given_to_the_agent_is_absolute(tmp_path, monkeypatch):
     seen = {}
 
     def fake_dispatch(handle, *, role, title, description, model, effort, cli,
-                      raw_output_path, approval_required=False, max_turns=None):
+                      raw_output_path, max_turns=None):
         seen["path"] = raw_output_path
         seen["description"] = description
         Path(raw_output_path).write_text(PASS_TEXT)

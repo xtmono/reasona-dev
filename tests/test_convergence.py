@@ -148,7 +148,7 @@ def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, generic
     }
     calls = []
 
-    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle, approval_required=False):
+    def _fn(*, server, workdir, role, title, prompt, model, rundir, cycle):
         calls.append(role)
         return RoleRunResult(
             role=role, cycle=cycle,

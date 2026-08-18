@@ -39,9 +39,7 @@ See `poll_task`.
 **What the HTTP body carries.** `model`/`effort`/`cli` and
 `completion_signals` are first-class fields on `TaskCreate`
 (`core/server/server_models.py`), verified live, so no `plan.yaml` file is
-written or read back for a role dispatch. `approval_required` is Bernstein's
-own per-task human gate; `reasona_dev.orchestrate` sets it on a plan's first
-PR unit.
+written or read back for a role dispatch.
 
 **Auth.** `BERNSTEIN_AUTH_TOKEN` is generated here and given to both
 processes, so this module -- rather than Bernstein's auto-generated,
@@ -225,7 +223,6 @@ def dispatch_task(
     effort: str,
     cli: str,
     raw_output_path: Path,
-    approval_required: bool = False,
     max_turns: int | None = None,
 ) -> str:
     """`POST /tasks` for one role dispatch. Returns the new task's id.
@@ -244,13 +241,6 @@ def dispatch_task(
     subtype=error_max_turns turns=23` -- so the agent never reached the write
     step and the role came back ERROR with nothing to say about why. Left
     unset, Bernstein/the adapter picks its own default.
-
-    `approval_required` is Bernstein's own per-task human gate
-    (`TaskCreate.approval_required`, confirmed against the installed
-    package's `core/server/server_models.py`): the task completes normally,
-    then parks at `pending_approval` until a person acts, rather than
-    taking effect immediately. `pr_cycle` sets it on the first PR unit of a
-    plan only -- see its module docstring for why that one point.
     """
     body = {
         "title": title,
@@ -261,8 +251,6 @@ def dispatch_task(
         "cli": cli,
         "completion_signals": [{"type": "test_passes", "value": f"test -s {raw_output_path}"}],
     }
-    if approval_required:
-        body["approval_required"] = True
     if max_turns is not None:
         body["max_turns"] = max_turns
     response = _request(handle, "POST", "/tasks", body)

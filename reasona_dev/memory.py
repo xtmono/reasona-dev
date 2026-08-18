@@ -41,7 +41,7 @@ becoming a growing preamble on every prompt -- and the retrieval key costs
 nothing, because both halves already exist.
 
 **What does NOT belong here.** Anything a program can enforce. A rule that
-`structure_gate` or an acceptance criterion can check is not a memory; it
+an acceptance criterion can check is not a memory; it
 is a check, and writing it here instead would be choosing to remind a model
 of something the pipeline could simply guarantee.
 """

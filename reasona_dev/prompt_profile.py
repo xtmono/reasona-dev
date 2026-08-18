@@ -118,7 +118,8 @@ def _profile_map(cfg: dict | None) -> dict[str, str]:
 
 def _match_glob(path: str, glob: str) -> bool:
     """`fnmatch` with the `**/` prefix people expect -- same reasoning as
-    `structure_gate._matches_any()`: `fnmatch`'s `*` already crosses `/`, so
+    the glob helpers elsewhere in this project: `fnmatch`'s `*` already
+    crosses `/`, so
     a literal `**/x` demands a separator and misses a top-level match.
     """
     if fnmatch.fnmatch(path, glob):
@@ -144,8 +145,7 @@ def resolve_unit_profile(
     override of an explicit statement.
 
     Otherwise every declared file is matched against `dev-profile-map`
-    (project layer beats global, whole-block, same as `structure_gate`'s
-    config). Files matching nothing are ignored rather than treated as the
+    (project layer beats global, whole-block). Files matching nothing are ignored rather than treated as the
     default profile: a PR that edits `crates/x/lib.rs` and `README.md` is a
     Rust PR, and counting the README as "generic" would manufacture a
     conflict out of every doc change.

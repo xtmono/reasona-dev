@@ -28,12 +28,12 @@ def _write_criteria(workdir, stage, criteria):
     path.write_text(json.dumps({"stage_name": stage, "criteria": criteria}))
 
 
-def test_all_three_clean_passes(tmp_path):
+def test_both_clean_passes(tmp_path):
     repo = _repo(tmp_path)
     _write_criteria(repo, "pr-1", [{"id": "AC-1", "cmd": "true", "expect": "exit0"}])
     d = ship_gate.evaluate(repo, "pr-1", cycle_verdict="PASS")
     assert d.passed
-    assert [o.name for o in d.outcomes] == ["review", "acceptance", "structure"]
+    assert [o.name for o in d.outcomes] == ["review", "acceptance"]
 
 
 def test_failing_review_fails_the_gate(tmp_path):
@@ -53,31 +53,6 @@ def test_failing_acceptance_fails_even_when_review_passed(tmp_path):
     assert not d.passed
     assert [o.name for o in d.failures] == ["acceptance"]
     assert "AC-1" in d.reason
-
-
-def test_failing_structure_fails_even_when_review_and_acceptance_passed(tmp_path):
-    repo = _repo(
-        tmp_path,
-        files={"huge.rs": "x\n" * 50},
-        cfg="structure-gate:\n  max_file_lines:\n    limit: 20\n    include: ['*.rs']\n",
-    )
-    _write_criteria(repo, "pr-1", [{"id": "AC-1", "cmd": "true", "expect": "exit0"}])
-    d = ship_gate.evaluate(repo, "pr-1", cycle_verdict="PASS")
-    assert not d.passed
-    assert [o.name for o in d.failures] == ["structure"]
-
-
-def test_every_gate_reports_even_after_one_fails(tmp_path):
-    """The author should see everything wrong in one round."""
-    repo = _repo(
-        tmp_path,
-        files={"huge.rs": "x\n" * 50},
-        cfg="structure-gate:\n  max_file_lines:\n    limit: 20\n    include: ['*.rs']\n",
-    )
-    _write_criteria(repo, "pr-1", [{"id": "AC-1", "cmd": "false", "expect": "exit0"}])
-    d = ship_gate.evaluate(repo, "pr-1", cycle_verdict="FAIL")
-    assert len(d.outcomes) == 3
-    assert {o.name for o in d.failures} == {"review", "acceptance", "structure"}
 
 
 def test_undeclared_criteria_pass_with_a_warning(tmp_path):
@@ -106,7 +81,7 @@ def test_verdict_and_acceptance_outcome_are_recorded(tmp_path):
     ship = [r for r in rows if r.get("kind") == "ship"][0]
     accept = [r for r in rows if r.get("kind") == "acceptance"][0]
     assert ship["passed"] is False
-    assert ship["gates"] == {"review": True, "acceptance": False, "structure": True}
+    assert ship["gates"] == {"review": True, "acceptance": False}
     assert accept["declared"] is True
     assert accept["criteria"][0]["id"] == "AC-1"
 
@@ -134,3 +109,12 @@ def test_cli_exit_codes(tmp_path):
     bad = _repo(tmp_path / "bad")
     _write_criteria(bad, "pr-1", [{"id": "AC-1", "cmd": "false", "expect": "exit0"}])
     assert ship_gate.main(["pr-1", str(bad)]) == 1
+
+
+def test_both_report_even_after_one_fails(tmp_path):
+    """The author should see everything wrong in one round."""
+    repo = _repo(tmp_path)
+    _write_criteria(repo, "pr-1", [{"id": "AC-1", "cmd": "false", "expect": "exit0"}])
+    d = ship_gate.evaluate(repo, "pr-1", cycle_verdict="FAIL")
+    assert len(d.outcomes) == 2
+    assert {o.name for o in d.failures} == {"review", "acceptance"}

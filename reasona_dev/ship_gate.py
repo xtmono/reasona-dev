@@ -1,9 +1,9 @@
-"""The single pre-merge verdict: review outcome AND acceptance criteria AND
-structural checks, composed deterministically.
+"""The single pre-merge verdict: the review outcome AND the plan's own
+acceptance criteria, composed deterministically.
 
-**Why a composition module exists at all.** Each of the three gates was
-built independently and each has its own CLI, which left the pipeline in the
-state the analysis this work came from criticized: the checks were
+**Why a composition module exists at all.** Both checks were built
+independently and each has its own entry point, which left the pipeline in
+the state the analysis this work came from criticized: the checks were
 *available*, and running them was an operator's discipline. "A reviewer
 asserts completeness" and "an operator remembers to run the completeness
 check" are the same failure with a different actor. A gate that has to be
@@ -14,32 +14,38 @@ and it decides by conjunction:
 
     review/scan verdict == PASS     the cycle converged (reasona_dev.pr_cycle)
     acceptance          == PASS     the plan's own claims executed (acceptance.py)
-    structure           == PASS     no structural violation (structure_gate.py)
 
 **Conjunction, with no weighting and no override.** A composed gate invites
 exactly one bad idea -- letting a strong result on one axis excuse a weak
-one ("the review was thorough, the missing test can follow"). The three
-axes measure different things and none substitutes for another: a review
-cannot execute a test, a test cannot see a 10,000-line file, and a line
-count cannot judge whether a contract holds. Any of them failing is a
-different kind of not-ready.
+one ("the review was thorough, the missing test can follow"). The two axes
+measure different things and neither substitutes for the other: a review
+cannot execute a test, and a test cannot judge whether a contract holds.
+Either failing is a different kind of not-ready.
 
-**Each gate reports independently, even after one fails.** Running the rest
-after the first failure costs nothing here (all three are cheap relative to
-a review cycle) and it is the difference between an author fixing one thing
-per round and fixing everything in one. Same reasoning as
-`acceptance.run_all()` not stopping at the first failing criterion.
+**Both report independently, even after one fails.** Running the second
+after the first fails costs nothing here and it is the difference between an
+author fixing one thing per round and fixing everything in one. Same
+reasoning as `acceptance.run_all()` not stopping at the first failing
+criterion.
 
 **Every verdict is recorded.** `cycles_log.record_ship()` writes which
-sub-gate decided the outcome. Which gate actually stops units in practice
-is not knowable in advance, and it is the measurement that tells you
-whether adding a gate helped or whether it never fires.
+sub-gate decided the outcome, so which gate actually stops units in practice
+is measurable rather than assumed.
 
-**What this does NOT do: it does not merge.** It returns a verdict. The
-merge tail (`sync-main -> /gh-pr -> /gh-review -> up-to-date gate ->
-final_audit -> squash-merge`) is not built yet, so the caller acts on the
-verdict. Keeping the decision separate from the action is what lets this
-run as a CI step, a pre-merge hook, or a driver call without change.
+**What this does NOT do: it does not merge.** It returns a verdict;
+`reasona_dev.merge_tail` acts on it. Keeping the decision separate from the
+action is what lets this run as a CI step, a pre-merge hook, or a driver
+call without change.
+
+**A structural gate used to be a third axis and was removed.** It checked
+file size, single-PR growth, cross-file duplication, dependency direction
+and public-API growth -- judgments a diff-reading reviewer genuinely cannot
+make. It was removed because its checks are not equally suited to being a
+hard gate: a refactor that splits a file improves the size check and trips
+the growth check, and the waiver mechanism was repo-scoped and permanent
+while a refactor's exemption is unit-scoped and temporary. Re-adding it
+would need per-unit, plan-recorded waivers and an understanding of
+`type: refactor`, neither of which existed.
 """
 
 from __future__ import annotations
@@ -47,7 +53,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import acceptance, cycles_log, structure_gate
+from reasona_dev import acceptance, cycles_log
 from reasona_dev.plan_compile import acceptance_path
 
 
@@ -75,7 +81,7 @@ class ShipDecision:
     @property
     def reason(self) -> str:
         if self.passed:
-            return "review + acceptance + structure all clean"
+            return "review + acceptance clean"
         return "; ".join(f"{o.name}: {o.detail}" for o in self.failures)
 
     def render(self) -> str:
@@ -141,22 +147,11 @@ def _acceptance_outcome(workdir: Path, stage_name: str, record: bool) -> GateOut
     )
 
 
-def _structure_outcome(workdir: Path, base: str, head: str) -> GateOutcome:
-    violations = structure_gate.evaluate(workdir, base=base, head=head)
-    if not violations:
-        return GateOutcome("structure", True, "no violations")
-    shown = "; ".join(v.render() for v in violations[:3])
-    more = f" (+{len(violations) - 3} more)" if len(violations) > 3 else ""
-    return GateOutcome("structure", False, f"{len(violations)} violation(s): {shown}{more}")
-
-
 def evaluate(
     workdir: str | Path,
     stage_name: str,
     *,
     cycle_verdict: str | None = None,
-    base: str = "origin/main",
-    head: str = "HEAD",
     record: bool = True,
 ) -> ShipDecision:
     """Run all three gates and compose their verdicts.
@@ -169,7 +164,6 @@ def evaluate(
     outcomes = [
         _review_outcome(cycle_verdict),
         _acceptance_outcome(workdir, stage_name, record),
-        _structure_outcome(workdir, base, head),
     ]
     decision = ShipDecision(
         stage_name=stage_name,
@@ -187,19 +181,14 @@ def evaluate(
 def main(argv: list[str]) -> int:
     """CLI, same exit convention as the gates it composes.
 
-        python3 -m reasona_dev.ship_gate <stage_name> [workdir] [base] [head]
+        python3 -m reasona_dev.ship_gate <stage_name> [workdir]
     """
     import sys
 
     if not argv:
         print("usage: python3 -m reasona_dev.ship_gate <stage_name> [workdir] [base] [head]", file=sys.stderr)
         return 2
-    decision = evaluate(
-        argv[1] if len(argv) > 1 else ".",
-        argv[0],
-        base=argv[2] if len(argv) > 2 else "origin/main",
-        head=argv[3] if len(argv) > 3 else "HEAD",
-    )
+    decision = evaluate(argv[1] if len(argv) > 1 else ".", argv[0])
     print(decision.render(), file=sys.stderr)
     return 0 if decision.passed else 1
 

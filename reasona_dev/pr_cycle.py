@@ -47,14 +47,6 @@ which `plan_compile` already holds, and which it validates at compile time
 so a two-language unit is refused while the author still has the plan open.
 See `prompt_profile.resolve_unit_profile()`.
 
-**Human approval.** `approval_required` maps onto Bernstein's own per-task
-gate. It is deliberately a caller-supplied flag rather than something this
-module decides: the argument for gating is that the FIRST PR of a plan
-fixes contract shapes every later PR inherits, and this function sees one
-PR unit at a time and cannot know which one that is. Note the scope limit
--- it gates the dev fix dispatches this driver makes, not the eventual
-squash-merge, because the merge tail is not built yet (README "Next").
-
 **Not yet live-verified.** Every individual HTTP primitive `run_role()`
 uses was checked against a real running Bernstein server; this driver's OWN
 composition of them -- one server serving every role dispatch across a
@@ -156,7 +148,6 @@ def run_role(
     model: ResolvedModel,
     rundir: Path,
     cycle: int,
-    approval_required: bool = False,
     max_turns: int | None = DEFAULT_ROLE_MAX_TURNS,
 ) -> RoleRunResult:
     """Dispatch one role once against the shared, already-running
@@ -187,7 +178,6 @@ def run_role(
         description=_build_role_description(prompt, raw_output_path),
         model=model.model, effort=model.effort, cli=model.adapter,
         raw_output_path=raw_output_path,
-        approval_required=approval_required,
         max_turns=max_turns,
     )
     task = poll_task(server, task_id, output_path=raw_output_path)
@@ -353,7 +343,6 @@ def _run_dev_fix(
     rundir: Path,
     cycle: int,
     run_role_fn,
-    approval_required: bool = False,
 ) -> RoleRunResult:
     """Dispatch one dev fix-cycle. `escalated_model` (from
     `GateDecision.escalated_model`) overrides `dev_model.model` for exactly
@@ -367,7 +356,6 @@ def _run_dev_fix(
     return run_role_fn(
         server=server, workdir=workdir, role="backend", title=f"{pr_title} -- fix c{cycle}",
         prompt=_build_fix_prompt(pr_title, findings), model=model, rundir=rundir, cycle=cycle,
-        approval_required=approval_required,
     )
 
 
@@ -406,7 +394,6 @@ def run_pr_cycle(
     rundir: str | Path,
     profile: str,
     port: int = 8052,
-    approval_required: bool = False,
     stage_name: str | None = None,
     files: list[str] | None = None,
     server: ServerHandle | None = None,
@@ -542,8 +529,7 @@ def run_pr_cycle(
                 server=server, workdir=workdir, pr_title=pr_title, findings=pending_confirm,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
                 rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
-                approval_required=approval_required,
-            )
+                    )
             role_results.append(fix_result)
             _log("review", cycle, fix_result, resolved["dev"])
             route = _safe_recheck_route(workdir, pre_fix_head, finding_files)
@@ -606,8 +592,7 @@ def run_pr_cycle(
                 server=server, workdir=workdir, pr_title=pr_title, findings=merged.must_fix,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
                 rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
-                approval_required=approval_required,
-            )
+                    )
             role_results.append(fix_result)
             _log("scan", cycle, fix_result, resolved["dev"])
             if _safe_recheck_route(workdir, pre_fix_head, finding_files) == "BOUNDED":

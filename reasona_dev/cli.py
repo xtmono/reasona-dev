@@ -39,7 +39,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from reasona_dev.plan_compile import MAX_PR_UNITS, write_plan_yaml
+from reasona_dev.plan_compile import write_plan_yaml
 
 _ROLE_FLAGS = ("dev", "review", "recheck", "bugbot", "verify", "final_audit")
 
@@ -74,7 +74,6 @@ def _cmd_compile_plan(args: argparse.Namespace) -> int:
             dev_flag=flags.get("dev"),
             workdir=args.workdir,
             policy_flags=flags,
-            max_pr_units=args.max_pr_units,
         )
     except PlanError as exc:
         # A plan defect is the author's to fix, so it exits as a clean
@@ -83,12 +82,6 @@ def _cmd_compile_plan(args: argparse.Namespace) -> int:
         return 1
     print(f"wrote {args.out}", file=sys.stderr)
     return 0
-
-
-def _cmd_structure_gate(args: argparse.Namespace) -> int:
-    from reasona_dev import structure_gate
-
-    return structure_gate.main([args.workdir or ".", args.base, args.head])
 
 
 def _cmd_acceptance(args: argparse.Namespace) -> int:
@@ -132,7 +125,6 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
             port=args.port,
             base=args.base,
             head=args.head,
-            approve_first_unit=not args.no_approval,
             ship=args.ship or args.merge,
             merge=args.merge,
         )
@@ -148,8 +140,7 @@ def _cmd_ship_gate(args: argparse.Namespace) -> int:
 
     decision = ship_gate.evaluate(
         args.workdir or ".", args.stage,
-        cycle_verdict=args.cycle_verdict, base=args.base, head=args.head,
-        record=not args.no_record,
+        cycle_verdict=args.cycle_verdict, record=not args.no_record,
     )
     print(decision.render(), file=sys.stderr)
     return 0 if decision.passed else 1
@@ -172,25 +163,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--plan-name", default=None)
     p_plan.add_argument("--description", default=None)
     p_plan.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
-    p_plan.add_argument(
-        "--max-pr-units", type=int, default=MAX_PR_UNITS,
-        help=(
-            f"Refuse a plan with more than N PR units (default: {MAX_PR_UNITS}). "
-            "0 disables the cap. A large plan is a batch inside which nothing "
-            "learned in the first PR can reach the last one's specification."
-        ),
-    )
     _add_role_flags(p_plan, _ROLE_FLAGS)
     p_plan.set_defaults(func=_cmd_compile_plan)
-
-    p_struct = sub.add_parser(
-        "structure-gate",
-        help="Deterministic structural checks (file size, duplication, dependency direction)",
-    )
-    p_struct.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
-    p_struct.add_argument("--base", default="origin/main", help="Diff base for growth checks")
-    p_struct.add_argument("--head", default="HEAD", help="Diff head for growth checks")
-    p_struct.set_defaults(func=_cmd_structure_gate)
 
     p_accept = sub.add_parser(
         "acceptance",
@@ -221,10 +195,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--base", default="origin/main")
     p_run.add_argument("--head", default="HEAD")
     p_run.add_argument(
-        "--no-approval", action="store_true",
-        help="Do not require human approval on the plan's first PR unit",
-    )
-    p_run.add_argument(
         "--ship", action="store_true",
         help=(
             "Run the merge tail for each passing unit: sync-main, conditional "
@@ -253,8 +223,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--cycle-verdict", default=None,
         help="The review/scan verdict from pr_cycle (PASS/PASS_WITH_NOTES/FAIL). Omitted = not asserted.",
     )
-    p_ship.add_argument("--base", default="origin/main")
-    p_ship.add_argument("--head", default="HEAD")
     p_ship.add_argument(
         "--no-record", action="store_true",
         help="Do not append to cycles.jsonl (dry run / re-evaluation)",

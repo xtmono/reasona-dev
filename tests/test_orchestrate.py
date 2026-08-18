@@ -208,18 +208,6 @@ def test_unit_files_are_passed_through_for_memory_retrieval(tmp_path):
     assert by_stage["pr-3"] == ["services/api/ingest.py"]
 
 
-def test_only_the_first_unit_is_approval_gated(tmp_path):
-    cycle_fn, ship_fn = _recorder()
-    _run(tmp_path, cycle_fn, ship_fn)
-    assert [c["approval_required"] for c in cycle_fn.calls] == [True, False, False]
-
-
-def test_approval_can_be_turned_off(tmp_path):
-    cycle_fn, ship_fn = _recorder()
-    _run(tmp_path, cycle_fn, ship_fn, approve_first_unit=False)
-    assert all(c["approval_required"] is False for c in cycle_fn.calls)
-
-
 def test_one_server_is_shared_across_every_unit(tmp_path):
     """Paying the bootstrap once per unit is as arbitrary as once per role."""
     cycle_fn, ship_fn = _recorder()
