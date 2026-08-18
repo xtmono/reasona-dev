@@ -64,6 +64,7 @@ docs/ARCHITECTURE.md       4-layer architecture, verified against installed Bern
 .reasona/prompts/generic/     THIS repo's own prompt profile -- no packaged layer exists (see "Prompt profiles")
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step), anchors to workdir
+  orchestrate.py              runs a whole plan: units in dependency order, each under its own profile
   pr_cycle.py                 dev-ralf-faithful develop -> verify -> bug+compliance scan driver (worker.md)
   bernstein_server.py          Bernstein task-server HTTP client (start/stop, POST /tasks, GET /tasks/{id})
   acceptance.py                 executable acceptance criteria -- RUNS the plan's own claims
@@ -82,7 +83,7 @@ reasona_dev/
   squash.py                        squash message builder + guard
   plugin.py                         pluggy hookimpl (on_pre_task_create, on_agent_spawned)
   adapters/ocr.py                    OcrAdapter, registered via bernstein.adapters entry points
-tests/                      pytest, 233 cases, all passing
+tests/                      pytest, 254 cases, all passing
 ```
 
 ## Setup
@@ -256,6 +257,44 @@ rulebook that applies to it, silently. The check runs at compile time so the
 defect surfaces while the author still has the plan open, not an hour into a
 run.
 
+## Running a plan
+
+`reasona_dev/orchestrate.py` is what joins the pieces: it parses the plan
+manifest, resolves each unit's profile from its own `files:`, orders units by
+`depends_on`, and drives each through `pr_cycle` and then `ship_gate`.
+
+```
+reasona-dev run-plan docs/plans/flow-compat.md --workdir .
+```
+
+```
+plan run: 2 shipped, 1 failed, 0 skipped
+  [shipped] pr-1 (rust): review + acceptance + structure all clean
+  [shipped] pr-2 (rust): review + acceptance + structure all clean
+  [ failed] pr-3 (python): acceptance: 1/2 criteria failed: AC-3-2
+```
+
+Four decisions live here because this is the only layer that sees a whole
+plan at once:
+
+- **Profiles are resolved up front**, so a two-language unit is refused
+  before the first agent spawns rather than after four units merged.
+- **A unit whose dependency did not ship is SKIPPED, not attempted.** Its
+  premise is a contract that never merged, so reviewing it produces findings
+  the author must re-derive after the upstream fix. Skipped is a distinct
+  outcome from failed -- reporting five failures when one broke and four were
+  never run misstates what happened.
+- **Approval gates the first unit only.** `pr_cycle` sees one unit at a time
+  and cannot know which is first; this layer can.
+- **One Bernstein server for the whole plan**, passed into every
+  `run_pr_cycle` call. Same argument that moved role dispatch off per-role
+  subprocesses.
+
+The dev (cycle-0) step is deliberately NOT here: `plan_compile` emits a
+Bernstein plan.yaml whose stages carry it, and Bernstein's own scheduler runs
+that DAG. Owning it here would mean re-implementing a scheduler that already
+runs.
+
 ## Quality budget, and why it is shaped this way
 
 A zero-base analysis of dev-ralf's 3.5-month production record (329,721 lines
@@ -382,9 +421,10 @@ therefore what unblocks item 3.
 
 **2. The merge tail.** `sync-main -> /gh-pr -> /gh-review -> up-to-date gate
 -> final_audit -> squash-merge` (worker.md's last third). `ship_gate`
-deliberately returns a verdict rather than merging, so this tail consumes it
-rather than reimplementing it. `final_audit` has a resolved model and a
-packaged prompt but no dispatch site yet.
+deliberately returns a verdict rather than merging, and `orchestrate.run_plan`
+records that verdict per unit -- so this tail consumes both rather than
+reimplementing either. `final_audit` has a resolved model and a prompt but no
+dispatch site yet.
 
 **3. Two decisions deferred to measurement, not to judgment.** Both are
 blocked on data that only real runs produce, and both now have the exact

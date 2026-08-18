@@ -115,6 +115,32 @@ def _cmd_prompts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run_plan(args: argparse.Namespace) -> int:
+    from reasona_dev import config_file, orchestrate
+    from reasona_dev.model_config import resolve_all
+    from reasona_dev.plan_compile import PlanError
+
+    workdir = args.workdir or "."
+    plan_text = Path(args.plan_file).read_text(encoding="utf-8")
+    resolved = resolve_all(workdir=workdir, flags=_collect_flags(args, _ROLE_FLAGS))
+    try:
+        result = orchestrate.run_plan(
+            workdir=workdir,
+            plan_text=plan_text,
+            resolved=resolved,
+            rundir=Path(args.rundir) if args.rundir else Path(workdir) / ".reasona" / "runs",
+            port=args.port,
+            base=args.base,
+            head=args.head,
+            approve_first_unit=not args.no_approval,
+        )
+    except PlanError as exc:
+        print(f"reasona-dev: {exc}", file=sys.stderr)
+        return 1
+    print(result.render(), file=sys.stderr)
+    return 0 if result.passed else 1
+
+
 def _cmd_ship_gate(args: argparse.Namespace) -> int:
     from reasona_dev import ship_gate
 
@@ -181,6 +207,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_prompts.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
     p_prompts.set_defaults(func=_cmd_prompts)
+
+    p_run = sub.add_parser(
+        "run-plan",
+        help="Run every PR unit through review -> scan -> ship, in dependency order",
+    )
+    p_run.add_argument("plan_file", help="Path to the plan document (manifest form)")
+    p_run.add_argument("--workdir", default=None, help="Target repository root (default: cwd)")
+    p_run.add_argument("--rundir", default=None, help="Where role outputs land (default: <workdir>/.reasona/runs)")
+    p_run.add_argument("--port", type=int, default=8052, help="Port for the shared Bernstein server")
+    p_run.add_argument("--base", default="origin/main")
+    p_run.add_argument("--head", default="HEAD")
+    p_run.add_argument(
+        "--no-approval", action="store_true",
+        help="Do not require human approval on the plan's first PR unit",
+    )
+    _add_role_flags(p_run, _ROLE_FLAGS)
+    p_run.set_defaults(func=_cmd_run_plan)
 
     p_ship = sub.add_parser(
         "ship-gate",

@@ -363,6 +363,7 @@ def run_pr_cycle(
     approval_required: bool = False,
     stage_name: str | None = None,
     files: list[str] | None = None,
+    server: ServerHandle | None = None,
     run_role_fn=run_role,
     start_server_fn=start_server,
     stop_server_fn=stop_server,
@@ -377,6 +378,9 @@ def run_pr_cycle(
     One Bernstein server is started here, once, and shared across every
     role dispatch in this cycle (see module docstring) -- stopped in a
     `finally` so a mid-cycle exception never leaves it running.
+
+    `server`, when supplied, is an already-running handle this function
+    uses and does NOT stop -- see the comment at its use site.
 
     `run_role_fn`/`start_server_fn`/`stop_server_fn` are injectable purely
     for testing -- production callers never pass them.
@@ -425,7 +429,15 @@ def run_pr_cycle(
     # review it did not define the contract for.
     recheck_profile_prompt = resolve_prompt("recheck", profile=profile, workdir=workdir)
 
-    server = start_server_fn(workdir, port=port)
+    # A caller running several PR units in a row (`reasona_dev.orchestrate`)
+    # supplies one server for the whole plan. Same argument that moved role
+    # dispatch off per-role subprocesses: the bootstrap is real work and
+    # paying it once per unit is as arbitrary as paying it once per role.
+    # Whoever creates the server also stops it -- this function never stops
+    # one it did not start.
+    owns_server = server is None
+    if owns_server:
+        server = start_server_fn(workdir, port=port)
     try:
         # --- Verify cycles (review), max 8 -- worker.md -> *Develop & verify* ---
         cycle = 0
@@ -551,7 +563,8 @@ def run_pr_cycle(
             review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
         )
     finally:
-        stop_server_fn(server, workdir=workdir)
+        if owns_server:
+            stop_server_fn(server, workdir=workdir)
         # Regenerated from the records this cycle just appended, so the NEXT
         # unit's priors already include whatever recurred in this one. In the
         # `finally` because a failed cycle is exactly the one whose findings
