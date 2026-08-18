@@ -311,22 +311,42 @@ remind a model of something the pipeline could guarantee.
 
 ## Next
 
-`reasona_dev/pr_cycle.py` (the dev-ralf-faithful develop -> verify ->
-bug+compliance scan driver, see `docs/ARCHITECTURE.md` §3.5.4) is built and
-unit-tested. `run_role()` now dispatches over Bernstein's HTTP task-server
-API (`reasona_dev/bernstein_server.py`: one `bernstein start` per
-`run_pr_cycle()` call, `POST /tasks` per role dispatch, `GET /tasks/{id}`
-polling) instead of a fresh `bernstein run <plan> --auto-approve` subprocess
-per role -- the individual HTTP primitives (`POST /tasks`, `GET
-/tasks/{id}`, `GET /health`) are each live-verified (2026-08-18, real paid
-run: haiku agent spawned via a hand-posted task, committed, merged, task
-`done`, `result_summary` populated over HTTP -- see the `bernstein.yaml`
-placement bug this same test caught, above), but this module's own
-composition of them -- `run_pr_cycle()`'s single server serving every role
-dispatch across a whole cycle -- has not itself been run end-to-end yet.
-The remaining work: one real PR unit through `plan_compile.py`'s cycle-0
-dev step -> `pr_cycle.run_pr_cycle()` -> `gate_check.py` -> squash merge,
-on a real repository -- plus the still-unbuilt tail (`sync-main -> /gh-pr
--> /gh-review -> up-to-date gate
--> final_audit`, worker.md's last third) and bounded (vs. always-full)
-recheck routing.
+Everything below the merge point is built and unit-tested (214 cases):
+`plan_compile` -> `pr_cycle` (review/scan cycles, bounded recheck,
+convergence exit) -> `ship_gate` (review + acceptance + structure) ->
+`cycles_log`/`cycles_query`/`memory`. Three things remain.
+
+**1. One real end-to-end run.** The individual HTTP primitives `run_role()`
+uses are live-verified (2026-08-18, real paid run: a haiku agent spawned via
+a hand-posted task, committed, merged, `result_summary` populated over
+HTTP). This driver's own composition of them -- one server serving every
+role dispatch across a whole `run_pr_cycle()` -- has not been run against a
+live paid server. That run is also what first populates `cycles.jsonl`, and
+therefore what unblocks item 3.
+
+**2. The merge tail.** `sync-main -> /gh-pr -> /gh-review -> up-to-date gate
+-> final_audit -> squash-merge` (worker.md's last third). `ship_gate`
+deliberately returns a verdict rather than merging, so this tail consumes it
+rather than reimplementing it. `final_audit` has a resolved model and a
+packaged prompt but no dispatch site yet.
+
+**3. Two decisions deferred to measurement, not to judgment.** Both are
+blocked on data that only real runs produce, and both now have the exact
+query that decides them:
+
+- *Which review role to drop.* `reasona-dev cycles-report`'s `unique`
+  column. A role with high `duplicate` and near-zero `unique` is the
+  candidate. Deciding today would repeat the guess that produced the
+  allocation being questioned.
+- *Whether a unit with no acceptance criteria should be refused rather than
+  warned.* The `acceptance coverage` line. Flipping it before plans declare
+  criteria blocks everything; flipping it once coverage is high is a
+  formality.
+
+Two further items from the source analysis were examined and deliberately
+NOT built, with reasons recorded in `docs/ARCHITECTURE.md` §3.7.4:
+mid-plan revision (Bernstein declares its stage DAG up front, so folding
+learning back mid-run costs the parallel DAG -- the cheap half, the 5-unit
+size cap, is built) and the runtime feedback loop (product-specific to a
+gateway/scanner; the general form is post-merge acceptance, i.e. a timing
+extension of what `acceptance.py` already does).
