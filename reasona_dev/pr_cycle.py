@@ -83,18 +83,17 @@ from reasona_dev.finding_adapter import (
     ReviewResult,
     RoleStatus,
     merge,
-    parse_kv_contract,
-    parse_text_contract,
+    parse_role_output,
 )
 from reasona_dev.model_config import ResolvedModel
 from reasona_dev.prompt_profile import available_profiles, resolve_prompt
 
-# worker.md -> *Role I/O*: bugbot/compliance emit the external-skill KV wire
-# shape (`finding_adapter.py --input kv`); review/final_audit emit the `||`
-# text contract (`--input text`). This is a property of the ROLE, not the
-# profile -- a profile can change WHAT the prompt asks for, never how its
-# answer is shaped.
-_KV_ROLES = frozenset({"bugbot", "compliance"})
+# The wire shape is a property of the PROMPT, not the role -- see
+# `finding_adapter.parse_role_output()`. This module used to keep a
+# role -> parser table (`bugbot`/`compliance` -> KV), which was correct only
+# for a profile that delegates those roles to dev-ralf's external skills.
+# The packaged `generic` profile asks all of them for the `||` text
+# contract, and the table turned that valid output into a hard scan abort.
 
 
 @dataclass
@@ -150,6 +149,15 @@ def run_role(
     worker.md -> *RESULT parsing*: "Missing block ... -> cycle FAIL", not
     "treat as clean".
     """
+    # ABSOLUTE, always. The agent runs inside a per-task git worktree, so a
+    # relative path in its instructions resolves against THAT tree, not the
+    # project root the driver reads from. Live symptom when this was
+    # relative (`--workdir .`): the agent wrote
+    # `.sdd/worktrees/<id>/.reasona/runs/pr-1/reviewer-c1.raw.txt`, spent its
+    # remaining turns hunting for the file the driver was asking about, and
+    # died on `error_max_turns` -- while the driver reported the role as
+    # ERROR because nothing appeared where it looked.
+    rundir = rundir.resolve()
     raw_output_path = rundir / f"{role}-c{cycle}.raw.txt"
     rundir.mkdir(parents=True, exist_ok=True)
     if raw_output_path.exists():
@@ -163,9 +171,13 @@ def run_role(
         raw_output_path=raw_output_path,
         approval_required=approval_required,
     )
-    task = poll_task(server, task_id)
+    task = poll_task(server, task_id, output_path=raw_output_path)
 
-    if task.get("status") != "done" or not raw_output_path.is_file():
+    # The FILE decides, not the status. A task can sit at `claimed` forever
+    # through an upstream completion-payload bug (see `poll_task`), and a
+    # task can reach `done` without the agent having written anything.
+    # Only the second of those is an error here.
+    if not raw_output_path.is_file():
         return RoleRunResult(
             role=role, cycle=cycle,
             review_result=ReviewResult(role_status=RoleStatus.ERROR),
@@ -173,8 +185,10 @@ def run_role(
         )
 
     text = raw_output_path.read_text(encoding="utf-8")
-    parser = parse_kv_contract if role in _KV_ROLES else parse_text_contract
-    return RoleRunResult(role=role, cycle=cycle, review_result=parser(text), raw_output_path=raw_output_path)
+    return RoleRunResult(
+        role=role, cycle=cycle,
+        review_result=parse_role_output(text), raw_output_path=raw_output_path,
+    )
 
 
 def _render_findings(findings) -> list[str]:

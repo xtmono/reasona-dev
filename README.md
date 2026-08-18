@@ -406,43 +406,77 @@ remind a model of something the pipeline could guarantee.
 
 ## Next
 
-Everything below the merge point is built and unit-tested (214 cases):
-`plan_compile` -> `pr_cycle` (review/scan cycles, bounded recheck,
-convergence exit) -> `ship_gate` (review + acceptance + structure) ->
-`cycles_log`/`cycles_query`/`memory`. Three things remain.
+**Live end-to-end verified (2026-08-18).** A real repository ran the whole
+pipeline -- `compile-plan` -> `bernstein run` (dev cycle-0) -> `run-plan`
+(review -> scan -> ship) -- with real agents and real cost:
 
-**1. One real end-to-end run.** The individual HTTP primitives `run_role()`
-uses are live-verified (2026-08-18, real paid run: a haiku agent spawned via
-a hand-posted task, committed, merged, `result_summary` populated over
-HTTP). This driver's own composition of them -- one server serving every
-role dispatch across a whole `run_pr_cycle()` -- has not been run against a
-live paid server. That run is also what first populates `cycles.jsonl`, and
-therefore what unblocks item 3.
+```
+plan run: 1 shipped, 0 failed, 0 skipped
+  [shipped] pr-1 (generic): review + acceptance + structure all clean
 
-**2. The merge tail.** `sync-main -> /gh-pr -> /gh-review -> up-to-date gate
--> final_audit -> squash-merge` (worker.md's last third). `ship_gate`
-deliberately returns a verdict rather than merging, and `orchestrate.run_plan`
-records that verdict per unit -- so this tail consumes both rather than
-reimplementing either. `final_audit` has a resolved model and a prompt but no
-dispatch site yet.
+  review c1  reviewer    PASS
+  scan   c1  bugbot      PASS
+             compliance  FIX_REQUIRED  mf=1
+  decision   spawn_fix   -> dev fix dispatched
+  scan   c2  bugbot      PASS
+             compliance  PASS          <- the fix held
+  acceptance declared=True passed=True ['AC-1-1']
+  ship       passed=True {review: T, acceptance: T, structure: T}
+```
 
-**3. Two decisions deferred to measurement, not to judgment.** Both are
-blocked on data that only real runs produce, and both now have the exact
-query that decides them:
+Getting there took **11 defects, 10 of them ours, and none of them findable by
+unit test** -- contract mismatches, process lifetime, path resolution. They
+only surface when a real agent writes real output in a real worktree. The full
+account is in `docs/ARCHITECTURE.md` §3.8; the three that changed the
+architecture:
 
-- *Which review role to drop.* `reasona-dev cycles-report`'s `unique`
-  column. A role with high `duplicate` and near-zero `unique` is the
-  candidate. Deciding today would repeat the guess that produced the
-  allocation being questioned.
+- **Bernstein has three execution modes and only one is a daemon.**
+  `bernstein run` is batch; the orchestrator module is the batch engine's
+  claim loop and self-stops on quiescence *by design*; `bernstein serve` +
+  `bernstein worker` is the long-lived pair ("Blocks until SIGINT/SIGTERM").
+  Using the first two as a daemon produced, in order, a spawner that never
+  started and a spawner that quit the moment the review stage drained. The
+  worker mode is also what makes remote execution possible later -- it takes
+  `--server URL --token`, so the executor need not live where tasks are
+  posted.
+- **Wire shape is a property of the prompt, not the role.** `pr_cycle` picked
+  its parser from the role name, which is only true for a profile delegating
+  bugbot to an external skill. The packaged `generic` prompts ask all roles
+  for the text contract, so well-formed output was read as a malformed KV
+  block and aborted the whole scan stage. `parse_role_output()` now detects
+  by literal marker.
+- **The root `bernstein.yaml` symlink must exist and must not be tracked.**
+  Absent, the orchestrator FATALs with no adapter; committed, git materializes
+  it into every agent worktree where Bernstein's isolation check refuses it.
+  Both are zero agents. `ensure_bernstein_yaml()` creates the link on every
+  call and adds it to the target repo's `.gitignore`.
+
+One defect is upstream and stays defended rather than fixed: Bernstein's
+orphan-completion path raises `TypeError: Object of type AgentLogSummary is
+not JSON serializable`, leaving a finished task at `claimed` forever. The
+defence is to treat the output FILE as the completion indicator -- which was
+always the real contract here, since `result_summary` never carried the
+agent's report.
+
+Two things remain.
+
+**1. The merge tail.** `sync-main -> /gh-pr -> /gh-review -> up-to-date gate
+-> final_audit -> squash-merge` (worker.md's last third). `ship_gate` returns
+a verdict rather than merging and `orchestrate.run_plan` records it per unit,
+so this tail consumes both rather than reimplementing either. `final_audit`
+has a resolved model, a prompt, and now a whitelist entry -- but no dispatch
+site.
+
+**2. Two decisions deferred to measurement, not judgment.** Both are blocked
+on data that only accumulated runs produce, and both now have the exact query
+that decides them (`reasona-dev cycles-report`):
+
+- *Which review role to drop* -- the `unique` column. A role with high
+  `duplicate` and near-zero `unique` is the candidate.
 - *Whether a unit with no acceptance criteria should be refused rather than
-  warned.* The `acceptance coverage` line. Flipping it before plans declare
-  criteria blocks everything; flipping it once coverage is high is a
-  formality.
+  warned* -- the `acceptance coverage` line.
 
-Two further items from the source analysis were examined and deliberately
-NOT built, with reasons recorded in `docs/ARCHITECTURE.md` §3.7.4:
-mid-plan revision (Bernstein declares its stage DAG up front, so folding
-learning back mid-run costs the parallel DAG -- the cheap half, the 5-unit
-size cap, is built) and the runtime feedback loop (product-specific to a
-gateway/scanner; the general form is post-merge acceptance, i.e. a timing
-extension of what `acceptance.py` already does).
+Two items from the source analysis were examined and deliberately NOT built,
+with reasons in `docs/ARCHITECTURE.md` §3.7.4: mid-plan revision (Bernstein
+declares its stage DAG up front) and the runtime feedback loop
+(product-specific; its general form is post-merge acceptance).

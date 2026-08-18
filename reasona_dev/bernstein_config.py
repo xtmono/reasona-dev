@@ -3,13 +3,33 @@ template, and keeps its `role_model_policy` in sync.
 
 Bernstein disagrees with itself about where the seed file lives:
 `find_seed_file()` checks `.bernstein/bernstein.yaml` first, while `bernstein
-run`'s background orchestrator subprocess bypasses that function entirely and
-re-derives a root-only `workdir/bernstein.yaml`. A repo satisfying only the
-first spawns zero agents, silently. So a fresh bootstrap writes the real file
-to `.bernstein/bernstein.yaml` and creates the repo-root `bernstein.yaml` as a
-relative symlink to it -- one file, both lookups satisfied. The investigation
-behind this, including the live verification, is in docs/ARCHITECTURE.md
-§3.5.3; it is not repeated here.
+run`'s orchestrator bypasses that function entirely and re-derives a root-only
+`workdir/bernstein.yaml`. A repo satisfying only the first spawns zero agents,
+silently -- re-confirmed live: with no root file the orchestrator logs
+`resolved seed_path=<workdir>/bernstein.yaml (exists=False)` then
+`FATAL: no adapter configured`.
+
+So the real file lives at `.bernstein/bernstein.yaml` and the repo root gets a
+relative symlink to it -- one file, both lookups satisfied.
+
+**The root symlink must NOT be tracked by git.** Committing it makes git
+materialize it inside every per-task agent worktree, where Bernstein's
+worktree isolation check rejects it outright:
+
+    Worktree isolation violation: Symlink 'bernstein.yaml' points into
+    parent repo mutable state
+    Cannot create workspace for agent backend-<id>
+
+which is again zero agents, just from the other direction. Bernstein's own
+worktree exclude list already carries `/bernstein.yaml` alongside `/.sdd/`,
+`/.env` and `/CLAUDE.md`, so an untracked root file is the arrangement it
+expects. `ensure_bernstein_yaml()` therefore also adds `bernstein.yaml` to the
+target repo's `.gitignore`.
+
+Because it is untracked, a fresh clone has `.bernstein/bernstein.yaml` and no
+root link -- so the link is ensured on EVERY call, not only when bootstrapping
+a repo that has neither. An early return on "`.bernstein/` already exists"
+would leave every cloned repo one FATAL away from its first run.
 
 Template cascade (mirrors `reasona_dev.config_file`'s two layers for
 `reasona.yaml`). Named `bernstein-template.yaml` so it reads as the source
@@ -18,15 +38,15 @@ copied FROM, not a second copy of the real file:
     <workdir>/.reasona/bernstein-template.yaml   project-local (checked first)
     ~/.reasona/bernstein-template.yaml           global (GLOBAL_BERNSTEIN_YAML)
 
-A repo that already has a seed file at either real location is left
-untouched. This repo itself is that case -- it commits
-`.bernstein/bernstein.yaml` directly, and needs no root symlink because it
-only ever runs `doctor`/`plan validate` against itself, neither of which
-spawns the subprocess with the root-only lookup.
+A repo that already has a seed file at either real location keeps its content
+untouched; only the root link and the ignore entry are ensured.
 
 `sync_role_model_policy()` addresses a separate, ongoing concern: a
 `role_model_policy` already in place can drift from what
-`reasona_dev.model_config` now resolves. See its own docstring.
+`reasona_dev.model_config` now resolves. See its own docstring. Note that this
+block doubles as the task server's ROLE WHITELIST -- `POST /tasks` returns 400
+for any role absent from it (verified live), so every role reasona-dev
+dispatches has to appear there.
 """
 
 from __future__ import annotations
@@ -40,41 +60,83 @@ from reasona_dev.model_config import BERNSTEIN_ROLE_TO_PRIMARY_CONFIG_ROLE, Reso
 GLOBAL_BERNSTEIN_YAML = Path.home() / ".reasona" / "bernstein-template.yaml"
 
 
+def _ensure_root_link(workdir: Path) -> None:
+    """Guarantee an UNTRACKED root `bernstein.yaml` -> `.bernstein/bernstein.yaml`.
+
+    Idempotent and non-destructive: a real file already at the root is left
+    alone (that repo predates this convention and already works), and an
+    existing correct symlink is left alone. Only a missing or wrongly-aimed
+    link is (re)created.
+    """
+    root = workdir / "bernstein.yaml"
+    target = Path(".bernstein") / "bernstein.yaml"
+    if not (workdir / target).is_file():
+        return
+    if root.is_symlink():
+        if root.readlink() != target:
+            root.unlink()
+            root.symlink_to(target)
+    elif not root.exists():
+        root.symlink_to(target)
+    _ensure_gitignored(workdir, "bernstein.yaml")
+
+
+def _ensure_gitignored(workdir: Path, entry: str) -> None:
+    """Append `entry` to the repo's `.gitignore` if it is not already there.
+
+    Tracking the root link breaks agent spawning entirely (see module
+    docstring), so keeping it ignored is part of making it work -- not a
+    tidiness nicety.
+    """
+    path = workdir / ".gitignore"
+    try:
+        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if any(line.strip() == entry for line in existing.splitlines()):
+            return
+        prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+        path.write_text(
+            existing + prefix
+            + "# Untracked on purpose: a COMMITTED bernstein.yaml symlink is\n"
+            + "# materialized into every agent worktree, where Bernstein's\n"
+            + "# isolation check rejects it and no agent can spawn.\n"
+            + f"{entry}\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
-    """Bootstrap `<workdir>/.bernstein/bernstein.yaml` (+ a root symlink to
-    it) if the target repo has no seed file at either real location yet.
+    """Ensure a usable seed layout, and return the real file's path.
 
-    Existing-file check covers BOTH locations Bernstein's `find_seed_file()`
-    recognizes (`.bernstein/bernstein.yaml` first, then repo-root
-    `bernstein.yaml`) -- a repo already using either convention (as a real
-    file OR a symlink) is left completely untouched, never given a second,
-    redundant copy.
+    Three cases, in order:
 
-    Only when NEITHER exists: copies a template into
-    `<workdir>/.bernstein/bernstein.yaml`, then creates `<workdir>/
-    bernstein.yaml` as a RELATIVE symlink (`.bernstein/bernstein.yaml`) --
-    relative so it survives being cloned/moved to a different absolute
-    path. This satisfies both of Bernstein's disagreeing lookup paths (see
-    module docstring) from one underlying file.
+    1. `.bernstein/bernstein.yaml` exists -> content untouched; the root
+       symlink and the ignore entry are still ensured, because an untracked
+       link does not survive a clone (see module docstring).
+    2. Only a root `bernstein.yaml` exists (a repo predating this
+       convention) -> left completely alone. It already satisfies the
+       orchestrator, and converting it would rewrite a file this module did
+       not create.
+    3. Neither exists -> copy a template into `.bernstein/bernstein.yaml`
+       and create the root link.
 
-    Source priority when neither exists: `<workdir>/.reasona/
-    bernstein-template.yaml` (project-local template) -> `GLOBAL_BERNSTEIN_YAML`
-    (`~/.reasona/bernstein-template.yaml`, global template) -- the same
-    local-beats-global order `reasona_dev.config_file` uses for
-    `reasona.yaml`.
+    Source priority when bootstrapping: `<workdir>/.reasona/
+    bernstein-template.yaml` then `GLOBAL_BERNSTEIN_YAML` -- the same
+    local-beats-global order `reasona_dev.config_file` uses.
 
-    Returns the path now in place (whichever already existed, or the
-    freshly-bootstrapped `.bernstein/bernstein.yaml`), or `None` if nothing
-    was available to copy from either (the caller still proceeds;
-    `bernstein run` will surface its own "no seed file found" error if this
-    is never resolved).
+    Returns the real file now in place, or `None` if nothing was available
+    to copy from (the caller proceeds; `bernstein run` surfaces its own
+    error if this is never resolved).
     """
     workdir = Path(workdir)
     dot_bernstein_target = workdir / ".bernstein" / "bernstein.yaml"
     root_target = workdir / "bernstein.yaml"
-    if dot_bernstein_target.exists():
+
+    if dot_bernstein_target.is_file():
+        _ensure_root_link(workdir)
         return dot_bernstein_target
-    if root_target.exists():
+    if root_target.is_file() and not root_target.is_symlink():
         return root_target
 
     local_template = workdir / ".reasona" / "bernstein-template.yaml"
@@ -82,7 +144,7 @@ def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
         if source.is_file():
             dot_bernstein_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(source, dot_bernstein_target)
-            root_target.symlink_to(Path(".bernstein") / "bernstein.yaml")
+            _ensure_root_link(workdir)
             return dot_bernstein_target
     return None
 

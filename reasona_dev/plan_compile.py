@@ -428,24 +428,34 @@ def compile_to_bernstein_plan(
     stages = []
     for u in units:
         stage_name = _stage_name(u.index)
-        # Convention: the review-pipeline run for this stage writes its
-        # merged, canonical ReviewResult here before the janitor evaluates
-        # this signal. See reasona_dev/gate_check.py -- confirmed against
-        # installed Bernstein source that `test_passes` (a completion
-        # signal, NOT a pluggy hook) is the only mechanism that gates
-        # whether a task's result proceeds toward PR/merge
-        # (docs/ARCHITECTURE.md §3).
-        review_result_path = f".reasona/review-{stage_name}.json"
+        # **No completion_signals on the dev step.** This used to carry
+        # `gate_check .reasona/review-<stage>.json`, from a design where the
+        # review verdict was the merge gate. Two facts, both since confirmed
+        # against the installed Bernstein source, make that unworkable:
+        #
+        #   1. The file does not exist yet. Review runs AFTER this step, in
+        #      `pr_cycle`, so the janitor read a missing path, exited
+        #      non-zero, and failed the dev task on every first attempt --
+        #      which then hit Bernstein's retry path, respawning the agent
+        #      and escalating its model on the second retry. A signal that
+        #      cannot pass is worse than no signal: it converts every unit
+        #      into the exact credit burn docs/ARCHITECTURE.md §3.6 is about.
+        #   2. Even a signal about the dev step's OWN output could not work
+        #      here. Signals are evaluated at `orch._workdir` -- one fixed
+        #      project root -- and BEFORE the agent's branch is merged
+        #      (`task_lifecycle.py`: janitor at :4055, merge at :3061 inside
+        #      `_reap_and_cleanup_session`). The code being verified is not
+        #      in the tree the command runs against.
+        #
+        # So gating lives entirely in `reasona_dev.ship_gate`, which runs
+        # after the merge, in a checkout the driver controls. With no
+        # signals Bernstein auto-completes the task on the agent's git
+        # commits, which is the honest amount of verification available at
+        # that point.
         step: dict = {
             "title": f"PR {u.index}: {u.title}",
             "description": u.section,
             "role": dev_role,
-            "completion_signals": [
-                {
-                    "type": "test_passes",
-                    "command": f"python3 -m reasona_dev.gate_check {review_result_path}",
-                }
-            ],
         }
         if u.files:
             step["files"] = u.files

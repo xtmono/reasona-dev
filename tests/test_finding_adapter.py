@@ -186,3 +186,58 @@ def test_kv_contract_merges_with_text_contract_reviewer():
     merged = merge(bugbot, review)
     assert merged.gate() == "FIX_REQUIRED"
     assert len(merged.must_fix) == 1
+
+
+# --- contract detection (parse_role_output) ---------------------------------
+
+_TEXT_OUT = """MUST_FIX:
+
+ADVISORY:
+- [LOW] src/a.py -- minor
+
+VERDICT: PASS
+"""
+
+_KV_OUT = (
+    "=== ext-bugbot RESULT ===\n"
+    "VERDICT: PASS\nBLOCKING_JSON=[]\nNON_BLOCKING_JSON=[]\n=== END ===\n"
+)
+
+
+def test_text_contract_is_detected_and_not_read_as_kv():
+    """Live regression: the packaged bugbot/compliance prompts ask for the
+    text contract, the role->parser table sent them to the KV parser, which
+    correctly reported "missing block" as ERROR -- aborting the whole scan
+    on output that was perfectly well formed."""
+    from reasona_dev.finding_adapter import parse_role_output
+
+    r = parse_role_output(_TEXT_OUT)
+    assert r.role_status is RoleStatus.COMPLETE
+    assert r.gate() == "PASS_WITH_NOTES"
+    assert len(r.advisory) == 1
+
+
+def test_kv_contract_is_still_detected():
+    from reasona_dev.finding_adapter import parse_role_output
+
+    r = parse_role_output(_KV_OUT)
+    assert r.role_status is RoleStatus.COMPLETE
+    assert r.gate() == "PASS"
+
+
+def test_a_malformed_kv_block_still_fails_as_kv_not_reread_as_prose():
+    """Detection must not turn a broken KV block into a silent text parse --
+    a `=== RESULT ===` header with no JSON arrays is a parse failure, and
+    worker.md says a missing block is a cycle FAIL, never 'zero findings'."""
+    from reasona_dev.finding_adapter import parse_role_output
+
+    broken = "=== ext-bugbot RESULT ===\nVERDICT: PASS\n=== END ===\n"
+    assert parse_role_output(broken).role_status is RoleStatus.ERROR
+
+
+def test_detection_keys_off_literal_markers_only():
+    from reasona_dev.finding_adapter import parse_role_output
+
+    # prose that merely mentions the marker word is still text
+    prosey = "MUST_FIX:\n\nADVISORY:\n- [LOW] a.py -- mentions BLOCKING_JSON in passing\n\nVERDICT: PASS\n"
+    assert parse_role_output(prosey).role_status is RoleStatus.COMPLETE

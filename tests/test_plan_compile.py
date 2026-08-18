@@ -40,8 +40,13 @@ def test_compiles_to_valid_stage_shape():
         assert len(stage["steps"]) == 1
         step = stage["steps"][0]
         assert "title" in step
-        assert step["completion_signals"][0]["type"] == "test_passes"
-        assert "gate_check" in step["completion_signals"][0]["command"]
+        # The dev step carries NO completion_signals -- see the comment at
+        # its construction site. A signal here either reads a review verdict
+        # that does not exist yet (failing every first attempt and feeding
+        # Bernstein's retry+escalation path) or asks a pre-merge project
+        # root about code still on the agent's branch. Gating is
+        # ship_gate's, after the merge.
+        assert "completion_signals" not in step
 
 
 def test_dev_model_defaults_to_resolved_sonnet():
@@ -175,3 +180,23 @@ def test_policy_flags_reach_role_model_policy_sync(tmp_path, monkeypatch):
 
     text = (target_repo / "bernstein.yaml").read_text()
     assert "bugbot:\n    provider: codex" in text
+
+
+def test_dev_step_has_no_completion_signal(tmp_path):
+    """Regression: a `gate_check <review-result>` signal here failed on every
+    first attempt (the review has not run yet), which fed straight into
+    Bernstein's retry-and-escalate path -- a guaranteed credit burn on every
+    PR unit."""
+    plan = compile_to_bernstein_plan(
+        PLAN, plan_name="s", description="d", workdir=tmp_path,
+        write_audit_trail=False, write_bernstein_yaml=False,
+    )
+    for stage in plan["stages"]:
+        assert "completion_signals" not in stage["steps"][0]
+
+
+def test_gate_check_reports_a_missing_verdict_without_a_traceback(tmp_path, capsys):
+    from reasona_dev import gate_check
+
+    assert gate_check.main([str(tmp_path / "absent.json")]) == 1
+    assert "no review result" in capsys.readouterr().err

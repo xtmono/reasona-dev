@@ -175,3 +175,35 @@ def test_cycles_log_is_written_for_every_dispatch_and_decision(tmp_path, generic
     first = dispatches[0]
     assert first["must_fix_count"] == 1
     assert first["findings"][0]["path"] == "src/a.rs"
+
+
+def test_raw_output_path_given_to_the_agent_is_absolute(tmp_path, monkeypatch):
+    """The agent runs in a per-task worktree, so a relative path in its
+    instructions resolves against that tree and the driver never sees the
+    file. Live-observed: the agent wrote into its worktree, burned its turns
+    looking for it, and the role came back ERROR."""
+    import os
+
+    from reasona_dev import bernstein_server, pr_cycle as pc
+
+    seen = {}
+
+    def fake_dispatch(handle, *, role, title, description, model, effort, cli,
+                      raw_output_path, approval_required=False):
+        seen["path"] = raw_output_path
+        seen["description"] = description
+        Path(raw_output_path).write_text(PASS_TEXT)
+        return "t1"
+
+    monkeypatch.setattr(pc, "dispatch_task", fake_dispatch)
+    monkeypatch.setattr(pc, "poll_task", lambda *a, **k: {"status": "done"})
+    monkeypatch.chdir(tmp_path)
+
+    pc.run_role(
+        server=None, workdir=Path("."), role="reviewer", title="t",
+        prompt="p", model=_RESOLVED["review"], rundir=Path("./run"), cycle=1,
+    )
+
+    assert Path(seen["path"]).is_absolute()
+    # and the instruction the agent actually reads carries that absolute path
+    assert str(seen["path"]) in seen["description"]

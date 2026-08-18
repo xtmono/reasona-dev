@@ -1,58 +1,51 @@
-"""Starts one persistent Bernstein task server + orchestrator for a whole
-PR cycle, and dispatches each role as an HTTP `POST /tasks` instead of a
-fresh `bernstein run <plan> --auto-approve` subprocess per role.
+"""Runs one Bernstein instance for a whole plan and dispatches each role as
+an HTTP `POST /tasks`.
 
-**Why this replaces the old per-role `bernstein run` subprocess.** The
-original `pr_cycle.run_role()` shelled out to `bernstein run <plan>
---auto-approve` once PER ROLE PER CYCLE -- each call bootstraps a brand new
-task server + orchestrator + worktree setup from scratch, then tears it all
-down again once its one-step plan finishes. A `run_pr_cycle()` call can
-dispatch a dozen or more roles (review/bugbot/compliance/dev-fix, repeated
-across up to 8 cycles); paying that bootstrap cost every single time is
-pure overhead. `bernstein start`/`run` both "detach the task server as a
-background process and return" (confirmed: `bernstein start --help`'s own
-description, and `server_launch.py`'s actual behavior) -- so one process,
-started once, can serve every role dispatch in the cycle over its HTTP API,
-and only pays the bootstrap cost once.
+**The instance is a central task server plus a long-lived worker.** Bernstein
+offers three execution modes and only the third is a daemon that keeps
+claiming externally-posted tasks:
 
-**What does NOT change: the file-handoff convention.** `POST /tasks`'s
-`result_summary` is Bernstein's own one-line auto-completion note (e.g.
-`"Auto-completed: agent backend-<id> made git commits on branch (no
-signals to verify)"` -- confirmed live), never the agent's actual
-free-form report. `pr_cycle.py` needs the agent's REAL structured output
-(the markdown report + `RESULT: ...` contract line `finding_adapter.py`
-parses) -- so the task `description` still ends with the exact same
-"write your entire output to `<raw_output_path>` as your final action"
-instruction `_write_role_plan()` used to bake into the plan step, and the
-task's own `completion_signals` (`test_passes`: `test -s <raw_output_path>`)
-is what the orchestrator uses to know the agent is actually done -- not
-just that some git commits landed.
+    bernstein run <plan>          batch: spawn, execute, merge, EXIT
+    python -m ...orchestrator     the batch engine's claim loop -- self-stops
+                                  on quiescence BY DESIGN
+    bernstein serve + worker      central node + executor that "blocks until
+                                  SIGINT/SIGTERM"
 
-**What DOES change, for the better:** `model`/`effort`/`cli` (adapter) and
-`completion_signals` are first-class fields on Bernstein's own `POST
-/tasks` body (`core/server/server_models.py::TaskCreate`, confirmed
-directly against the installed package) -- so no `plan.yaml` file needs to
-be written and read back at all; the same per-dispatch overrides
-`_write_role_plan()` used to express as a one-step plan now go straight in
-the request body.
+Both of the first two were tried here and both failed live, in ways that only
+a real run shows: `bernstein start` (a seed bootstrap, not a bare server) left
+`/health` reporting `spawner: {pid: null}` while every dispatch sat unclaimed,
+and the raw orchestrator logged `Quiescence confirmed after 2.0s settle window
+- self-stopping` the moment the review stage drained, stranding the entire
+scan stage. See docs/ARCHITECTURE.md §3.8.1.
 
-**Auth.** `BERNSTEIN_AUTH_TOKEN` is set explicitly (a fresh random token
-per server, generated here) before the server subprocess is spawned, so
-this module -- not Bernstein's own auto-generated-and-only-logged fallback
--- is the one thing that has to know it, and can supply it as
-`Authorization: Bearer <token>` on every request.
+The worker mode is also the one that keeps remote execution open: it takes
+`--server URL --token`, so the executor need not run on the machine posting
+the tasks.
 
-**Not yet live-verified.** The individual HTTP calls this module makes
-(`POST /tasks`, `GET /tasks/{id}`, `GET /health`) were each confirmed live
-against a real running Bernstein server in an earlier session (see
-`docs/ARCHITECTURE.md` §3.5.3/§3.5.4 for the paid verification log) -- but
-this module's OWN orchestration of them (`start_server()` polling
-`/health` until ready, `run_pr_cycle()`'s single persistent server serving
-many sequential role dispatches, `stop_server()`'s shutdown) has not itself
-been run end-to-end against a live paid server yet. Treat this module the
-same way `pr_cycle.run_role()`'s original subprocess call was treated
-before its own live pass: the individually-verified primitives are trusted,
-their new composition is not, until it is.
+**What does NOT change: the file-handoff convention.** `result_summary` is
+Bernstein's own one-line auto-completion note, never the agent's report, so
+the task `description` still ends with "write your entire output to
+`<raw_output_path>` as your final action" and that file is what
+`pr_cycle` parses.
+
+**The file is also the completion indicator, not the task status.** Bernstein
+3.15.1 raises `TypeError: Object of type AgentLogSummary is not JSON
+serializable` on the path that auto-completes a task whose agent has died,
+leaving finished work parked at `claimed` forever -- observed live. Waiting on
+the artifact is not a workaround layered over the contract; it IS the
+contract, since the report was never carried by the status in the first place.
+See `poll_task`.
+
+**What the HTTP body carries.** `model`/`effort`/`cli` and
+`completion_signals` are first-class fields on `TaskCreate`
+(`core/server/server_models.py`), verified live, so no `plan.yaml` file is
+written or read back for a role dispatch. `approval_required` is Bernstein's
+own per-task human gate; `reasona_dev.orchestrate` sets it on a plan's first
+PR unit.
+
+**Auth.** `BERNSTEIN_AUTH_TOKEN` is generated here and given to both
+processes, so this module -- rather than Bernstein's auto-generated,
+only-logged fallback -- is the one thing that knows it.
 """
 
 from __future__ import annotations
@@ -61,6 +54,7 @@ import json
 import os
 import secrets
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -85,57 +79,125 @@ _AWAITING_APPROVAL = "pending_approval"
 
 @dataclass
 class ServerHandle:
-    process: subprocess.Popen
+    """The two processes a usable Bernstein instance needs, plus its token.
+
+    Two, not one: `serve` is the task server and the orchestrator is what
+    actually claims tasks and spawns agents. See `start_server()`.
+    """
+
+    process: subprocess.Popen  # the central task server (`bernstein serve`)
     base_url: str
     token: str
+    spawner: subprocess.Popen | None = None  # the executor (`bernstein worker`)
 
 
-def start_server(workdir: str | Path, *, port: int = 8052, startup_timeout: float = 60.0) -> ServerHandle:
-    """Launch `bernstein start --port <port>` in `workdir`, wait for
-    `GET /health` to answer, and return a handle for `dispatch_task()`/
-    `poll_task()`/`stop_server()`.
+# Roles the worker is told to claim. Must match what `pr_cycle` dispatches
+# AND what the seed's `role_model_policy` whitelists -- a role missing from
+# either side is a task nobody executes.
+WORKER_ROLES = "backend,reviewer,bugbot,compliance,final_audit"
 
-    `bernstein start` itself detaches the actual server+spawner as a
-    background process and returns almost immediately -- the `subprocess.
-    Popen` here is that quick-returning parent, not the long-lived server;
-    it is kept only so `stop_server()` has something to reap if the
-    detached process ever needs a harder kill than `bernstein stop`.
+
+def start_server(
+    workdir: str | Path,
+    *,
+    port: int = 8052,
+    startup_timeout: float = 60.0,
+    slots: int = 2,
+) -> ServerHandle:
+    """Bring up a central task server and a long-lived worker on `port`.
+
+    **Which of Bernstein's three execution modes this is, and why.** Bernstein
+    offers three, and only one of them is a daemon that keeps claiming
+    externally-posted tasks:
+
+        bernstein run <plan>                 batch: spawn, execute, merge, EXIT
+        python -m ...orchestration.orchestrator
+                                             the batch engine's claim loop --
+                                             self-stops on quiescence BY DESIGN
+        bernstein serve + bernstein worker   central node + executor that
+                                             "blocks until SIGINT/SIGTERM"
+
+    This module used to launch `bernstein start`, which is neither -- it
+    bootstraps a run FROM the seed's own `goal:`. A live run showed the
+    result exactly: the server came up, `POST /tasks` succeeded, and
+    `/health` reported `spawner: {pid: null}`, so every dispatch sat
+    unclaimed until its poll timeout.
+
+    Replacing it with the raw orchestrator module got tasks executing but
+    surfaced the next layer of the same mistake: that process is the BATCH
+    engine's loop, and it logged `Quiescence confirmed after 2.0s settle
+    window - self-stopping` the moment the review stage drained. Every task
+    posted after that -- the whole scan stage -- had nobody to claim it.
+    That is not a Bernstein limitation; it is the batch engine behaving as
+    documented while being used as a daemon.
+
+    `bernstein worker` is the mode built for this shape, and it is also the
+    one that makes remote execution possible later: a worker takes
+    `--server URL --token`, so the executor does not have to live on the
+    machine that posts the tasks.
     """
     workdir = Path(workdir)
     token = secrets.token_urlsafe(24)
     full_env = os.environ.copy()
     full_env["BERNSTEIN_AUTH_TOKEN"] = token
 
-    process = subprocess.Popen(
-        ["bernstein", "start", "--port", str(port)],
-        cwd=workdir,
-        env=full_env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    server = subprocess.Popen(
+        ["bernstein", "serve", "--port", str(port)],
+        cwd=workdir, env=full_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
     base_url = f"http://127.0.0.1:{port}"
-    handle = ServerHandle(process=process, base_url=base_url, token=token)
     deadline = time.monotonic() + startup_timeout
     last_error: Exception | None = None
+    healthy = False
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
                 if resp.status == 200:
-                    return handle
+                    healthy = True
+                    break
         except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
             last_error = exc
         time.sleep(1.0)
-    raise RuntimeError(f"bernstein server on {base_url} did not become healthy within {startup_timeout}s") from last_error
+    if not healthy:
+        server.terminate()
+        raise RuntimeError(
+            f"bernstein task server on {base_url} did not become healthy within {startup_timeout}s"
+        ) from last_error
+
+    # Started only after the server answers: a worker's first act is to
+    # register with the central node, and pointing it at a dead port just
+    # produces connection-error noise while it retries.
+    spawner = subprocess.Popen(
+        ["bernstein", "worker", "--server", base_url, "--token", token,
+         "--roles", WORKER_ROLES, "--slots", str(slots)],
+        cwd=workdir, env=full_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return ServerHandle(process=server, base_url=base_url, token=token, spawner=spawner)
 
 
 def stop_server(handle: ServerHandle, *, workdir: str | Path) -> None:
-    """`bernstein stop` (graceful -- agents save work first) against the
-    same `workdir`/port the server was started with, then reap the
-    launcher subprocess this module's own `Popen` tracks.
+    """Stop the worker first, then the task server.
+
+    That order matters: a worker whose central node disappears mid-poll logs
+    a burst of connection failures and may abandon work whose state it can no
+    longer report. Both are terminated directly rather than through
+    `bernstein stop`, which acts on pid files only a `bernstein run` writes.
+
+    SIGTERM is the worker's documented clean-exit signal ("Blocks until
+    SIGINT/SIGTERM"), so `terminate()` is the intended shutdown, not a kill.
     """
-    subprocess.run(["bernstein", "stop"], cwd=Path(workdir), check=False)
-    handle.process.wait(timeout=30)
+    for proc in (handle.spawner, handle.process):
+        if proc is None:
+            continue
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
 
 
 def _request(handle: ServerHandle, method: str, path: str, body: dict | None = None) -> dict:
@@ -202,26 +264,61 @@ def poll_task(
     timeout: float = 1800.0,
     approval_timeout: float = 86400.0,
     on_awaiting_approval=None,
+    output_path: Path | None = None,
 ) -> dict:
-    """`GET /tasks/{id}` until `status` reaches a terminal value. Returns the
-    final task JSON -- the caller (`pr_cycle.run_role()`) decides what a
-    non-`done` terminal status means, this function only knows polling is
-    over.
+    """`GET /tasks/{id}` until the task is finished. Returns the final task
+    JSON -- the caller decides what a non-`done` status means.
 
-    **Approval handling.** A task that parks at `pending_approval` is
-    waiting on a human, not on an agent, so the ordinary `timeout` must not
-    apply to it -- 30 minutes is a reasonable bound on a model finishing
-    work and a nonsensical one on a person noticing a review request. On
-    first entering that state the deadline is extended to
-    `approval_timeout` and `on_awaiting_approval(task)` is called once, so
-    the caller can actually tell someone. Without this split an
-    approval-gated task would fail with a bare `TimeoutError` that reads
-    like a stuck agent.
+    **`output_path` is the primary completion indicator, not the status.**
+    Bernstein 3.15.1 has a bug on the path that auto-completes a task whose
+    agent has died: `handle_orphaned_task` builds its completion payload
+    from `collect_completion_data()`, which contains an `AgentLogSummary`,
+    and the `POST /tasks/{id}/complete` then raises
+    `TypeError: Object of type AgentLogSummary is not JSON serializable`.
+    The task stays `claimed` forever. Observed live: a reviewer agent ran,
+    wrote its full report, exited -- and the dispatch would have blocked for
+    the entire 30-minute timeout waiting for a status that could never
+    arrive.
+
+    Waiting on the artifact instead is not a workaround bolted on top of the
+    contract; it IS the contract. The agent's report was never carried by
+    `result_summary` (see this module's header), so the file appearing is
+    what "the role finished" has always meant here. The status is a
+    secondary signal, and where the two disagree the file is the one with
+    the actual deliverable behind it.
+
+    A size that is unchanged across two consecutive polls is what counts as
+    written -- the prompt instructs the agent to write it as its final
+    action, and the settle check keeps a partially-flushed file from being
+    parsed as a truncated report.
+
+    **Approval handling.** A task parked at `pending_approval` waits on a
+    person, not an agent, so the ordinary `timeout` must not apply: 30
+    minutes is a reasonable bound on a model and a nonsensical one on a
+    human. On first entering that state the deadline extends to
+    `approval_timeout` and `on_awaiting_approval(task)` fires once.
     """
     deadline = time.monotonic() + timeout
     announced = False
+    last_size: int | None = None
+
+    def _settled() -> bool:
+        nonlocal last_size
+        if output_path is None or not output_path.is_file():
+            last_size = None
+            return False
+        size = output_path.stat().st_size
+        if size == 0:
+            last_size = None
+            return False
+        stable = last_size == size
+        last_size = size
+        return stable
+
     task = _request(handle, "GET", f"/tasks/{task_id}")
     while task.get("status") not in _TERMINAL_STATUSES:
+        if _settled():
+            return task
         if task.get("status") == _AWAITING_APPROVAL and not announced:
             announced = True
             deadline = time.monotonic() + approval_timeout

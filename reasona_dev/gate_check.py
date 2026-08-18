@@ -59,7 +59,18 @@ def main(argv: list[str]) -> int:
     if len(argv) != 1:
         print("usage: python3 -m reasona_dev.gate_check <review_result.json>", file=sys.stderr)
         return 2
-    result = _load(argv[0])
+    try:
+        result = _load(argv[0])
+    except FileNotFoundError:
+        # A traceback here reads as a crash in the gate; it is an absent
+        # input. Exit non-zero (never a silent pass) with the path, so the
+        # operator can tell "nothing wrote a verdict" apart from "the
+        # verdict was FAIL".
+        print(f"reasona-dev gate: no review result at {argv[0]}", file=sys.stderr)
+        return 1
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        print(f"reasona-dev gate: malformed review result at {argv[0]}: {exc}", file=sys.stderr)
+        return 1
     gate = result.gate()
     print(f"reasona-dev gate: {gate}", file=sys.stderr)
     if result.contract_mismatch:

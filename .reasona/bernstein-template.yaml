@@ -111,8 +111,19 @@ role_model_policy:
     provider: claude
   compliance:
     provider: claude
+  # Declared even though `pr_cycle` does not dispatch it yet: this block
+  # doubles as the task server's role whitelist (POST /tasks returns 400 for
+  # a role missing from it -- verified live), so the merge tail's
+  # final_audit dispatch would fail on arrival without this entry.
+  final_audit:
+    provider: claude
 
-approval: review   # gate before merge; never `auto`
+# NOTE: there is no seed-level merge-approval key. `approval:` was
+# silently ignored here ("Ignoring unknown top-level key 'approval'"),
+# and Bernstein's own `approvals:` is a TOOL-CALL gate
+# (interactive/timeout_seconds), a different concept. The real
+# per-unit human gate is TaskCreate.approval_required, which
+# reasona_dev.orchestrate sets on a plan's first PR unit.
 
 worktree_setup:
   setup_command: "true"  # per-PR build isolation; override per repo

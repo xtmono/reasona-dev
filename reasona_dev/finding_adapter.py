@@ -132,10 +132,19 @@ class ReviewResult:
 
 
 _SECTION_RE = re.compile(r"^(MUST_FIX|ADVISORY):\s*$", re.MULTILINE)
+# The trailing `-- <description>` is what `review.md` instructs for ADVISORY
+# items, and this regex used to have no provision for it -- so every advisory
+# written in the documented form failed to match and was dropped silently.
+# Found by a live run: a real reviewer emitted two ADVISORY lines in exactly
+# the shape the prompt asked for and the parser returned zero. Advisories do
+# not gate (PASS vs PASS_WITH_NOTES), so nothing failed loudly; they simply
+# never reached cycles.jsonl or memory, which is the worse outcome for a
+# measurement substrate.
 _ITEM_RE = re.compile(
     r"^-\s*\[(?P<severity>CRITICAL|HIGH|MEDIUM|LOW)\]\s*"
     r"(?P<path>\S+?)(?::(?P<line>\d+))?"
-    r"(?:\s+(?P<symbol>[A-Za-z_][\w:]*))?\s*$"
+    r"(?:\s+(?P<symbol>[A-Za-z_][\w:]*))?"
+    r"(?:\s*--\s*(?P<inline_note>.+?))?\s*$"
 )
 _EVIDENCE_RE = re.compile(r"^\s*\|\|\s*(?P<key>contract|scenario|fix|note):\s*(?P<val>.+)$")
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\s*$", re.MULTILINE)
@@ -187,6 +196,10 @@ def parse_text_contract(text: str) -> ReviewResult:
                 path=item.group("path"),
                 line=int(item.group("line")) if item.group("line") else None,
                 symbol=item.group("symbol"),
+                # An inline `-- description` seeds `note`; a later
+                # `|| note:` line overwrites it, so the explicit evidence
+                # field still wins over the shorthand.
+                note=item.group("inline_note"),
                 raw=raw_line,
             )
             continue
@@ -364,3 +377,37 @@ def merge(*results: ReviewResult) -> ReviewResult:
         findings=list(seen.values()),
         contract_mismatch=any(r.contract_mismatch for r in results),
     )
+
+
+# The literal markers an external-skill KV block always carries. Presence of
+# either is what makes output KV -- nothing is inferred from role names.
+_KV_MARKER_RE = re.compile(r"^(?:BLOCKING_JSON=|NON_BLOCKING_JSON=|=== .+ RESULT ===)", re.MULTILINE)
+
+
+def parse_role_output(text: str) -> ReviewResult:
+    """Parse a role's raw output, choosing the contract by what it IS.
+
+    **Why detection rather than a per-role table.** `pr_cycle` used to pick
+    the parser from the role name (`bugbot`/`compliance` -> KV, everything
+    else -> text), which encodes an assumption that is false the moment a
+    profile changes: the wire shape is a property of the PROMPT, not the
+    role. dev-ralf's Rust-monorepo profile delegates bugbot to an external skill that
+    emits the KV block; this project's packaged `generic` profile asks for
+    the same `||` text contract as review. Both are legitimate, and the role
+    is `bugbot` either way.
+
+    Live consequence of getting this wrong: the generic bugbot and
+    compliance prompts produced perfectly well-formed text contracts, the
+    KV parser found no `BLOCKING_JSON=`, correctly reported that as
+    `role_status=ERROR` ("missing block -> cycle FAIL"), and the whole scan
+    stage aborted on output that had nothing wrong with it.
+
+    Detection is exact: a KV block always carries a literal
+    `BLOCKING_JSON=` / `NON_BLOCKING_JSON=` line or a `=== <skill> RESULT ===`
+    header. Absent those, the output is the text contract. Nothing is
+    guessed from shape or content, so a malformed KV block still fails as a
+    malformed KV block rather than being silently re-read as prose.
+    """
+    if _KV_MARKER_RE.search(text):
+        return parse_kv_contract(text)
+    return parse_text_contract(text)

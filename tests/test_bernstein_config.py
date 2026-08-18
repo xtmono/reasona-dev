@@ -49,9 +49,15 @@ def test_bootstraps_dot_bernstein_and_symlinks_root(tmp_path, monkeypatch):
     assert not (workdir / "bernstein.yaml").readlink().is_absolute()
 
 
-def test_never_overwrites_existing_dot_bernstein_file(tmp_path, monkeypatch):
-    # A repo already using .bernstein/bernstein.yaml (e.g. this repo
-    # itself) is left alone -- no root symlink is added on top of it.
+def test_existing_dot_bernstein_content_is_untouched_but_root_link_is_ensured(tmp_path, monkeypatch):
+    """The root link is ensured on EVERY call, not only when bootstrapping.
+
+    It is untracked (committing it breaks agent worktree creation), so a
+    fresh clone has `.bernstein/` and no link -- and without the link the
+    orchestrator re-derives a root-only path, finds nothing, and FATALs.
+    An early return here would leave every cloned repo one FATAL from its
+    first run.
+    """
     global_yaml = tmp_path / "global-bernstein.yaml"
     global_yaml.write_text("goal: from-global\n")
     monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
@@ -63,8 +69,11 @@ def test_never_overwrites_existing_dot_bernstein_file(tmp_path, monkeypatch):
     result = bernstein_config.ensure_bernstein_yaml(workdir)
 
     assert result == workdir / ".bernstein" / "bernstein.yaml"
+    # content never rewritten
     assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: repo-owns-this-already\n"
-    assert not (workdir / "bernstein.yaml").exists()
+    # ...but the link now exists, and is ignored so it is never committed
+    assert (workdir / "bernstein.yaml").is_symlink()
+    assert "bernstein.yaml" in (workdir / ".gitignore").read_text()
 
 
 def test_never_overwrites_existing_root_file(tmp_path, monkeypatch):
@@ -152,3 +161,69 @@ def test_sync_never_adds_a_role_not_already_in_the_file(tmp_path):
 
 def test_sync_missing_file_is_a_safe_noop(tmp_path):
     assert bernstein_config.sync_role_model_policy(tmp_path / "nonexistent.yaml", _resolved(dev="claude")) is False
+
+
+def test_root_link_is_gitignored_because_committing_it_breaks_worktrees(tmp_path, monkeypatch):
+    """Live-verified: a COMMITTED symlink is materialized into every agent
+    worktree, where Bernstein's isolation check rejects it and no agent can
+    spawn at all."""
+    global_yaml = tmp_path / "global-bernstein.yaml"
+    global_yaml.write_text("goal: test\n")
+    monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    bernstein_config.ensure_bernstein_yaml(workdir)
+
+    ignore = (workdir / ".gitignore").read_text()
+    assert any(line.strip() == "bernstein.yaml" for line in ignore.splitlines())
+
+
+def test_gitignore_entry_is_not_duplicated_across_calls(tmp_path, monkeypatch):
+    global_yaml = tmp_path / "global-bernstein.yaml"
+    global_yaml.write_text("goal: test\n")
+    monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    for _ in range(3):
+        bernstein_config.ensure_bernstein_yaml(workdir)
+
+    ignore = (workdir / ".gitignore").read_text()
+    assert [l.strip() for l in ignore.splitlines()].count("bernstein.yaml") == 1
+
+
+def test_existing_real_root_file_is_left_completely_alone(tmp_path, monkeypatch):
+    """A repo predating this convention already satisfies the orchestrator;
+    converting its real file to a symlink would rewrite something this
+    module did not create."""
+    global_yaml = tmp_path / "global-bernstein.yaml"
+    global_yaml.write_text("goal: from-global\n")
+    monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    (workdir / "bernstein.yaml").write_text("goal: legacy-root\n")
+
+    result = bernstein_config.ensure_bernstein_yaml(workdir)
+
+    assert result == workdir / "bernstein.yaml"
+    assert not (workdir / "bernstein.yaml").is_symlink()
+    assert (workdir / "bernstein.yaml").read_text() == "goal: legacy-root\n"
+
+
+def test_wrongly_aimed_link_is_repaired(tmp_path, monkeypatch):
+    global_yaml = tmp_path / "global-bernstein.yaml"
+    global_yaml.write_text("goal: test\n")
+    monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
+
+    workdir = tmp_path / "repo"
+    (workdir / ".bernstein").mkdir(parents=True)
+    (workdir / ".bernstein" / "bernstein.yaml").write_text("goal: real\n")
+    (workdir / "bernstein.yaml").symlink_to("somewhere/else.yaml")
+
+    bernstein_config.ensure_bernstein_yaml(workdir)
+
+    from pathlib import Path as _P
+    assert (workdir / "bernstein.yaml").readlink() == _P(".bernstein") / "bernstein.yaml"
+    assert (workdir / "bernstein.yaml").read_text() == "goal: real\n"
