@@ -143,7 +143,7 @@ def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, generic
         "review": ResolvedModel("review", "opus", "claude", "high", "d"),
         "recheck": ResolvedModel("recheck", "sonnet", "claude", "medium", "d"),
         "bugbot": ResolvedModel("bugbot", "x", "kilo", "high", "d"),
-        "verify": ResolvedModel("verify", "sonnet", "claude", "high", "d"),
+        "compliance": ResolvedModel("compliance", "sonnet", "claude", "high", "d"),
         "dev_escalation": ResolvedModel("dev_escalation", "opus", "claude", "high", "d"),
     }
     calls = []

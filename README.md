@@ -61,7 +61,7 @@ bernstein.yaml              this repo's own seed config (see "bernstein.yaml" be
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step)
   orchestrate.py              runs a whole plan: units in dependency order, per-unit profile
-  pr_cycle.py                 develop -> verify -> bug+compliance scan driver
+  pr_cycle.py                 develop -> review -> bug+compliance scan driver
   bernstein_dispatch.py        one-step plan.yaml + `bernstein run` -- one role dispatch
   acceptance.py                 executable acceptance criteria
   ship_gate.py                    pre-merge verdict: review AND acceptance AND structure
@@ -85,7 +85,7 @@ reasona-dev compile-plan plan.md -o plan.yaml --workdir <target-repo> --dev opus
 ```
 
 Role flags mirror dev-ralf's: `--dev`, `--review`, `--recheck`, `--bugbot`,
-`--verify`, `--final-audit`. `compile-plan` is the only subcommand — review
+`--compliance`, `--final-audit`. `compile-plan` is the only subcommand — review
 and scan run through `pr_cycle`'s runtime driver, not a second subcommand —
 and it also keeps `role_model_policy` in `bernstein.yaml` synced to
 `model_config`'s resolved models. Chain: `flag > env var > project config >

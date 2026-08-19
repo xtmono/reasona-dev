@@ -24,6 +24,6 @@ dev-models:
   review: claude:opus:high,ocr
   recheck: claude:sonnet:high,ocr
   bugbot: claude:opus:high
-  verify: claude:sonnet:high
+  compliance: claude:sonnet:high
   final_audit: claude:opus:high
   dev_escalation: claude:opus:high

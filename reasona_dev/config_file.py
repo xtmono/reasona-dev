@@ -27,7 +27,7 @@ parses either shape identically to a flag or env var):
       review: claude:opus:high
       recheck: claude:sonnet:high
       bugbot: kilo:deepseek-v4-pro:high
-      verify: claude:sonnet:high
+      compliance: claude:sonnet:high
       final_audit: claude:opus:high
       dev_escalation: claude:opus:high
     plan-models:

@@ -123,7 +123,7 @@ def test_sync_patches_only_changed_providers_and_preserves_comments(tmp_path):
     yaml_path = tmp_path / "bernstein.yaml"
     yaml_path.write_text(_SAMPLE_TEMPLATE)
 
-    resolved = _resolved(dev="claude", review="claude", bugbot="claude", verify="claude")
+    resolved = _resolved(dev="claude", review="claude", bugbot="claude", compliance="claude")
     changed = bernstein_config.sync_role_model_policy(yaml_path, resolved)
 
     assert changed is True
@@ -141,7 +141,7 @@ def test_sync_is_idempotent_when_nothing_differs(tmp_path):
     yaml_path = tmp_path / "bernstein.yaml"
     yaml_path.write_text(_SAMPLE_TEMPLATE)
 
-    resolved = _resolved(dev="claude", review="claude", bugbot="kilo", verify="claude")
+    resolved = _resolved(dev="claude", review="claude", bugbot="kilo", compliance="claude")
     changed = bernstein_config.sync_role_model_policy(yaml_path, resolved)
 
     assert changed is False

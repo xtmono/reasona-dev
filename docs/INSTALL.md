@@ -53,7 +53,7 @@ dev-models:
   review: claude:opus:high
   recheck: claude:sonnet:high
   bugbot: claude:opus:high
-  verify: claude:sonnet:high
+  compliance: claude:sonnet:high
   final_audit: claude:opus:high
   dev_escalation: claude:opus:high
 ```
@@ -67,7 +67,7 @@ not recommended — defaults if absent:
 | `dev` | `claude:sonnet:high` | |
 | `review` | `claude:opus:high` | |
 | `recheck` | `claude:opus:high` | falls back to `review` — loses bounded-recheck savings |
-| `verify` | `claude:sonnet:high` | compliance role |
+| `compliance` | `claude:sonnet:high` | |
 | `bugbot` | `kilo:deepseek-v4-pro:high` | fails without kilo auth |
 | `final_audit` | `claude:opus:high` | |
 | `dev_escalation` | `claude:opus:high` | |
@@ -185,7 +185,7 @@ flag  >  env var  >  <repo>/.reasona/reasona.yaml  >  ~/.reasona/reasona.yaml  >
 | `REASONA_DEV_REVIEW_MODEL` | review |
 | `REASONA_DEV_RECHECK_MODEL` | recheck |
 | `REASONA_DEV_BUGBOT_MODEL` | bugbot |
-| `REASONA_DEV_VERIFY_MODEL` | verify (compliance) |
+| `REASONA_DEV_COMPLIANCE_MODEL` | compliance |
 | `REASONA_DEV_FINAL_AUDIT_MODEL` | final_audit |
 | `REASONA_DEV_DEV_ESCALATION_MODEL` | dev_escalation |
 | `REASONA_DEV_PROFILE` | prompt profile name |

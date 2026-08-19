@@ -1,5 +1,5 @@
 """Drives one PR unit through dev-ralf's actual cycle -- worker.md's
-"Pipeline you run": ``develop -> verify (max 8 cycles) -> bug+compliance
+"Pipeline you run": ``develop -> review (max 8 cycles) -> bug+compliance
 scan (parallel, max 8 cycles)``. `reasona_dev.ship_gate` and
 `reasona_dev.merge_tail` pick up after this returns.
 
@@ -364,10 +364,10 @@ def run_pr_cycle(
     files: list[str] | None = None,
     run_role_fn=run_role,
 ) -> CycleResult:
-    """develop -> verify(review) -> bug+compliance scan, worker.md-faithful.
+    """develop -> review -> bug+compliance scan, worker.md-faithful.
 
     Assumes `dev`'s cycle-0 implementation already happened (this driver
-    picks up at *Verify cycles* -- `plan_compile.py`'s own step covers
+    picks up at *Review cycles* -- `plan_compile.py`'s own step covers
     cycle-0 development, gated by `$CI_FAST`-equivalent `completion_signals`
     the way it already is).
 
@@ -427,7 +427,7 @@ def run_pr_cycle(
     recheck_profile_prompt = resolve_prompt("recheck", profile=profile, workdir=workdir)
 
     try:
-        # --- Verify cycles (review), max 8 -- worker.md -> *Develop & verify* ---
+        # --- Review cycles, max 8 -- worker.md -> *Develop & review* ---
         cycle = 0
         route = "FULL"
         pending_confirm: list = []
@@ -509,11 +509,11 @@ def run_pr_cycle(
             )
             compliance_result = run_role_fn(
                 workdir=workdir, role="compliance", title=f"{pr_title} -- compliance c{cycle}",
-                prompt=compliance_prompt + scope_suffix, model=resolved["verify"], rundir=rundir, cycle=cycle,
+                prompt=compliance_prompt + scope_suffix, model=resolved["compliance"], rundir=rundir, cycle=cycle,
             )
             role_results.extend((bugbot_result, compliance_result))
             _log("scan", cycle, bugbot_result, resolved["bugbot"])
-            _log("scan", cycle, compliance_result, resolved["verify"])
+            _log("scan", cycle, compliance_result, resolved["compliance"])
             merged = merge(bugbot_result.review_result, compliance_result.review_result)
             if cycle > 1:
                 recurrence.record_post_fix(merged.must_fix)

@@ -23,7 +23,7 @@ the real schema in the installed Bernstein 3.15.1 package
 `stages[].steps[]` run IN PARALLEL within a stage; there is no native
 "sequential fix loop" construct at the plan-file level. This confirms the
 architecture decision made in this design track: one PR unit compiles to
-one stage with one "implement" step; the develop -> verify -> fix ->
+one stage with one "implement" step; the develop -> review -> fix ->
 recheck loop is NOT pre-declared here -- it is driven at runtime by
 `reasona_dev.cycle_gate.evaluate()` inside `reasona_dev.pr_cycle`, which
 dispatches follow-up tasks as findings demand.
@@ -348,7 +348,7 @@ def compile_to_bernstein_plan(
 
         bernstein_yaml_path = ensure_bernstein_yaml(workdir)
         # `policy_flags` carries the flag > env var > project cfg > global
-        # cfg chain's TOP layer through to review/recheck/bugbot/verify/
+        # cfg chain's TOP layer through to review/recheck/bugbot/compliance/
         # final_audit -- without this, resolve_all() here would silently
         # skip the flag layer for every role except dev (a real gap found
         # by inspection: this call used to omit `flags=` entirely).

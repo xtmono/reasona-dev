@@ -9,7 +9,7 @@ _RESOLVED = {
     "review": ResolvedModel("review", "opus", "claude", "high", "default"),
     "bugbot": ResolvedModel("bugbot", "deepseek-v4-pro", "kilo", "high", "default"),
     "recheck": ResolvedModel("recheck", "sonnet", "claude", "high", "default"),
-    "verify": ResolvedModel("verify", "sonnet", "claude", "high", "default"),
+    "compliance": ResolvedModel("compliance", "sonnet", "claude", "high", "default"),
     "dev_escalation": ResolvedModel("dev_escalation", "opus", "claude", "high", "default"),
 }
 

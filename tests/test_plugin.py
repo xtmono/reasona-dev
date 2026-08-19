@@ -18,7 +18,7 @@ def _hermetic(tmp_path, monkeypatch):
         "REASONA_DEV_REVIEW_MODEL",
         "REASONA_DEV_RECHECK_MODEL",
         "REASONA_DEV_BUGBOT_MODEL",
-        "REASONA_DEV_VERIFY_MODEL",
+        "REASONA_DEV_COMPLIANCE_MODEL",
         "REASONA_DEV_FINAL_AUDIT_MODEL",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -28,7 +28,7 @@ def _hermetic(tmp_path, monkeypatch):
 def test_expected_models_maps_bernstein_role_to_config_role():
     assert plugin._expected_models("backend") == {"sonnet"}  # dev default
     assert plugin._expected_models("bugbot") == {"deepseek-v4-pro"}
-    assert plugin._expected_models("compliance") == {"sonnet"}  # verify default
+    assert plugin._expected_models("compliance") == {"sonnet"}  # compliance default
 
 
 def test_expected_models_reviewer_accepts_both_review_and_recheck():

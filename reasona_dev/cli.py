@@ -12,7 +12,7 @@ Subcommands:
 
     reasona-dev compile-plan <plan.md> -o plan.yaml [--workdir DIR]
         [--dev MODEL] [--review MODEL] [--recheck MODEL] [--bugbot MODEL]
-        [--verify MODEL] [--final-audit MODEL]
+        [--compliance MODEL] [--final-audit MODEL]
 
 (`render-review`, which rendered a `bernstein review --pipeline` YAML, was
 removed with `review_pipeline.py` -- see docs/ARCHITECTURE.md §3.5.4.
@@ -20,15 +20,15 @@ review/bugbot/compliance dispatch now goes through `reasona_dev.pr_cycle`.)
 
 Every role flag mirrors dev-ralf's own flag names one-to-one
 (dev-ralf-renewal-claude.md §3.7: `--dev`, `--review`, `--recheck`,
-`--bugbot`, `--verify`, `--final-audit`) -- this CLI does not invent new
-flag names.
+`--bugbot`, `--compliance`, `--final-audit`) -- this CLI does not invent
+new flag names.
 
 `compile-plan` accepts every role's flag, not just `--dev`: `--dev` still
 controls the plan step itself (the only thing this subcommand generates),
 but `compile_to_bernstein_plan()` also syncs `<workdir>/bernstein.yaml`'s
 `role_model_policy` as a side effect (`bernstein_config.py`), and that sync
 needs the full flag > env var > project cfg > global cfg chain for
-review/recheck/bugbot/verify/final_audit too -- omitting those flags here
+review/recheck/bugbot/compliance/final_audit too -- omitting those flags here
 used to mean the "flag" layer was silently unreachable for every role
 except dev when syncing role_model_policy.
 """
@@ -41,7 +41,7 @@ from pathlib import Path
 
 from reasona_dev.plan_compile import write_plan_yaml
 
-_ROLE_FLAGS = ("dev", "review", "recheck", "bugbot", "verify", "final_audit")
+_ROLE_FLAGS = ("dev", "review", "recheck", "bugbot", "compliance", "final_audit")
 
 
 def _add_role_flags(parser: argparse.ArgumentParser, roles: tuple[str, ...]) -> None:

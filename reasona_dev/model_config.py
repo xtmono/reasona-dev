@@ -1,8 +1,8 @@
 """Per-role model/adapter/effort resolution with priority chains and recorded provenance.
 
-Ports dev-ralf-renewal-claude.md §3.7 verbatim onto reasona-dev, renaming
-the env vars (`DEV_RALF_*` -> `REASONA_DEV_*`) but keeping the exact same
-priority order and defaults (dev-ralf-renewal-codex.md §7 model topology):
+Ports dev-ralf-renewal-claude.md §3.7 onto reasona-dev, renaming the env
+vars (`DEV_RALF_*` -> `REASONA_DEV_*`) but keeping the exact same priority
+order and defaults (dev-ralf-renewal-codex.md §7 model topology).
 
     flag > env var > project config file > global config file > default
 
@@ -19,9 +19,9 @@ existing `--dev opus`-style flags/config entries are unaffected.
     dev:          --dev         -> REASONA_DEV_DEV_MODEL         -> project cfg -> global cfg -> claude:sonnet:high
     review:       --review      -> REASONA_DEV_REVIEW_MODEL      -> project cfg -> global cfg -> claude:opus:high
     recheck:      --recheck     -> REASONA_DEV_RECHECK_MODEL     -> project cfg -> global cfg -> resolved review spec
-    bugbot:       --bugbot      -> REASONA_DEV_BUGBOT_MODEL      -> project cfg -> global cfg -> [verify slot, same 4 steps] -> kilo:deepseek-v4-pro:high
-    compliance:   --verify      -> REASONA_DEV_VERIFY_MODEL      -> project cfg -> global cfg -> claude:sonnet:high
-    final_audit:  --final-audit -> REASONA_DEV_FINAL_AUDIT_MODEL -> project cfg -> global cfg -> [verify slot, same 4 steps] -> claude:opus:high
+    bugbot:       --bugbot      -> REASONA_DEV_BUGBOT_MODEL      -> project cfg -> global cfg -> [compliance slot, same 4 steps] -> kilo:deepseek-v4-pro:high
+    compliance:   --compliance  -> REASONA_DEV_COMPLIANCE_MODEL  -> project cfg -> global cfg -> claude:sonnet:high
+    final_audit:  --final-audit -> REASONA_DEV_FINAL_AUDIT_MODEL -> project cfg -> global cfg -> [compliance slot, same 4 steps] -> claude:opus:high
     dev_escalation: --dev-escalation -> REASONA_DEV_DEV_ESCALATION_MODEL -> project cfg -> global cfg -> claude:opus:high
 
 This module never applies BERNSTEIN_ROUTING (bandit) logic -- it is the
@@ -55,7 +55,7 @@ _DEFAULTS: dict[str, tuple[str, str, str]] = {
     "dev": ("sonnet", "claude", "high"),
     "review": ("opus", "claude", "high"),
     "bugbot": ("deepseek-v4-pro", "kilo", "high"),
-    "verify": ("sonnet", "claude", "high"),
+    "compliance": ("sonnet", "claude", "high"),
     "final_audit": ("opus", "claude", "high"),
     "dev_escalation": ("opus", "claude", "high"),
 }
@@ -77,7 +77,7 @@ BERNSTEIN_ROLE_TO_PRIMARY_CONFIG_ROLE: dict[str, str] = {
     "backend": "dev",
     "reviewer": "review",
     "bugbot": "bugbot",
-    "compliance": "verify",
+    "compliance": "compliance",
 }
 
 _ENV_VARS: dict[str, str] = {
@@ -85,7 +85,7 @@ _ENV_VARS: dict[str, str] = {
     "review": "REASONA_DEV_REVIEW_MODEL",
     "recheck": "REASONA_DEV_RECHECK_MODEL",
     "bugbot": "REASONA_DEV_BUGBOT_MODEL",
-    "verify": "REASONA_DEV_VERIFY_MODEL",
+    "compliance": "REASONA_DEV_COMPLIANCE_MODEL",
     "final_audit": "REASONA_DEV_FINAL_AUDIT_MODEL",
     "dev_escalation": "REASONA_DEV_DEV_ESCALATION_MODEL",
 }
@@ -174,12 +174,12 @@ def resolve(
     `recheck` falls back onto ("first-pass reviewers" per
     dev-ralf-renewal-claude.md §3.7) -- callers resolve `review` first and
     pass it through. `bugbot`
-    and `final_audit` do NOT take an equivalent `verify_resolved` parameter:
-    per the same spec they fall back only to the `verify` role's OWN env
-    var / config-file slot, never to verify's fully-resolved value (see the
+    and `final_audit` do NOT take an equivalent `compliance_resolved` parameter:
+    per the same spec they fall back only to the `compliance` role's OWN env
+    var / config-file slot, never to compliance's fully-resolved value (see the
     `bugbot`/`final_audit` branch below for why that distinction matters --
     this was a real bug in an earlier draft, see tests/test_model_config.py
-    `test_bugbot_does_not_inherit_verifys_own_default`).
+    `test_bugbot_does_not_inherit_compliances_own_default`).
     """
     env = env if env is not None else dict(os.environ)
     project_cfg = project_cfg if project_cfg is not None else {}
@@ -219,13 +219,13 @@ def resolve(
         return resolve("review", env=env, project_cfg=project_cfg, global_cfg=global_cfg)
 
     if role in ("bugbot", "final_audit"):
-        # dev-ralf-renewal-claude.md §3.7, verbatim: these fall back to the
-        # `verify` role's OWN slot (env var, then config file) -- never to
-        # verify's fully-resolved value. A bare `--verify` flag (with no
-        # VERIFY_MODEL env var or models.verify config entry) does NOT
-        # propagate here, and verify's own DEFAULT does not either. Only
+        # dev-ralf-renewal-claude.md §3.7: these fall back to the
+        # `compliance` role's OWN slot (env var, then config file) -- never to
+        # compliance's fully-resolved value. A bare `--compliance` flag (with no
+        # COMPLIANCE_MODEL env var or models.compliance config entry) does NOT
+        # propagate here, and compliance's own DEFAULT does not either. Only
         # `recheck` inherits a sibling role's fully-resolved outcome
-        # ("first-pass reviewers"); bugbot/final_audit consult verify's raw slot.
+        # ("first-pass reviewers"); bugbot/final_audit consult compliance's raw slot.
         _, fb_adapter, fb_effort = _role_defaults(role)
         env_val = _env(_ENV_VARS[role], env)
         if env_val:
@@ -233,17 +233,17 @@ def resolve(
         cfg_hit = _config(role, project_cfg, global_cfg)
         if cfg_hit:
             return _spec_from(cfg_hit[0], cfg_hit[1], fb_adapter, fb_effort)
-        verify_env = _env(_ENV_VARS["verify"], env)
-        if verify_env:
-            return _spec_from(verify_env, f"env:{_ENV_VARS['verify']} (via verify fallback)", fb_adapter, fb_effort)
-        verify_cfg_hit = _config("verify", project_cfg, global_cfg)
-        if verify_cfg_hit:
-            value, source = verify_cfg_hit
-            return _spec_from(value, f"{source} (via verify fallback)", fb_adapter, fb_effort)
+        compliance_env = _env(_ENV_VARS["compliance"], env)
+        if compliance_env:
+            return _spec_from(compliance_env, f"env:{_ENV_VARS['compliance']} (via compliance fallback)", fb_adapter, fb_effort)
+        compliance_cfg_hit = _config("compliance", project_cfg, global_cfg)
+        if compliance_cfg_hit:
+            value, source = compliance_cfg_hit
+            return _spec_from(value, f"{source} (via compliance fallback)", fb_adapter, fb_effort)
         fb_model, _, _ = _role_defaults(role)
         return ResolvedModel(role=role, model=fb_model, adapter=fb_adapter, effort=fb_effort, source="default")
 
-    # dev / review / verify / dev_escalation: flag -> own env var -> project cfg -> global cfg -> default
+    # dev / review / compliance / dev_escalation: flag -> own env var -> project cfg -> global cfg -> default
     fb_model, fb_adapter, fb_effort = _role_defaults(role)
     env_val = _env(_ENV_VARS[role], env)
     if env_val:
@@ -289,7 +289,7 @@ def resolve_all(
             "recheck", flag=flags.get("recheck"), env=env,
             project_cfg=project_cfg, global_cfg=global_cfg, review_resolved=review,
         ),
-        "verify": resolve("verify", flag=flags.get("verify"), env=env, project_cfg=project_cfg, global_cfg=global_cfg),
+        "compliance": resolve("compliance", flag=flags.get("compliance"), env=env, project_cfg=project_cfg, global_cfg=global_cfg),
         "bugbot": resolve("bugbot", flag=flags.get("bugbot"), env=env, project_cfg=project_cfg, global_cfg=global_cfg),
         "final_audit": resolve(
             "final_audit", flag=flags.get("final_audit"), env=env,

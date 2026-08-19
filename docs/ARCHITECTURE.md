@@ -222,9 +222,9 @@ Each layer's value accepts not just a bare model name but dev-ralf's own
 dev:            --dev            → REASONA_DEV_DEV_MODEL            → project cfg → global cfg → claude:sonnet:high
 review(first pass): --review     → REASONA_DEV_REVIEW_MODEL         → project cfg → global cfg → claude:opus:high
 recheck:        --recheck        → REASONA_DEV_RECHECK_MODEL        → project cfg → global cfg → review's final resolved value
-bugbot:         --bugbot         → REASONA_DEV_BUGBOT_MODEL         → project cfg → global cfg → [verify's slot, same 4 steps] → kilo:deepseek-v4-pro:high
-compliance:     --verify         → REASONA_DEV_VERIFY_MODEL         → project cfg → global cfg → claude:sonnet:high
-final audit:    --final-audit    → REASONA_DEV_FINAL_AUDIT_MODEL    → project cfg → global cfg → [verify's slot, same 4 steps] → claude:opus:high
+bugbot:         --bugbot         → REASONA_DEV_BUGBOT_MODEL         → project cfg → global cfg → [compliance's slot, same 4 steps] → kilo:deepseek-v4-pro:high
+compliance:     --compliance     → REASONA_DEV_COMPLIANCE_MODEL     → project cfg → global cfg → claude:sonnet:high
+final audit:    --final-audit    → REASONA_DEV_FINAL_AUDIT_MODEL    → project cfg → global cfg → [compliance's slot, same 4 steps] → claude:opus:high
 dev_escalation: (no CLI flag)     → REASONA_DEV_DEV_ESCALATION_MODEL → project cfg → global cfg → claude:opus:high
 ```
 
@@ -234,15 +234,16 @@ alive, not at `plan.yaml`/`review.yaml` generation time, so it has no natural sl
 the same as any other role's, but the flag layer is not yet wired into the CLI.
 
 **A real bug was caught while implementing this.** The draft had `bugbot`/`final_audit` fall back
-onto the `verify` role's **fully resolved outcome** (its value), but the original spec says they
-should fall back only onto the `DEV_RALF_VERIFY_MODEL` **environment variable (and config slot)
-itself.** The two are different — if only a `--verify` flag is given with no `VERIFY_MODEL`
-env var/config, the draft let that flag value leak through to bugbot, but the original spec does
-not. Only `recheck` is the exception that inherits review's fully resolved value
+onto the `compliance` role's **fully resolved outcome** (its value), but the original spec says
+they should fall back only onto the `DEV_RALF_COMPLIANCE_MODEL` **environment variable (and config
+slot) itself.** The two are different — if only a `--compliance` flag is given with no
+`COMPLIANCE_MODEL` env var/config, the draft let that flag value leak through to bugbot, but the
+original spec does not. Only `recheck` is the exception that inherits review's fully resolved value
 ("first-pass reviewers") — this asymmetry is intentional and must be implemented precisely
-(`tests/test_model_config.py`'s `test_bugbot_does_not_inherit_verifys_own_default` and
+(`tests/test_model_config.py`'s `test_bugbot_does_not_inherit_compliances_own_default` and
 `tests/test_config_file.py`'s
-`test_bugbot_falls_back_to_verify_config_slot_not_verifys_resolved_value` pin this regression).
+`test_bugbot_falls_back_to_compliance_config_slot_not_compliances_resolved_value` pin this
+regression).
 
 **Guarding against CONDUCTOR-COLLAPSE**: every value `resolve_all()` returns carries not just
 `value` but also `source` (`flag`/`env:<VAR>`/`config:project:<role>`/`config:global:<role>`/
@@ -331,8 +332,8 @@ tests — every unit test in this repository is isolated this way).
 Its priority sits **below env var, above the hardcoded default (or sibling fallback)** — following
 the ordinary CLI-tool convention that a one-shot override (env var) beats a persistent setting
 (config file), and a project cfg beats a global cfg. `bugbot`/`final_audit` keep the same §3.7
-asymmetry at the config layer too — they reference `verify`'s **cfg slot**, not `verify`'s fully
-resolved value.
+asymmetry at the config layer too — they reference `compliance`'s **cfg slot**, not `compliance`'s
+fully resolved value.
 
 Measured: in a temporary repository under `/tmp` unrelated to the reasona-dev source tree,
 `bugbot: kilo-custom-model` was set via `.reasona/reasona.yaml`, and running
@@ -453,7 +454,7 @@ the CREDIT-BURN explanation — are all preserved intact) — extending what
 This sync also has to follow the exact `flag > env var > project cfg > global cfg` chain, and the
 draft had a bug calling `resolve_all(workdir=workdir)` with no `flags=` at all — `dev` was handled
 through a separate path (`resolved_dev`) so its flag was reflected, but `review`/`recheck`/
-`bugbot`/`verify`/`final_audit` had their whole flag layer silently ignored. Fixed by adding a
+`bugbot`/`compliance`/`final_audit` had their whole flag layer silently ignored. Fixed by adding a
 `policy_flags` parameter to `compile_to_bernstein_plan()` and extending the `compile-plan` CLI to
 accept and pass through the full set of role flags, not just `--dev`. Re-measured layer by layer
 using `bugbot` alone, stacking all four levels (global → local config → env var → flag) via the
@@ -520,7 +521,7 @@ and replaced with two modules:
   Per-unit profile resolution for mixed-language repositories is covered in §3.7.10.
 
 - **`reasona_dev/pr_cycle.py`** — a deterministic driver that reproduces `worker.md`'s "Pipeline
-  you run: develop → verify (up to 8 cycles) → bug+compliance scan in parallel (up to 8 cycles)"
+  you run: develop → review (up to 8 cycles) → bug+compliance scan in parallel (up to 8 cycles)"
   verbatim. It was also confirmed that Bernstein itself has no hook that can express this loop
   (already surfaced during the §3.6 CREDIT-BURN investigation: `fire_task_completed` is called
   **synchronously** in the same process as the task server — a re-entrant HTTP call back into that
@@ -658,7 +659,7 @@ role_model_policy:
   backend: {provider: claude}      # dev
   reviewer: {provider: claude}     # review / recheck
   bugbot: {provider: kilo}
-  compliance: {provider: claude}   # verify
+  compliance: {provider: claude}
 ```
 
 Side effect: this declaration also makes Bernstein's task-creation route
@@ -717,7 +718,7 @@ pass silently" half of CREDIT-BURN.
 A zero-base analysis of dev-ralf's 3.5 months of production operation (329,721 lines of Rust,
 292 planned PR units) concluded that the architecture is sound but the quality budget's allocation
 is off. The evidence is a 30% follow-up-correction plan rate and a 27% cumulative deletion rate,
-both observed under a per-PR budget of 8 verify cycles + 8 scan cycles with 5 role types attached —
+both observed under a per-PR budget of 8 review cycles + 8 scan cycles with 5 role types attached —
 meaning the marginal return on adding yet another reviewer was already near zero.
 
 Since reasona-dev inherited this same budget shape (`MAX_REVIEW_CYCLES=8`/`MAX_SCAN_CYCLES=8`/
@@ -1409,7 +1410,7 @@ reasona-dev/
 │   ├── cli.py                the actual `reasona-dev` executable entry point ([project.scripts]) — the only place flags are actually entered
 │   ├── plan_compile.py       plan document → bernstein plan.yaml compiler (dev's cycle-0 step, workdir anchoring)
 │   ├── orchestrate.py        plan-unit execution — dependency order, per-unit profiles, server sharing (§3.7.11)
-│   ├── pr_cycle.py           reproduces worker.md — deterministic develop → verify → bug+compliance scan driver (§3.5.4)
+│   ├── pr_cycle.py           reproduces worker.md — deterministic develop → review → bug+compliance scan driver (§3.5.4)
 │   ├── bernstein_dispatch.py 1-step plan.yaml + `bernstein run` — one synchronous role dispatch (§3.10)
 │   ├── acceptance.py         executable acceptance criteria — runs the manifest's acceptance: deterministically right before merge (§3.7.3)
 │   ├── structure_gate.py     structural judgment — file size, duplication, dependency direction, public-API growth (§3.7.2)

@@ -65,14 +65,15 @@ def test_config_beats_hardcoded_default():
     assert r.model != "sonnet"  # would be the hardcoded default without config
 
 
-def test_bugbot_falls_back_to_verify_config_slot_not_verifys_resolved_value():
-    # Same asymmetry as the env-var chain: bugbot must consult verify's OWN
-    # config slot, never verify's fully-resolved outcome (which could have
-    # come from a --verify flag that must NOT propagate to bugbot).
-    project_cfg = {"dev-models": {"verify": "sonnet-from-config"}}
+def test_bugbot_falls_back_to_compliance_config_slot_not_compliances_resolved_value():
+    # Same asymmetry as the env-var chain: bugbot must consult compliance's
+    # OWN config slot, never compliance's fully-resolved outcome (which
+    # could have come from a --compliance flag that must NOT propagate to
+    # bugbot).
+    project_cfg = {"dev-models": {"compliance": "sonnet-from-config"}}
     r = resolve("bugbot", env={}, project_cfg=project_cfg, global_cfg={})
     assert r.model == "sonnet-from-config"
-    assert "via verify fallback" in r.source
+    assert "via compliance fallback" in r.source
 
 
 def test_recheck_config_slot_beats_review_fallback():

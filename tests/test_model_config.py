@@ -57,33 +57,33 @@ def test_recheck_own_env_var_wins_over_review_fallback():
     assert recheck.model == "sonnet-light"
 
 
-def test_bugbot_falls_back_to_verify_env_var_itself():
-    # dev-ralf-renewal-claude.md §3.7, verbatim: bugbot falls back to the
-    # VERIFY_MODEL ENV VAR, not to verify's own resolved outcome.
-    bugbot = resolve("bugbot", env={"REASONA_DEV_VERIFY_MODEL": "sonnet-strict"})
+def test_bugbot_falls_back_to_compliance_env_var_itself():
+    # dev-ralf-renewal-claude.md §3.7: bugbot falls back to the
+    # COMPLIANCE_MODEL ENV VAR, not to compliance's own resolved outcome.
+    bugbot = resolve("bugbot", env={"REASONA_DEV_COMPLIANCE_MODEL": "sonnet-strict"})
     assert bugbot.model == "sonnet-strict"
-    assert bugbot.source.startswith("env:REASONA_DEV_VERIFY_MODEL")
+    assert bugbot.source.startswith("env:REASONA_DEV_COMPLIANCE_MODEL")
 
 
-def test_bugbot_does_not_inherit_verifys_own_default():
-    # A bare `--verify` flag or verify resolving via ITS OWN default must
-    # NOT propagate to bugbot -- only the VERIFY_MODEL env var does. This
-    # was a real bug in the first draft (bugbot inherited verify's fully
-    # resolved value, including verify's default, via a `verify_resolved`
-    # parameter that has since been removed).
-    verify = resolve("verify", flag="whatever-verify-flag-picked", env={})
-    assert verify.source == "flag"  # verify itself resolved via its flag
-    bugbot = resolve("bugbot", env={})  # no REASONA_DEV_VERIFY_MODEL set
-    assert bugbot.model == "deepseek-v4-pro"  # bugbot's OWN default, not verify's flag value
+def test_bugbot_does_not_inherit_compliances_own_default():
+    # A bare `--compliance` flag or compliance resolving via ITS OWN default
+    # must NOT propagate to bugbot -- only the COMPLIANCE_MODEL env var does.
+    # This was a real bug in the first draft (bugbot inherited compliance's
+    # fully resolved value, including compliance's default, via a
+    # `compliance_resolved` parameter that has since been removed).
+    compliance = resolve("compliance", flag="whatever-compliance-flag-picked", env={})
+    assert compliance.source == "flag"  # compliance itself resolved via its flag
+    bugbot = resolve("bugbot", env={})  # no REASONA_DEV_COMPLIANCE_MODEL set
+    assert bugbot.model == "deepseek-v4-pro"  # bugbot's OWN default, not compliance's flag value
     assert bugbot.adapter == "kilo"
     assert bugbot.source == "default"
 
 
-def test_bugbot_own_env_var_wins_over_verify_env_fallback():
+def test_bugbot_own_env_var_wins_over_compliance_env_fallback():
     bugbot = resolve(
         "bugbot",
         env={
-            "REASONA_DEV_VERIFY_MODEL": "sonnet-strict",
+            "REASONA_DEV_COMPLIANCE_MODEL": "sonnet-strict",
             "REASONA_DEV_BUGBOT_MODEL": "deepseek-v4-pro",
         },
     )
@@ -98,14 +98,14 @@ def test_bugbot_final_default_when_nothing_resolved():
     assert bugbot.source == "default"
 
 
-def test_final_audit_falls_back_to_verify_env_var_not_verifys_default():
-    fa = resolve("final_audit", env={})  # verify unresolved / no env var
+def test_final_audit_falls_back_to_compliance_env_var_not_compliances_default():
+    fa = resolve("final_audit", env={})  # compliance unresolved / no env var
     assert fa.model == "opus"  # final_audit's OWN default
     assert fa.source == "default"
 
-    fa2 = resolve("final_audit", env={"REASONA_DEV_VERIFY_MODEL": "sonnet-v3"})
+    fa2 = resolve("final_audit", env={"REASONA_DEV_COMPLIANCE_MODEL": "sonnet-v3"})
     assert fa2.model == "sonnet-v3"
-    assert fa2.source.startswith("env:REASONA_DEV_VERIFY_MODEL")
+    assert fa2.source.startswith("env:REASONA_DEV_COMPLIANCE_MODEL")
 
 
 def test_dev_escalation_resolves_like_any_other_role():
@@ -122,7 +122,7 @@ def test_dev_escalation_resolves_like_any_other_role():
 
 
 def test_resolve_all_dependency_order_is_correct():
-    resolved = resolve_all(load_config_files=False, env={"REASONA_DEV_VERIFY_MODEL": "sonnet-v2"})
+    resolved = resolve_all(load_config_files=False, env={"REASONA_DEV_COMPLIANCE_MODEL": "sonnet-v2"})
     assert resolved["bugbot"].model == "sonnet-v2"
     assert resolved["final_audit"].model == "sonnet-v2"
     assert resolved["recheck"].model == resolved["review"].model
