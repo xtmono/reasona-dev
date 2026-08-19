@@ -49,6 +49,40 @@ def test_compiles_to_valid_stage_shape():
         assert "completion_signals" not in step
 
 
+def test_only_index_compiles_a_single_stage_plan():
+    """`reasona_dev.orchestrate` dispatches each unit's cycle-0 separately,
+    into that unit's own worktree -- `only_index` produces the single-stage
+    plan.yaml that dispatch needs."""
+    plan = compile_to_bernstein_plan(
+        PLAN, plan_name="sample", description="test plan", only_index="2",
+        write_audit_trail=False, write_bernstein_yaml=False,
+    )
+    assert len(plan["stages"]) == 1
+    assert plan["stages"][0]["name"] == "pr-2"
+
+
+def test_only_index_drops_depends_on_even_when_the_unit_declares_one():
+    """PR 2 depends on PR 1, but PR 1's stage is not in this plan.yaml at
+    all -- a `depends_on` referencing it would be unresolvable. Ordering is
+    enforced one level up, by `orchestrate.py` running units sequentially."""
+    plan = compile_to_bernstein_plan(
+        PLAN, plan_name="sample", description="test plan", only_index="2",
+        write_audit_trail=False, write_bernstein_yaml=False,
+    )
+    assert "depends_on" not in plan["stages"][0]
+
+
+def test_only_index_matching_nothing_raises():
+    import pytest
+    from reasona_dev.plan_compile import PlanError
+
+    with pytest.raises(PlanError, match="only_index"):
+        compile_to_bernstein_plan(
+            PLAN, plan_name="sample", description="test plan", only_index="99",
+            write_audit_trail=False, write_bernstein_yaml=False,
+        )
+
+
 def test_dev_model_defaults_to_resolved_sonnet():
     from reasona_dev.model_config import ResolvedModel
 

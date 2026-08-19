@@ -161,9 +161,9 @@ into every agent worktree and fails Bernstein's isolation check.
 | `bernstein.yaml` entry in `.gitignore` | `compile-plan` | added if missing |
 | `<repo>/.reasona/acceptance-<stage>.json` | `compile-plan` | the manifest's `acceptance:` |
 | `<repo>/.reasona/model_config.json` | `compile-plan` | audit trail |
-| `<repo>/.reasona/log/<plan>/plan.yaml` | `run-plan` (unless `--skip-dev`) | cycle-0's compiled plan, recompiled every run |
-| `<repo>/.reasona/log/<plan>/ledger-plan.json` | `run-plan` | has cycle-0 for this plan been dispatched |
-| `<repo>/.reasona/log/<plan>/<stage>/ledger.json` | `run-plan` | this PR unit's review/scan progress, terminal outcome, and PR-url hint (resume state) |
+| `<repo>/.worktrees/<plan>/<stage>/` | `run-plan` | this PR unit's own git worktree (dev-0 through squash-merge/cleanup) |
+| `<repo>/.reasona/log/<plan>/<stage>/plan.yaml` | `run-plan` (unless `--skip-dev`) | this unit's compiled single-stage cycle-0 plan, recompiled every dispatch |
+| `<repo>/.reasona/log/<plan>/<stage>/ledger.json` | `run-plan` | this PR unit's dev-dispatched flag, review/scan progress, terminal outcome, and PR-url/issue-number hints (resume state) |
 | `<repo>/.reasona/log/<plan>/<stage>/*.raw.txt` | `run-plan` | raw per-role output |
 | `<repo>/.reasona/cycles.jsonl` | `run-plan` | instrumentation |
 | `<repo>/.reasona/memory/*.md` | `run-plan` | generated from `cycles.jsonl` |
@@ -201,8 +201,9 @@ cat <repo>/.reasona/model_config.json     # 4. resolved model config
 
 ## 8. Running
 
-`run-plan` compiles the plan and dispatches cycle-0 (`bernstein run
---auto-approve`, no reasona-dev gate runs on this step) itself, then
+`run-plan` drives every PR unit through its own dedicated git worktree
+(`<repo>/.worktrees/<plan>/<stage>/`), in dependency order: cycle-0
+(`bernstein run --auto-approve`, no reasona-dev gate runs on this step) ->
 review -> scan -> ship_gate. It stops there by default.
 
 ```bash
@@ -212,15 +213,25 @@ reasona-dev run-plan docs/plans/<plan>.md --workdir <repo>
 **PR creation and merge are opt-in**, not automatic:
 
 ```bash
-reasona-dev run-plan docs/plans/<plan>.md --workdir <repo> --ship   # + opens a PR
+reasona-dev run-plan docs/plans/<plan>.md --workdir <repo> --ship   # + opens a PR, watches CI/bots
 reasona-dev run-plan docs/plans/<plan>.md --workdir <repo> --merge  # + squash-merges it
 ```
 
-They default to off on purpose. `final_phase.create_pr()` is a narrow,
-incomplete reimplementation of dev-ralf's `/gh-pr` -- no issue creation, no
-PR body validation, no repair loop -- and `/gh-review` has no equivalent
-here at all (docs/ARCHITECTURE.md §3.9). Read the PR yourself before
-passing `--merge`.
+They default to off on purpose: opening a real PR and squash-merging it are
+outward-facing, hard-to-undo actions on the target repo's real GitHub
+state. `--ship` runs `gh_pr.py` (issue creation, structural title/body
+validation and repair) then `gh_review.py` (CI/compliance/bugbot watching
+with an auto-fix loop) -- ports of dev-ralf's `/gh-pr`/`/gh-review`, see
+docs/ARCHITECTURE.md §3.12/§3.13. `--gh-review-max-wait SECONDS` (default
+900, matching `/gh-review`'s own default) bounds how long the gh-review
+watch loop waits on GitHub's own CI/workflow runs per unit.
+
+**A plan's own `acceptance:` criteria are the only build/test gate
+anywhere in this pipeline** (docs/ARCHITECTURE.md §3.7.3) -- unlike
+dev-ralf's unconditional `make ci`/`cargo test` step, reasona-dev runs
+nothing if the plan declares nothing. Every PR unit whose `files:` touch
+source should declare an acceptance criterion running this repo's own
+build/test command to get equivalent behavior.
 
 **Resume an interrupted run** (network failure, killed process) by running
 the exact same command again:
@@ -229,27 +240,32 @@ the exact same command again:
 reasona-dev run-plan docs/plans/<plan>.md --workdir <repo>
 ```
 
-A progress ledger under `.reasona/log/<plan>/` (see `reasona_dev/ledger.py`)
-records whether cycle-0 has already been dispatched, and for each PR unit
-both its terminal outcome and its in-progress review/scan checkpoint
-(cycle number, phase, `FixBudget`/`RecurrenceTracker` state, pending
-findings). `run-plan` checks it automatically: cycle-0 is skipped if the
-ledger says it already ran, a unit already marked shipped is reused as-is
-instead of re-dispatched, and a unit interrupted mid-review/scan resumes
-from its last checkpointed cycle rather than restarting from cycle 1. No
-flags are needed for a plain retry.
+A progress ledger under `.reasona/log/<plan>/<stage>/` (see
+`reasona_dev/ledger.py`) records, per PR unit, whether its own cycle-0 has
+already been dispatched (into that unit's own worktree, reused as-is on
+resume rather than recreated), its terminal outcome, and its in-progress
+review/scan checkpoint (cycle number, phase, `FixBudget`/
+`RecurrenceTracker` state, pending findings). `run-plan` checks it
+automatically: a unit's cycle-0 is skipped if its own ledger says it
+already ran, a unit already marked shipped is reused as-is instead of
+re-dispatched, and a unit interrupted mid-review/scan resumes from its
+last checkpointed cycle rather than restarting from cycle 1. No flags are
+needed for a plain retry.
 
-`create_pr()` still asks `gh pr view` first on every resume; the ledger's
-recorded PR URL is consulted only as a fallback when that live check finds
-nothing (e.g. the push succeeded but the process died before the URL was
-read back). `sync_main()` uses no ledger at all -- git's own merge is
-already idempotent, so re-running it is always safe on its own.
+`create_pr()` still asks `gh pr view` first on every resume (and `gh_pr.py`
+applies the same pattern to the GitHub issue it creates); the ledger's
+recorded PR url/issue number is consulted only as a fallback when that
+live check finds nothing (e.g. the push succeeded but the process died
+before the URL was read back). `sync_main()` uses no ledger at all -- git's
+own merge is already idempotent, so re-running it is always safe on its
+own.
 
 `--from-pr <index>` / `--skip-dev` manually override this when the ledger
-itself is unavailable or wrong -- they drop units / skip cycle-0
-regardless of what's recorded, trusting the caller instead of the ledger.
-`--restart` clears the ledger and reruns the whole plan from scratch; use
-it only when the plan document itself changed, not for a plain retry.
+itself is unavailable or wrong -- they drop units / skip cycle-0 dispatch
+(the worktree is still created either way) regardless of what's recorded,
+trusting the caller instead of the ledger. `--restart` clears every unit's
+ledger and reruns the whole plan from scratch; use it only when the plan
+document itself changed, not for a plain retry.
 
 To compile and inspect `plan.yaml` without dispatching anything,
 `compile-plan` (§7) still works standalone.

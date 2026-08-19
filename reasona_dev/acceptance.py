@@ -66,6 +66,19 @@ never "was the right thing stated".
 **Partial credit does not exist.** One failing criterion fails the unit.
 A gate that reports "7 of 9 passed" invites the same judgment call it was
 built to remove.
+
+**This is opt-in per plan unit, unlike dev-ralf's `make ci`/`cargo test`
+gate, which runs unconditionally for any source-touching change.** A unit
+that declares no `acceptance:` at all passes this axis WITH A WARNING, not
+a failure (`ship_gate._acceptance_outcome()`) -- so a plan that never
+writes an `acceptance:` block gets zero build/test verification anywhere
+in reasona-dev's pipeline, silently. Every PR unit whose `files:` touch
+source should declare at least one criterion running this repo's own
+build/test entry point (`cargo test`, `make ci`, `pytest`, ...) to get
+behavior equivalent to dev-ralf's unconditional gate -- see
+docs/ARCHITECTURE.md §3.7.3 for the fuller argument. This is a requirement
+on the plan document itself; reasona-dev has no plan-generation step of
+its own to enforce it at.
 """
 
 from __future__ import annotations

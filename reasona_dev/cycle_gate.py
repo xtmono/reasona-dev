@@ -49,6 +49,15 @@ MAX_SHIP_CYCLES = 3
 # is not something retrying indefinitely would fix.
 MAX_FINAL_PHASE_ROUNDS = 3
 
+# `/gh-review`'s own default `--max-cycle` (`~/repository/tas-dev-plugins/
+# plugins/dev/skills/gh-review/SKILL.md` §1). Bounds `reasona_dev.gh_review`'s
+# CI/compliance/bugbot auto-fix loop, pooled into the same
+# `MAX_TOTAL_FIX_CYCLES` every other stage shares
+# (`min(MAX_GH_REVIEW_CYCLES, MAX_TOTAL_FIX_CYCLES - budget.total_used)`,
+# mirroring dev-ralf's own pooling rule for this exact stage). Exhausting it
+# is `blocked`, not `failed` -- same reasoning as `MAX_SHIP_CYCLES` above.
+MAX_GH_REVIEW_CYCLES = 3
+
 # New rule agreed in this design track: a MUST_FIX key surviving one
 # completed fix earns exactly one bounded escalation of the dev role to a
 # stronger model before the PR is declared FAIL. This is NOT the same
@@ -83,6 +92,7 @@ class FixBudget:
     final_cycles: int = 0
     sync_cycles: int = 0
     ship_cycles: int = 0
+    gh_review_cycles: int = 0
     total_used: int = 0
 
     def can_spend(self, stage: str) -> bool:
@@ -92,11 +102,12 @@ class FixBudget:
             "final": MAX_FINAL_CYCLES,
             "sync": MAX_SYNC_CYCLES,
             "ship": MAX_SHIP_CYCLES,
+            "gh_review": MAX_GH_REVIEW_CYCLES,
         }[stage]
         used = {
             "review": self.review_cycles, "scan": self.scan_cycles,
             "final": self.final_cycles, "sync": self.sync_cycles,
-            "ship": self.ship_cycles,
+            "ship": self.ship_cycles, "gh_review": self.gh_review_cycles,
         }[stage]
         return used < cap and self.total_used < MAX_TOTAL_FIX_CYCLES
 
@@ -111,6 +122,8 @@ class FixBudget:
             self.sync_cycles += 1
         elif stage == "ship":
             self.ship_cycles += 1
+        elif stage == "gh_review":
+            self.gh_review_cycles += 1
         self.total_used += 1
 
     # JSON roundtrip -- the ledger (reasona_dev.ledger) checkpoints this
@@ -122,6 +135,7 @@ class FixBudget:
         return {
             "review_cycles": self.review_cycles, "scan_cycles": self.scan_cycles,
             "final_cycles": self.final_cycles, "sync_cycles": self.sync_cycles,
+            "ship_cycles": self.ship_cycles, "gh_review_cycles": self.gh_review_cycles,
             "total_used": self.total_used,
         }
 
@@ -130,6 +144,7 @@ class FixBudget:
         return cls(
             review_cycles=d.get("review_cycles", 0), scan_cycles=d.get("scan_cycles", 0),
             final_cycles=d.get("final_cycles", 0), sync_cycles=d.get("sync_cycles", 0),
+            ship_cycles=d.get("ship_cycles", 0), gh_review_cycles=d.get("gh_review_cycles", 0),
             total_used=d.get("total_used", 0),
         )
 

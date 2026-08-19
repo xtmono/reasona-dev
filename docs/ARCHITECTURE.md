@@ -840,6 +840,33 @@ was built to remove.
 deterministically approves a bad state. That layer belongs to plan authoring and its multi-reviewer
 convergence. Blurring that boundary turns AC back into prose.
 
+**Unlike dev-ralf's `make ci`/language-specific build+test gate, `acceptance:` is opt-in per plan
+unit, not unconditional.** dev-ralf's `/gh-pr` §4 runs `make ci` (or `cargo test`, or the
+repo-appropriate equivalent) automatically for any source-touching change, with no way for a plan
+author to omit it. reasona-dev has no such automatic step anywhere in its pipeline — not in
+cycle-0, not in review/scan, not in `gh_pr.py` (deliberately not ported, §3.12: re-running a
+build/test gate there would duplicate what `acceptance:` already covers, IF the plan declared it),
+not in `gh_review.py` (which only watches the target repo's own external CI, §3.13). `ship_gate`'s
+own acceptance axis passes WITH A WARNING, not a failure, when a unit declares no criteria at all
+(`ship_gate._acceptance_outcome()`) — so a plan that never writes an `acceptance:` block gets zero
+build/test verification anywhere in this pipeline, silently.
+
+**Consequence: plan authors must declare a build/test acceptance criterion for every source-touching
+PR unit to get behavior equivalent to dev-ralf's unconditional gate.** This is a requirement on the
+plan document itself, written by whoever authors it — reasona-dev has no plan-generation step of
+its own to enforce this at (plans are consumed as already-written input, from a human or from the
+separate `reasona-plan`/`plan-ralf`-successor repo; see `README.md`'s own note on that boundary).
+Concretely, every PR unit whose `files:` touch source should include something in the shape:
+
+    acceptance:
+      - id: AC-<index>-1
+        cmd: "cargo test -p mycrate"        # or `make ci`, `pytest`, etc. -- whatever this repo's own build/test entry point is
+        expect: exit0
+
+Omitting it is not an error reasona-dev currently surfaces loudly (a warning, not a block) --
+readers of a plan should treat a source-touching unit with no `acceptance:` block as under-specified
+relative to what dev-ralf would have guaranteed for the same change.
+
 ### 3.7.4 The manifest parser and the plan-size cap
 
 `parse_plan_units()` had only its prose-fallback path implemented, even though plan-format
@@ -1062,11 +1089,17 @@ per-unit profile computation had no caller, and executing a plan meant an operat
 three modules by hand per unit, hand-deriving the arguments each time — one layer up from the
 "available but must be remembered" state `ship_gate` removed.
 
-**The dev stage is not here.** `plan_compile` generates a Bernstein plan.yaml containing each
-unit's cycle-0 implementation step, and Bernstein's own scheduler executes that DAG. This module
-takes over from the point `pr_cycle` explicitly names as its own entry point — once an
-implementation already exists. Owning the dev stage here would mean reimplementing a DAG scheduler
-that already works, exactly the opposite of this project's premise.
+**The dev stage IS here now, per unit — this reverses an earlier design decision.** An earlier
+version of this section said the opposite ("the dev stage is not here... owning it here would mean
+reimplementing a DAG scheduler"), when `cli.py` compiled every unit's cycle-0 into one multi-stage
+Bernstein plan.yaml and dispatched it as a single `bernstein run`, entirely before this module ran.
+That turned out to be the wrong call: Bernstein's own merge-back landed every unit's commits on the
+SAME shared `workdir` checkout before any unit could have its own isolated branch, which is exactly
+backwards for opening a per-unit PR (§3.11 has the full account). Fixed by moving cycle-0 dispatch
+in here, per unit, into that unit's own fresh worktree, immediately before that unit's own
+review/scan — no DAG scheduler is being reimplemented, since this module's own sequential loop
+(already enforcing `depends_on` via `_blocking_dependency`) is sufficient once cycle-0 no longer
+needs Bernstein's stage-DAG to sequence units at all.
 
 **On a dependency failure, downstream units are skipped, not attempted.** Since the precondition is
 an unmerged contract, a review of that unit would target a shape that does not exist, and any
@@ -1516,50 +1549,96 @@ substrate, not an orchestrator** (spawning, worktrees, merge-back, supervision, 
 trying to use it as the latter is what produced the missing hooks, the static DAG, and the signal-
 visibility problems.
 
-## 3.11 `run-plan` dispatches cycle-0 itself
+## 3.11 `run-plan` drives every unit through its own worktree, cycle-0 included
 
 The CLI used to require two separate manual commands to run a plan: `compile-plan` (write
 `plan.yaml`), then a raw `bernstein run plan.yaml --auto-approve` typed by hand, then `run-plan`
-(review → scan → ship). This split had a real cost: an operator typing `bernstein run` directly
-against a real target repo, with no reasona-dev gate wrapping that step, is the exact shape of an
-incident where the step merged straight to the target's remote `main` with nothing reviewing it
-first — not because `bernstein run` is the wrong step to run, but because it was a manual,
-easy-to-get-wrong entry into a pipeline the rest of which is otherwise fully driven by one command.
+(review → scan → ship). An earlier fix collapsed that into one command by having `cli.py` compile
+**the whole plan** into one multi-stage `plan.yaml` (one stage per PR unit, wired with `depends_on`)
+and dispatch it as a single `bernstein run`, entirely before `orchestrate.run_plan()` ever started.
 
-**Fix: `reasona-dev run-plan` now compiles the plan and dispatches cycle-0 itself**, before handing
-off to `orchestrate.run_plan()` exactly as before. Concretely, `cli._cmd_run_plan()` calls
-`plan_compile.write_plan_yaml()` (writing `<workdir>/.reasona/log/<plan_name>/plan.yaml`, the same call
-`compile-plan` makes) and then `bernstein_dispatch.run_plan_file()` (the same `bernstein run
-<plan> --auto-approve` call `pr_cycle.py` already uses for every other role dispatch) — reusing the
-existing dispatch path rather than adding a new one. A non-zero exit from that dispatch aborts
-before `orchestrate.run_plan()` is ever called, so a broken cycle-0 never reaches review.
+**That fix was itself wrong, discovered while porting gh-pr/gh-review (§3.12/§3.13).** Bernstein's
+own merge-back lands each stage's work on `workdir`'s single checked-out branch, sequentially, in
+dependency order. By the time unit 2's review started, unit 1's (and unit 3's) commits were already
+mixed into that one branch's history — there was no way to open a unit-scoped PR, or even reason
+about "this branch belongs to this unit," without commit surgery. The batching that made one
+`bernstein run` call convenient is exactly what made per-unit isolation structurally impossible.
 
-This does **not** contradict §3.7.11's "owning the dev step here would mean re-implementing a DAG
-scheduler" -- that concern was about `orchestrate.py` (which orders/reviews units) re-deriving
-Bernstein's own stage-DAG execution logic itself. Calling `bernstein run` as a subprocess is not
-that; it is the same one-line invocation an operator used to type, now issued by the CLI layer
-instead. `orchestrate.py`'s own module docstring ("the dev step is not here") stays true of that
-module; the dispatch now happens one layer up, in `cli.py`, immediately before `orchestrate.run_plan()`
-is called.
+**Fix: cycle-0 moved into `orchestrate.py`'s own per-unit loop, and every unit gets its own git
+worktree before cycle-0 ever runs** (`reasona_dev/worktree.py`, §3.11.1). `cli._cmd_run_plan()` no
+longer compiles or dispatches anything itself — it only threads flags through to
+`orchestrate.run_plan()`. For each unit, in dependency order, `run_plan()` now:
 
-**The default stops at the review/scan `ship_gate` verdict -- no PR, no merge.** `--ship`/`--merge`
-opt IN to the merge tail and are not on by default, unlike cycle-0 (which now runs unconditionally
-unless `--skip-dev`/the ledger says otherwise). The asymmetry is deliberate: `final_phase.create_pr()`
-(§3.9) is a narrow, hand-rolled subset of dev-ralf's `/gh-pr` -- no issue creation, no PR body
-structural validation, no title/body repair loop -- and `/gh-review` has no reasona-dev equivalent
-whatsoever. Running review/scan unattended is safe because `ship_gate` only produces a verdict;
-running `create_pr()`/`squash_merge()` unattended by default would mean the least-verified part of
-this project's own pipeline is the one touching the target repo's real GitHub state. `compile-plan`
-remains a standalone subcommand for inspecting a compiled `plan.yaml` without dispatching anything,
-but is no longer a required manual step before `run-plan`.
+1. `worktree.ensure_unit_worktree()` — create (or, on resume, reuse) this unit's own worktree,
+   branched from `base`.
+2. `dispatch_unit_cycle0()` — compile a **single-stage** plan.yaml for just this unit
+   (`plan_compile.compile_to_bernstein_plan(..., only_index=...)`, §3.11.2) and dispatch it into
+   that worktree. Skipped if the unit's own ledger already says cycle-0 ran (or `--skip-dev`).
+3. `pr_cycle.run_pr_cycle()` — review/scan, now against the worktree, not the shared `workdir`.
+4. (`--ship` only) `final_phase.run_final_stage()` — sync/final_audit/ship_gate, then gh-pr
+   (§3.12), gh-review (§3.13), squash-merge — same worktree throughout.
+5. On an actual `MERGED` outcome, `worktree.remove_unit_worktree()` cleans it up. A failed/blocked
+   unit's worktree is left in place deliberately, as evidence for the operator to inspect.
 
-### 3.11.1 Resuming after an interruption -- `reasona_dev/ledger.py`
+Dependency ordering no longer needs to be expressed as a Bernstein DAG at all — `orchestrate.py`'s
+own sequential loop (already enforcing `depends_on` via `_blocking_dependency`) is sufficient once
+cycle-0 is dispatched per unit instead of all at once; `plan_compile.compile_to_bernstein_plan()`'s
+`only_index` filter drops `depends_on` from the compiled stage for exactly this reason (referencing
+a dependency's stage would be unresolvable — that stage is not in a single-unit plan.yaml at all).
+
+**The default still stops at the review/scan `ship_gate` verdict -- no PR, no merge.** `--ship`
+opts IN to the final stage (sync/final_audit/ship_gate/gh-pr/gh-review, stops at an open PR);
+`--merge` opts IN further to squash-merging it. Both default to off, unlike cycle-0 (which now runs
+unconditionally per unit unless `--skip-dev`/that unit's own ledger says otherwise): opening a real
+PR and squash-merging it are outward-facing, hard-to-undo actions on the target repo's real GitHub
+state, not something to run unattended by default. `compile-plan` remains a standalone subcommand
+for inspecting a compiled `plan.yaml` without dispatching anything.
+
+### 3.11.1 Per-unit worktrees -- `reasona_dev/worktree.py`
+
+`ensure_unit_worktree(workdir, plan_name, stage_name, base=...)` runs `git worktree add -b <branch>
+<path> <base>` at `<workdir>/.worktrees/<plan_name>/<stage_name>/`, and returns that path unchanged
+on a second call if the directory already exists (a resumed run reuses whatever cycle-0/review/fix
+work already landed there, rather than recreating and losing it). `remove_unit_worktree()` is
+best-effort cleanup (`git worktree remove --force` + delete whatever branch the worktree is
+CURRENTLY on — not necessarily its original name, see below — never raising on a worktree that was
+never created).
+
+**The branch is named by the PR unit, not by an eventual GitHub issue.** dev-ralf's own `/gh-pr`
+creates `issue/<N>-<slug>` because it can be invoked standalone, against whatever a human already
+has checked out — it has no choice but to mint its own branch from scratch at that point.
+reasona-dev's gh-pr port is never invoked standalone: by the time it runs, this unit's worktree has
+already existed since before cycle-0, and there is no issue number yet at worktree-creation time (the
+issue is a gh-pr-stage artifact, §3.12). So the worktree/branch starts out named
+`reasona/<plan_name>/<stage_name>`, and `gh_pr.rename_branch_for_pr()` renames it in place
+(`git branch -m`) once the issue exists — always the "on a feature/temp branch" path `/gh-pr` itself
+documents, never `checkout -b` (the worktree's branch can never literally be `base`).
+
+**`.reasona/log/<plan_name>/<stage_name>/` (the ledger/raw-output layout, §3.11.3) is unaffected by
+any of this** — only the actual git checkout moved to a per-unit worktree; logs and the ledger stay
+anchored to the top-level `workdir` exactly as before, so they remain readable/browsable after a
+unit's worktree is cleaned up.
+
+### 3.11.2 Compiling one unit's cycle-0 -- `plan_compile.compile_to_bernstein_plan(only_index=...)`
+
+`only_index`, when given, filters the parsed plan down to exactly one PR unit's stage before
+building `stages: [...]`, and — since a single-stage plan.yaml has nothing else in it for a
+`depends_on` to reference — drops that unit's `depends_on` entirely, on the documented assumption
+that the caller (`orchestrate.py`) already enforces the order. Every other side effect of this
+function (the acceptance file, the audit trail, the `bernstein.yaml` bootstrap/sync via
+`bernstein_config.ensure_bernstein_yaml()`) still runs exactly as before, just anchored at
+`workdir=<this unit's worktree>` instead of the top-level repo — which is also how a fresh
+worktree, which never inherits a target repo's gitignored `bernstein.yaml` through a plain `git
+worktree add` checkout, ends up with one anyway: `dispatch_unit_cycle0()` calling this function
+with the worktree as `workdir` is what (re-)bootstraps it there.
+
+### 3.11.3 Resuming after an interruption -- `reasona_dev/ledger.py`
 
 A single command that runs a whole plan through squash-merge is also a single command that can be
 killed partway through by exactly the same class of failure the split-command design was trying to
 avoid in the first place -- a network drop, a killed process. Re-running the same `run-plan`
-command needs to pick up where it left off, not redo units that already shipped or re-dispatch
-cycle-0 against code that already exists.
+command needs to pick up where it left off, not redo units that already shipped, re-create a
+worktree that already exists, or re-dispatch cycle-0 against code that already exists.
 
 **Layout: `<workdir>/.reasona/log/<plan_name>/<stage_name>/`, namespaced by plan first, then PR
 unit** -- not a flat `<workdir>/.reasona/`. Two plans that both exist under the same workdir (or two
@@ -1568,40 +1647,147 @@ different plans that both happen to name a unit `pr-1`, the common case since
 `plan.yaml`; the flat layout silently collided on both before this. `reasona_dev/ledger.py` is the
 single module owning this layout:
 
-    <workdir>/.reasona/log/<plan_name>/plan.yaml                the compiled cycle-0 plan
-    <workdir>/.reasona/log/<plan_name>/ledger-plan.json          one flag -- has cycle-0 been dispatched
-    <workdir>/.reasona/log/<plan_name>/<stage_name>/ledger.json  this unit's progress + terminal outcome + PR-url hint
+    <workdir>/.reasona/log/<plan_name>/<stage_name>/plan.yaml     this unit's compiled cycle-0 plan
+    <workdir>/.reasona/log/<plan_name>/<stage_name>/ledger.json   dev-dispatched flag + progress + terminal outcome + PR-url/issue-number hints
     <workdir>/.reasona/log/<plan_name>/<stage_name>/<role>-c<cycle>.raw.txt  raw per-role output, same as before
 
-**Per-unit progress is now checkpointed inside the review/scan loop itself, not only at the unit's
-terminal outcome.** An earlier version of this section recorded, as a known gap, that
-`pr_cycle.run_pr_cycle()`'s loop had no persisted cycle-N state and a unit interrupted mid-loop
-would restart its review from cycle 1. That gap is now closed: `run_pr_cycle()` takes `plan_name`
-and `resume`, and after every cycle (including an `inconclusive_retry`) it snapshots `FixBudget`,
-`RecurrenceTracker`, `ConvergenceTracker`, the pending `must_fix` findings, and the current
-phase/cycle/route via `ledger.save_progress()` -- all four gained `to_dict()`/`from_dict()` for
-exactly this. A resumed run reloads that snapshot and continues from the same cycle with the same
-budget already spent, instead of re-entering at zero. `ledger.mark_unit_terminal()` clears the
-progress snapshot once a unit reaches `shipped`/`failed` -- nothing is left to resume past that
-point.
+**Cycle-0 dispatch is tracked per unit, not once for the whole plan.** `dev_already_dispatched()`/
+`mark_dev_dispatched()` used to be keyed by `plan_name` alone (one flag covering every unit, from
+when cycle-0 was one batched dispatch); now that cycle-0 is dispatched per unit (§3.11), both take
+`(plan_name, stage_name)` and live in that unit's own `ledger.json`, alongside its terminal outcome
+-- there is no more plan-wide `ledger-plan.json`.
+
+**Per-unit progress is checkpointed inside the review/scan loop itself, not only at the unit's
+terminal outcome.** `pr_cycle.run_pr_cycle()` takes `plan_name` and `resume`, and after every cycle
+(including an `inconclusive_retry`) it snapshots `FixBudget`, `RecurrenceTracker`,
+`ConvergenceTracker`, the pending `must_fix` findings, and the current phase/cycle/route via
+`ledger.save_progress()` -- all three trackers gained `to_dict()`/`from_dict()` for exactly this. A
+resumed run reloads that snapshot and continues from the same cycle with the same budget already
+spent, instead of re-entering at zero. `ledger.mark_unit_terminal()` clears the progress snapshot
+once a unit reaches `shipped`/`failed`/`blocked` -- nothing is left to resume past that point.
 
 **`create_pr()` and `sync_main()` still ask gh/git first -- the ledger is a fallback, never a
 replacement.** `create_pr()` calls `existing_pr_url()` (`gh pr view`) exactly as before; only when
 that live check finds nothing does it fall back to `ledger.known_pr_url()`, a PR URL this same unit
 recorded on an earlier, interrupted run (`git push` can succeed and the process still die before the
 URL is read back, which is exactly the case the live check alone cannot recover from). A successful
-`create_pr()` records the URL via `ledger.mark_pr_created()` for the next run's fallback.
+`create_pr()` records the URL via `ledger.mark_pr_created()` for the next run's fallback; `gh_pr.py`
+applies the identical pattern to the GitHub issue it creates (`known_issue_number()`/
+`mark_issue_created()` -- never a second throwaway issue for the same unit on resume).
 `sync_main()` gained no ledger integration at all -- git's own merge is already fully idempotent
 (re-running `git merge origin/main` on an already-merged tree is a no-op), so a ledger check there
-would duplicate what `git status` already answers for free, exactly the reasoning §3.11.1 already
-applied to the rest of `final_phase.py`'s re-entrant substeps.
+would duplicate what `git status` already answers for free.
 
 **Manual overrides exist for when the ledger itself is wrong or unavailable.** `from_pr` drops every
 unit ordered before the named one from the run regardless of ledger state (`run_plan(resume=...)`'s
 own check is skipped for those units by construction -- they are never in the unit list to begin
-with). `--skip-dev` force-skips cycle-0 regardless of the ledger. `--restart`
-(`ledger.clear()`) wipes both files and reruns everything fresh -- the right tool when the plan
-document itself changed since the last run, not for a plain retry.
+with). `--skip-dev` force-skips cycle-0 dispatch for every unit regardless of the ledger (the
+worktree is still created either way -- `--skip-dev` exists for "cycle-0 already ran/was set up by
+hand," not "skip the worktree too"). `--restart` (`ledger.clear()`) wipes every unit's ledger and
+reruns everything fresh -- the right tool when the plan document itself changed since the last run,
+not for a plain retry.
+
+## 3.12 Porting `/gh-pr` -- `reasona_dev/gh_pr.py`
+
+Read in full from `~/repository/tas-dev-plugins/plugins/dev/skills/gh-pr/SKILL.md` before porting.
+Runs inside `final_phase.run_final_stage()`, right after `run_final_phase()`'s sync/audit/ship_gate
+round loop settles (§3.9.4) — in place of what used to be a direct `create_pr()` call.
+
+**Not ported: §4's `make ci`/`make lint-md` re-validation gate — and this is a real gap, not a
+clean substitution.** The original skill runs this UNCONDITIONALLY for any source-touching change.
+reasona-dev's nearest equivalent, `ship_gate`'s acceptance axis, only runs commands the PLAN
+ITSELF declared via `acceptance:` (§3.7.3) — a plan that declares nothing gets a passing-with-warning
+verdict, not a failure, and no build/test command runs anywhere in this pipeline for that unit. So
+this module does not duplicate a check reasona-dev is GUARANTEED to have already made; it relies on
+the plan having declared one. See §3.7.3's own note on this gap and the requirement it places on
+plan authors.
+
+**Branch handling is the one deliberate divergence, and it follows from §3.11.1.** `/gh-pr` §6
+creates its own branch because it can be invoked standalone against whatever a human already has
+checked out (`checkout -b` on base, or `branch -m` on a feature branch). This module is never
+invoked standalone — the unit already has its own dedicated worktree, on a unit-named branch, since
+before cycle-0 even started — so it always takes the "rename in place" path
+(`gh_pr.rename_branch_for_pr()`); the `checkout -b`-on-base case never applies here.
+
+**Title/body are built deterministically, then independently re-checked — the same `build()`/
+`guard()` split `reasona_dev.squash` already uses for the squash commit message (§3.9.3), applied
+here to a different artifact.** `build_pr_title()` sanitizes the plan's own freeform `## PR
+<index>: <title>` heading text (strips a stray `#N` prefix, a trailing period, coerces an
+unrecognized type to `feat`) the same way `squash.build()` sanitizes commit body lines.
+`build_pr_body()` fills the three required sections (`## Changes`, `## Why we need this`,
+`## Test`) from what this pipeline actually knows — the unit's own plan section as the change
+description, and "review/scan/ship_gate's acceptance axis already passed" as the only test evidence
+that genuinely exists at this point — rather than fabricating detail an LLM would normally supply.
+`validate_pr_meta()` re-derives `/gh-pr` §8's P1-P7 checks independently of the builder (never
+consults it), so a violation on a fresh build should be vanishingly rare; `repair_pr()` still exists
+as insurance, pushing a corrected version via `gh pr edit` (never `gh pr create` again) up to
+`MAX_PR_REPAIR_ATTEMPTS` (3) times. Exhausting that budget reports the unit `blocked`, not
+`failed` — a PR-metadata violation is not a judgment about the code's quality.
+
+**Idempotency reuses `final_phase.create_pr()`/`existing_pr_url()` rather than duplicating it.**
+`create_pr()` gained `head`/`base`/keyword-only `title`/`body` parameters so `gh_pr.py` could pass
+`--head <branch> --base <base_branch>` explicitly to `gh pr create` — `/gh-pr` §8's own rule
+("never rely on `gh` detecting the current branch from CWD"), which matters here specifically
+because every dispatch already runs against a per-unit worktree whose CWD is never the caller's own.
+The live-`gh`-first, ledger-fallback pattern (§3.11.3) is otherwise unchanged. The equivalent
+pattern is applied to issue creation too: `ledger.known_issue_number()`/`mark_issue_created()`
+avoid opening a second throwaway issue for the same unit on a resumed run.
+
+## 3.13 Porting `/gh-review` -- `reasona_dev/gh_review_watch.py` + `reasona_dev/gh_review.py`
+
+Read in full from `~/repository/tas-dev-plugins/plugins/dev/skills/gh-review/SKILL.md` and its
+`tools/watch.py` before porting. Runs immediately after `gh_pr.py` succeeds, inside the same
+`run_final_stage()` call, before the final `is_up_to_date()`/`squash_merge()` pair.
+
+**This is not a second review pass, and not a duplicate of `pr_cycle`'s local scan cycle.**
+`pr_cycle.py`'s bugbot/compliance dispatch is a LOCAL Bernstein run, before a PR exists. The three
+signals this module watches — `statusCheckRollup`, a `claude[bot]`-family PR comment, a
+`github-actions[bot]`-family PR review — are produced by the TARGET REPO'S OWN GitHub Actions,
+against the pushed commit, on GitHub's own infrastructure. Confirmed directly with the user: these
+are genuinely separate, independent checks, not a re-run of the local one.
+
+**`gh_review_watch.py` is a near-verbatim port of `watch.py`.** The original is already pure Python
++ `gh api graphql` subprocess calls with zero LLM involvement — a deterministic classifier over
+GraphQL JSON — so it needed no redesign to fit this project's "no model in the judgment loop" rule.
+Only the subprocess helper (swapped for `reasona_dev._shell.run()`) and the CLI entry point
+(`main()`'s `argparse` + its own polling `while True` loop) changed; `gh_review.py` calls
+`take_snapshot()`/`classify()` as a library and owns the polling loop itself. (An earlier revision
+of this section claimed a transcription bug in the original's `parse_bugbot_analysis()` --
+`submittedAt` stored but `submitted_at` read back. Re-verified directly against
+`~/repository/tas-dev-plugins/plugins/dev/skills/gh-review/tools/watch.py`: the original already
+reads `latest.get("submittedAt")` correctly. That claim came from a research fork's summary that
+mis-transcribed the line, trusted without re-checking the primary source before writing it into
+this document -- corrected here.)
+
+`classify()`'s decision tree is unchanged: `ci.failing → actionable`; `ci != passing → continue`
+(CI gates the bot signals — a stale artefact from a prior head SHA could otherwise mis-classify
+while CI is still in flight); once `ci == passing`: `compliance.fail OR bugbot.found → actionable`;
+either `missing → continue` (replication lag); else `terminal`.
+
+**`gh_review.py` owns the auto-fix loop, using this pipeline's own dispatch/budget primitives
+instead of the original skill's "runs in the dispatching agent" model.** Each actionable cycle
+gathers every actionable signal (CI failing / compliance fail / bugbot found) into ONE dev-fix
+prompt, dispatches `pr_cycle.run_role`'s `backend` role, then pushes deterministically itself
+(`git push`, not trusted to an instruction inside the prompt) — the same split
+`final_phase.py`'s sync-conflict/ship-gate fix loops already use (§3.9.2, §3.9.5). One push per
+cycle re-triggers every workflow at once, per `/gh-review` §3.3's own rule. Reply bullets to the
+compliance/bugbot comment threads are NOT fabricated from a summary this deterministic layer does
+not actually have — the posted reply names only the fixing commit.
+
+**Two budgets, tracked separately, mirroring dev-ralf's own pooling rule.** Waiting for CI/bot
+workflows to finish is wall-clock time (`max_wait_seconds`, `time.monotonic()`), independent of
+`FixBudget`. Actually dispatching a fix spends `budget`'s `"gh_review"` stage
+(`cycle_gate.MAX_GH_REVIEW_CYCLES` = 3, `/gh-review`'s own default `--max-cycle`), pooled into the
+same `MAX_TOTAL_FIX_CYCLES` every other stage shares:
+`min(MAX_GH_REVIEW_CYCLES, MAX_TOTAL_FIX_CYCLES - budget.total_used)`. Exhausting either is
+`blocked`, not `failed` -- by this point review, scan, and ship_gate have already passed, so a
+CI/compliance/bugbot failure this deep is either a defect those local checks could not see (not a
+re-derivable local judgment) or an external stall, matching the same reasoning
+`cycle_gate.MAX_SHIP_CYCLES` already documents for ship_gate's own bounded fix loop.
+
+`--gh-review-max-wait` exposes only the wall-clock budget as a `run-plan` flag (default 900s,
+matching `/gh-review`'s own default) — the cycle-count budget stays a fixed pipeline constant, like
+every other stage's cap, not something exposed per invocation.
 
 ## 4. Directory structure
 
@@ -1613,14 +1799,18 @@ reasona-dev/
 ├── .reasona/reasona.yaml     reasona-dev's own model_config layer, the `dev-models:` key (the future reasona-plan will use `plan-models:`)
 ├── reasona_dev/
 │   ├── cli.py                the actual `reasona-dev` executable entry point ([project.scripts]) — the only place flags are actually entered
-│   ├── plan_compile.py       plan document → bernstein plan.yaml compiler (dev's cycle-0 step, workdir anchoring)
-│   ├── orchestrate.py        plan-unit execution — dependency order, per-unit profiles, server sharing (§3.7.11)
+│   ├── plan_compile.py       plan document → bernstein plan.yaml compiler (dev's cycle-0 step, `only_index` for a single unit, workdir anchoring) (§3.11.2)
+│   ├── orchestrate.py        plan-unit execution — worktree creation, per-unit cycle-0 dispatch, dependency order, per-unit profiles (§3.11, §3.11.1)
+│   ├── worktree.py           one git worktree per PR unit, from before cycle-0 through squash-merge/cleanup (§3.11.1)
 │   ├── pr_cycle.py           reproduces worker.md — deterministic develop → review → bug+compliance scan driver (§3.5.4)
 │   ├── bernstein_dispatch.py 1-step plan.yaml + `bernstein run` — one synchronous role dispatch (§3.10)
 │   ├── acceptance.py         executable acceptance criteria — runs the manifest's acceptance: deterministically right before merge (§3.7.3)
 │   ├── structure_gate.py     structural judgment — file size, duplication, dependency direction, public-API growth (§3.7.2)
 │   ├── ship_gate.py          the single pre-merge verdict — review AND acceptance, logical AND; called FROM final_phase, with its own bounded dev-fix loop (§3.7.8, §3.9.4, §3.9.5)
-│   ├── final_phase.py        gh check → final phase (sync ↔ conflict-fix → conditional final_audit → ship_gate ↔ acceptance-fix, re-verified as a round) → PR → squash-merge (§3.9)
+│   ├── final_phase.py        gh check → final phase (sync ↔ conflict-fix → conditional final_audit → ship_gate ↔ acceptance-fix, re-verified as a round) → gh-pr → gh-review → squash-merge (§3.9, §3.12, §3.13)
+│   ├── gh_pr.py               `/gh-pr` port — issue → branch rename → push+create PR → structural validate/repair (§3.12)
+│   ├── gh_review_watch.py     `/gh-review`'s watcher ported near-verbatim — CI/compliance/bugbot GraphQL snapshot + classify (§3.13)
+│   ├── gh_review.py           `/gh-review`'s auto-fix loop — dispatch dev against actionable signals, one push per cycle, budget-bounded (§3.13)
 │   ├── cycles_log.py         per-cycle finding measurement (.reasona/cycles.jsonl) — the basis for attribution measurement (§3.7.6)
 │   ├── cycles_query.py       attribution/budget/AC-coverage queries — turns the log into judgment (§3.7.9)
 │   ├── memory.py             per-repo prior-observation notes generated from cycles.jsonl, file-scoped retrieval (§3.7.7)
@@ -1632,9 +1822,11 @@ reasona-dev/
 │   ├── cycle_gate.py         result-invariant verification (inherited from dev-ralf's cycle_gate.py)
 │   ├── gate_check.py         the completion_signals(test_passes) entry point — merge/no-merge decision
 │   ├── squash.py             squash-message builder + guard
+│   ├── ledger.py             per-plan, per-unit resume state (§3.11.3)
+│   ├── _shell.py             the one subprocess-run helper every git/gh-calling module shares
 │   ├── plugin.py             pluggy hookimpl (on_pre_task_create, on_agent_spawned)
 │   └── adapters/
 │       └── ocr.py            OcrAdapter — registered via the bernstein.adapters entry point
 ├── pyproject.toml
-└── tests/                    89 cases, all passing
+└── tests/
 ```

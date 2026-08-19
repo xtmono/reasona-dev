@@ -1,5 +1,6 @@
 """The last third of worker.md, restructured: `sync -> final_audit ->
-ship_gate` as one self-verifying loop, then `gh-pr -> squash-merge`.
+ship_gate` as one self-verifying loop, then `gh-pr -> gh-review ->
+squash-merge`.
 
 **Why ship_gate moved behind sync and final_audit.** `ship_gate.evaluate()`
 runs `acceptance.run_all()` against whatever is on disk at call time. Both
@@ -50,11 +51,11 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import cycles_log, ledger, squash
+from reasona_dev import _shell, cycles_log, squash
+from reasona_dev import gh_review as gh_review_mod
 from reasona_dev.cycle_gate import (
     MAX_FINAL_PHASE_ROUNDS,
     FixBudget,
@@ -94,16 +95,7 @@ class TailResult:
 
 # --- shell helpers ----------------------------------------------------------
 
-def _run(cmd: list[str], workdir: Path, *, timeout: int = 300) -> tuple[int, str, str]:
-    try:
-        p = subprocess.run(cmd, cwd=str(workdir), capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError:
-        return 127, "", f"{cmd[0]}: not found on PATH"
-    except subprocess.TimeoutExpired:
-        return 124, "", f"{' '.join(cmd)}: timed out after {timeout}s"
-    except OSError as exc:
-        return 1, "", str(exc)
-    return p.returncode, p.stdout, p.stderr
+_run = _shell.run  # see reasona_dev/_shell.py -- shared across every git/gh caller
 
 
 def gh_available(workdir: Path) -> str | None:
@@ -277,7 +269,10 @@ def existing_pr_url(workdir: Path) -> str | None:
     return out.strip() if code == 0 and out.strip() else None
 
 
-def create_pr(workdir: Path, msg: SquashMessage, *, known_pr_url: str | None = None) -> tuple[str | None, str]:
+def create_pr(
+    workdir: Path, *, title: str, body: str, head: str | None = None,
+    base: str | None = None, known_pr_url: str | None = None,
+) -> tuple[str | None, str]:
     """Create the PR, or return the one that already exists.
 
     Idempotent on purpose: the tail is safe to re-run after a blocked step,
@@ -293,6 +288,12 @@ def create_pr(workdir: Path, msg: SquashMessage, *, known_pr_url: str | None = N
     is on the PR's branch): using the remembered URL there avoids `gh pr
     create` producing a duplicate that a live-but-incomplete `gh` query
     missed, without ever trusting a stale ledger over a live one.
+
+    `head`/`base`, when given, are passed to `gh pr create` explicitly
+    (`gh_pr.py` always supplies both -- `/gh-pr` SKILL.md §8: "never rely on
+    `gh` detecting the current branch from CWD", which breaks whenever the
+    caller's working directory differs from the branch's own worktree,
+    exactly the shape this project's per-unit worktrees have).
     """
     existing = existing_pr_url(workdir)
     if existing:
@@ -304,10 +305,12 @@ def create_pr(workdir: Path, msg: SquashMessage, *, known_pr_url: str | None = N
     if code != 0:
         return None, f"git push failed: {err.strip()[:200]}"
 
-    code, out, err = _run(
-        ["gh", "pr", "create", "--title", msg.title, "--body", msg.body or msg.title],
-        workdir, timeout=120,
-    )
+    cmd = ["gh", "pr", "create", "--title", title, "--body", body or title]
+    if head:
+        cmd += ["--head", head]
+    if base:
+        cmd += ["--base", base]
+    code, out, err = _run(cmd, workdir, timeout=120)
     if code != 0:
         return None, f"gh pr create failed: {err.strip()[:200]}"
     url = out.strip().splitlines()[-1] if out.strip() else existing_pr_url(workdir)
@@ -564,6 +567,7 @@ def run_final_stage(
     stage_name: str,
     pr_title: str,
     unit_type: str | None,
+    unit,
     profile: str,
     resolved: dict[str, ResolvedModel],
     rundir: str | Path,
@@ -574,15 +578,17 @@ def run_final_stage(
     base: str = "origin/main",
     merge: bool = False,
     plan_name: str | None = None,
+    gh_review_max_wait_seconds: int = gh_review_mod.DEFAULT_MAX_WAIT_SECONDS,
     run_role_fn=run_role,
 ) -> TailResult:
-    """gh -> final phase (sync -> final_audit -> ship_gate) -> PR -> squash-merge.
+    """gh -> final phase (sync -> final_audit -> ship_gate) -> gh-pr ->
+    gh-review -> squash-merge.
 
     Named separately from `run_final_phase()` because it is a superset: `gh`
-    availability, PR creation, and squash-merge are not part of the
+    availability, gh-pr/gh-review, and squash-merge are not part of the
     round-verified sync/audit/ship_gate loop (they run once, after that loop
     has already settled), so they stay outside `run_final_phase()` and are
-    composed here instead. See the module docstring's ASCII diagram.
+    composed here instead. See docs/ARCHITECTURE.md §3.9/§3.12/§3.13.
 
     `cycle_verdict` and `ship_gate_fn` replace the old pre-computed
     `ship_decision` parameter: the verdict can no longer be computed by the
@@ -590,17 +596,23 @@ def run_final_stage(
     final phase's own sync/audit fixes leave on disk -- see
     `run_final_phase()` and the module docstring.
 
+    `unit` (a `plan_compile.PRUnit`) is what `reasona_dev.gh_pr.run_gh_pr()`
+    needs to build the issue/PR content (`unit.section`, `unit.index`) --
+    imported lazily inside this function, not at module level, because
+    `gh_pr.py` itself imports `final_phase` (to reuse `create_pr()`'s
+    idempotency logic) and a top-level import here would be circular.
+
     `plan_name`, when given, is `orchestrate`'s resume flag passed through:
-    `reasona_dev.ledger`'s recorded PR url for this unit (if any) is
-    offered to `create_pr()` as a fallback -- see its own docstring for why
-    that's a fallback and not a replacement for the live `gh pr view`
-    check. A newly created PR's url is recorded back to the same ledger
-    entry so the NEXT call (e.g. the `--merge` run after a `--ship` run
-    already opened the PR) has it available too.
+    `reasona_dev.ledger`'s recorded PR url/issue number for this unit (if
+    any) is offered to `gh_pr.run_gh_pr()`/`create_pr()` as a fallback --
+    see their own docstrings for why that's a fallback and not a
+    replacement for the live `gh` check. A newly created PR/issue is
+    recorded back to the same ledger entry so the NEXT call (e.g. the
+    `--merge` run after a `--ship` run already opened the PR) has it
+    available too.
     """
     workdir = Path(workdir)
     rundir = Path(rundir)
-    known_pr_url = ledger.known_pr_url(workdir, plan_name, stage_name) if plan_name else None
 
     def _blocked(reason: str, **kw) -> TailResult:
         result = TailResult(stage_name=stage_name, status=BLOCKED, reason=reason, **kw)
@@ -624,29 +636,44 @@ def run_final_stage(
     if status != "passed":
         return _blocked(reason, final_audit=audit, role_results=dispatches, ship_decision=decision)
 
+    # Imported lazily -- gh_pr.py imports this module (to reuse create_pr()'s
+    # idempotency logic), so a module-level import here would be circular.
+    from reasona_dev import gh_pr
+
+    gh_pr_result = gh_pr.run_gh_pr(
+        workdir=workdir, stage_name=stage_name, unit=unit, plan_name=plan_name, base=base,
+    )
+    if not gh_pr_result.passed:
+        return _blocked(gh_pr_result.reason, pr_url=gh_pr_result.pr_url, final_audit=audit,
+                        role_results=dispatches, ship_decision=decision)
+    url = gh_pr_result.pr_url
+
+    review_result = gh_review_mod.run_gh_review(
+        workdir=workdir, pr_url=url, pr_num=gh_pr_result.pr_num, pr_title=pr_title,
+        resolved=resolved, rundir=rundir, budget=budget, max_wait_seconds=gh_review_max_wait_seconds,
+    )
+    dispatches = dispatches + review_result.dispatches
+    if not review_result.passed:
+        return _blocked(review_result.reason, pr_url=url, final_audit=audit,
+                        role_results=dispatches, ship_decision=decision)
+
     msg, msg_reason = build_squash_message(unit_type=unit_type, title=pr_title)
     if msg is None:
-        return _blocked(msg_reason, final_audit=audit, role_results=dispatches, ship_decision=decision)
-
-    url, pr_reason = create_pr(workdir, msg, known_pr_url=known_pr_url)
-    if url is None:
-        return _blocked(pr_reason, squash_message=msg, final_audit=audit,
+        return _blocked(msg_reason, pr_url=url, final_audit=audit,
                         role_results=dispatches, ship_decision=decision)
-    if plan_name:
-        ledger.mark_pr_created(workdir, plan_name, stage_name, url)
 
     if not merge:
         return TailResult(
             stage_name=stage_name, status=PR_OPEN,
-            reason=f"{pr_reason}; merge not requested (pass merge=True to squash-merge)",
+            reason=f"{gh_pr_result.reason}; merge not requested (pass merge=True to squash-merge)",
             pr_url=url, squash_message=msg, final_audit=audit, role_results=dispatches,
             ship_decision=decision,
         )
 
-    # Re-checked here, not only inside the final phase: create_pr()'s own
-    # push/gh-pr-create round trip takes more time for base to move in.
-    # Not looped back into the final phase on failure -- see the module
-    # docstring's "what still fails loudly rather than being retried".
+    # Re-checked here, not only inside the final phase: gh-pr/gh-review's own
+    # round trips take more time for base to move in. Not looped back into
+    # the final phase on failure -- see the module docstring's "what still
+    # fails loudly rather than being retried".
     fresh, gate_reason = is_up_to_date(workdir, base=base)
     if not fresh:
         return _blocked(gate_reason, pr_url=url, squash_message=msg,

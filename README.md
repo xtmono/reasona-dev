@@ -30,19 +30,20 @@ cp ~/.reasona/bernstein-template.yaml bernstein.yaml   # plain file at repo root
 printf '%s\n' bernstein.yaml .reasona/ .sdd/ .worktrees/ >> .gitignore
 ```
 
-**Run a plan** (compile → cycle-0 → review → scan → ship_gate verdict --
-stops there, no PR):
+**Run a plan** (per unit: its own worktree → cycle-0 → review → scan →
+ship_gate verdict -- stops there, no PR):
 ```bash
 reasona-dev run-plan docs/plans/<plan>.md --workdir .
 ```
 
-**PR creation and merge are opt-in, not automatic.** `final_phase.create_pr()`
-is an incomplete stand-in for dev-ralf's `/gh-pr` (no issue, no PR body
-validation, no repair loop), and there is no `/gh-review` equivalent at
-all -- see `docs/ARCHITECTURE.md` §3.9. Ask for them explicitly, and check
-the PR yourself:
+**PR creation and merge are opt-in, not automatic.** `--ship` opens a real
+PR (issue creation, structural title/body validation+repair, then CI/bot
+watching with an auto-fix loop -- ports of dev-ralf's `/gh-pr`/`/gh-review`,
+see `docs/ARCHITECTURE.md` §3.12/§3.13) and `--merge` squash-merges it once
+that settles -- both outward-facing, hard-to-undo actions on the target
+repo's real GitHub state, so ask for them explicitly:
 ```bash
-reasona-dev run-plan docs/plans/<plan>.md --workdir . --ship    # + opens a PR
+reasona-dev run-plan docs/plans/<plan>.md --workdir . --ship    # + opens a PR, watches CI/bots
 reasona-dev run-plan docs/plans/<plan>.md --workdir . --merge   # + squash-merges it
 ```
 
@@ -51,26 +52,28 @@ same command again:**
 ```bash
 reasona-dev run-plan docs/plans/<plan>.md --workdir .
 ```
-A progress ledger (`.reasona/log/<plan>/`) skips cycle-0 if it already ran,
-resumes any PR unit's review/scan cycle from where it stopped (not from
-cycle 1), and skips any PR unit that already shipped -- all automatically,
-no flags needed. `--from-pr <index>`/`--skip-dev` are manual overrides for
-when the ledger itself is unavailable; `--restart` clears it and reruns
-everything from scratch (use only when the plan itself changed).
+A progress ledger (`.reasona/log/<plan>/`) skips cycle-0 per unit if it
+already ran (reusing that unit's own worktree), resumes any PR unit's
+review/scan cycle from where it stopped (not from cycle 1), and skips any
+PR unit that already shipped -- all automatically, no flags needed.
+`--from-pr <index>`/`--skip-dev` are manual overrides for when the ledger
+itself is unavailable; `--restart` clears it and reruns everything from
+scratch (use only when the plan itself changed).
 
 Details, global vs. per-repo config, and everything else: `docs/INSTALL.md`.
 Design rationale for every decision below: `docs/ARCHITECTURE.md`.
 
 ## Status
 
-Working V0, live end-to-end verified (compile-plan → cycle-0 → review → scan
-→ ship → merge tail, real agents and cost). One open item: Bernstein's own
-retry-escalation path can bump a task's model up a tier on its 2nd+ retry
-with no config surface to prevent it — bounded (`max_retries=3`), but not
-yet fully blockable. Full trace: `docs/ARCHITECTURE.md` §3.6.
+Working V0, live end-to-end verified (per-unit worktree → cycle-0 → review
+→ scan → ship → gh-pr → gh-review → squash-merge, real agents and cost).
+One open item: Bernstein's own retry-escalation path can bump a task's
+model up a tier on its 2nd+ retry with no config surface to prevent it —
+bounded (`max_retries=3`), but not yet fully blockable. Full trace:
+`docs/ARCHITECTURE.md` §3.6.
 
 ```bash
-uv run --with pytest python3 -m pytest tests/    # 293 passed
+uv run --with pytest python3 -m pytest tests/
 ```
 
 ## Layout
@@ -82,13 +85,17 @@ bernstein.yaml              this repo's own seed config (see "bernstein.yaml" be
 .reasona/reasona.yaml        this repo's own model_config layer, under `dev-models:`
 .reasona/prompts/generic/     this repo's own prompt profile
 reasona_dev/
-  plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step)
-  orchestrate.py              runs a whole plan: units in dependency order, per-unit profile
+  plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step, `only_index` for one unit)
+  orchestrate.py              runs a whole plan: per-unit worktree + cycle-0 dispatch, dependency order, per-unit profile
+  worktree.py                  one git worktree per PR unit, dev-0 through squash-merge/cleanup
   pr_cycle.py                 develop -> review -> bug+compliance scan driver
   bernstein_dispatch.py        one-step plan.yaml + `bernstein run` -- one role dispatch
   acceptance.py                 executable acceptance criteria
   ship_gate.py                    pre-merge verdict: review AND acceptance, called from final_phase, own bounded dev-fix loop
-  final_phase.py                   gh check -> final phase (sync<->conflict-fix -> final_audit -> ship_gate<->acceptance-fix, re-verified as a round) -> PR -> squash-merge
+  final_phase.py                   gh check -> final phase (sync<->conflict-fix -> final_audit -> ship_gate<->acceptance-fix, re-verified as a round) -> gh-pr -> gh-review -> squash-merge
+  gh_pr.py                          /gh-pr port -- issue, branch rename, PR create, structural validate/repair
+  gh_review_watch.py                /gh-review's watcher, ported near-verbatim -- CI/compliance/bugbot GraphQL snapshot + classify
+  gh_review.py                      /gh-review's auto-fix loop -- dispatch dev, one push per cycle, budget-bounded
   cycles_log.py / cycles_query.py    per-cycle measurement log + queries
   memory.py                        repo-scoped priors generated from cycles.jsonl
   prompt_profile.py            per-unit profile resolution, two-layer prompt lookup
@@ -97,6 +104,7 @@ reasona_dev/
   finding_adapter.py           text + KV contract parsers
   cycle_gate.py                  recheck routing, escalation, budget, convergence
   squash.py                        squash message builder + guard
+  ledger.py                         per-plan, per-unit resume state
   plugin.py                         pluggy hookimpl
 tests/                      pytest, 293 cases
 ```

@@ -20,16 +20,24 @@ a second plan can stomp on).
 
 **Two kinds of state, both under the same directory:**
 
-    ledger-plan.json                 one flag: has cycle-0 for this plan
-                                       already been dispatched?
-    <stage>/ledger.json               review/scan cycle-level checkpoint,
-                                       the PR unit's terminal outcome, and a
-                                       merge-tail PR-url hint (see below)
+    <stage>/ledger.json               whether THIS unit's cycle-0 has been
+                                       dispatched, review/scan cycle-level
+                                       checkpoint, the PR unit's terminal
+                                       outcome, and a PR-url/issue-number hint
+                                       (see below)
     <stage>/<role>-c<cycle>.raw.txt   raw per-role output (same file shape
                                        `pr_cycle.run_role()` always wrote,
                                        just under the new path, alongside
                                        ledger.json rather than a separate
                                        runs/ subdirectory)
+
+**Cycle-0 is dispatched per unit, not once for the whole plan.** Each PR
+unit gets its own git worktree (`reasona_dev.worktree`) and its cycle-0
+implementation is dispatched into that worktree as its own single-stage
+`bernstein run`, immediately before that unit's own review/scan starts --
+not batched across the whole plan up front. `dev_already_dispatched()`/
+`mark_dev_dispatched()` are therefore keyed by `(plan_name, stage_name)`,
+not `plan_name` alone; there is no more plan-wide `ledger-plan.json`.
 
 **What actually gets checkpointed, and why this closes the FixBudget gap.**
 `pr_cycle.run_pr_cycle()` now writes its progress (`FixBudget`,
@@ -83,22 +91,21 @@ def unit_dir(workdir: str | Path, plan_name: str, stage_name: str) -> Path:
     return log_dir(workdir, plan_name) / stage_name
 
 
-def _plan_ledger_path(workdir: str | Path, plan_name: str) -> Path:
-    return log_dir(workdir, plan_name) / "ledger-plan.json"
-
-
 def _unit_ledger_path(workdir: str | Path, plan_name: str, stage_name: str) -> Path:
     return unit_dir(workdir, plan_name, stage_name) / "ledger.json"
 
 
-# --- plan-level: cycle-0 -----------------------------------------------------
+# --- unit-level: cycle-0 ------------------------------------------------------
 
-def dev_already_dispatched(workdir: str | Path, plan_name: str) -> bool:
-    return _read(_plan_ledger_path(workdir, plan_name)).get("dev") == "done"
+def dev_already_dispatched(workdir: str | Path, plan_name: str, stage_name: str) -> bool:
+    return _read(_unit_ledger_path(workdir, plan_name, stage_name)).get("dev") == "done"
 
 
-def mark_dev_dispatched(workdir: str | Path, plan_name: str) -> None:
-    _write(_plan_ledger_path(workdir, plan_name), {"dev": "done"})
+def mark_dev_dispatched(workdir: str | Path, plan_name: str, stage_name: str) -> None:
+    path = _unit_ledger_path(workdir, plan_name, stage_name)
+    data = _read(path)
+    data["dev"] = "done"
+    _write(path, data)
 
 
 # --- unit-level: review/scan cycle progress ----------------------------------
@@ -146,7 +153,7 @@ def mark_unit_terminal(workdir: str | Path, plan_name: str, stage_name: str, *, 
     _write(path, data)
 
 
-# --- unit-level: merge-tail PR-url hint ---------------------------------------
+# --- unit-level: gh-pr hints (PR url, issue number) ---------------------------
 
 def known_pr_url(workdir: str | Path, plan_name: str, stage_name: str) -> str | None:
     return _read(_unit_ledger_path(workdir, plan_name, stage_name)).get("pr_url")
@@ -159,15 +166,29 @@ def mark_pr_created(workdir: str | Path, plan_name: str, stage_name: str, pr_url
     _write(path, data)
 
 
+def known_issue_number(workdir: str | Path, plan_name: str, stage_name: str) -> int | None:
+    """The GitHub issue `gh_pr.run_gh_pr()` already created for this unit on
+    an earlier, interrupted run (if any) -- consulted only as a fallback when
+    the PR itself can't be found live either, so a resumed run doesn't open a
+    second throwaway issue for the same unit."""
+    return _read(_unit_ledger_path(workdir, plan_name, stage_name)).get("issue_number")
+
+
+def mark_issue_created(workdir: str | Path, plan_name: str, stage_name: str, issue_number: int) -> None:
+    path = _unit_ledger_path(workdir, plan_name, stage_name)
+    data = _read(path)
+    data["issue_number"] = issue_number
+    _write(path, data)
+
+
 # --- clearing (--restart) ----------------------------------------------------
 
 def clear(workdir: str | Path, plan_name: str, stage_names: list[str]) -> None:
-    """Wipe every ledger file for this plan -- `--restart` uses this to force
-    a full re-run instead of resuming. Raw per-role output already written
-    under each stage's directory is left alone; it's a record of what
+    """Wipe every unit's ledger for this plan -- `--restart` uses this to
+    force a full re-run instead of resuming. Raw per-role output already
+    written under each stage's directory is left alone; it's a record of what
     happened, not resume state, and `--restart` overwriting it in place
     (same cycle numbers, fresh content) is no worse than a first run ever
     was."""
-    _plan_ledger_path(workdir, plan_name).unlink(missing_ok=True)
     for name in stage_names:
         _unit_ledger_path(workdir, plan_name, name).unlink(missing_ok=True)

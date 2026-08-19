@@ -185,10 +185,34 @@ def _recorder(cycle_by_stage=None, ship_passes=True):
     return cycle_fn, ship_fn
 
 
-def _run(tmp_path, cycle_fn, ship_fn, plan=MIXED_PLAN, **kw):
+def _fake_ensure_worktree(workdir, plan_name, stage_name, *, base):
+    """No real git worktree -- these tests exercise orchestration logic, not
+    `reasona_dev.worktree` itself (that has its own test module). Reusing
+    `workdir` as the "worktree" keeps every existing `workdir=...` assertion
+    in this file meaningful without adding a second path to track."""
+    return workdir, f"reasona/{plan_name}/{stage_name}"
+
+
+def _fake_remove_worktree(workdir, plan_name, stage_name):
+    pass
+
+
+def _fake_dispatch_cycle0(**kw):
+    return True, "ok"
+
+
+def _run(
+    tmp_path, cycle_fn, ship_fn, plan=MIXED_PLAN, workdir_override=None,
+    ensure_worktree_fn=_fake_ensure_worktree, remove_worktree_fn=_fake_remove_worktree,
+    dispatch_cycle0_fn=_fake_dispatch_cycle0,
+    **kw,
+):
     return run_plan(
-        workdir=_repo(tmp_path), plan_name="testplan", plan_text=plan, resolved=_RESOLVED,
+        workdir=workdir_override if workdir_override is not None else _repo(tmp_path),
+        plan_name="testplan", plan_text=plan, resolved=_RESOLVED,
         rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
+        ensure_worktree_fn=ensure_worktree_fn, remove_worktree_fn=remove_worktree_fn,
+        dispatch_cycle0_fn=dispatch_cycle0_fn,
         **kw,
     )
 
@@ -203,6 +227,8 @@ def test_the_real_ship_gate_fn_is_called_without_unsupported_kwargs(tmp_path):
     result = run_plan(
         workdir=_repo(tmp_path), plan_name="testplan", plan_text=MIXED_PLAN,
         resolved=_RESOLVED, rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn,
+        ensure_worktree_fn=_fake_ensure_worktree, remove_worktree_fn=_fake_remove_worktree,
+        dispatch_cycle0_fn=_fake_dispatch_cycle0,
     )
     assert result.passed
 
@@ -370,6 +396,18 @@ def test_the_tail_receives_the_units_type_for_the_squash_title(tmp_path):
     assert seen["pr-1"][1] is True
 
 
+def test_gh_review_max_wait_seconds_reaches_the_final_stage(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+    seen = {}
+
+    def tail_fn(**kw):
+        seen[kw["stage_name"]] = kw["gh_review_max_wait_seconds"]
+        return _tail_ok(kw["stage_name"])
+
+    _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn, gh_review_max_wait_seconds=120)
+    assert seen["pr-1"] == 120
+
+
 # --- resuming with from_pr ---------------------------------------------------
 
 def test_from_pr_skips_units_ordered_before_it(tmp_path):
@@ -410,10 +448,7 @@ def test_a_unit_already_marked_shipped_is_not_redispatched(tmp_path):
     ledger.mark_unit_terminal(workdir, "testplan", "pr-1", status="shipped", reason="merged in an earlier run")
     cycle_fn, ship_fn = _recorder()
 
-    result = run_plan(
-        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
-        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
-    )
+    result = _run(tmp_path, cycle_fn, ship_fn, workdir_override=workdir)
 
     assert [c["stage_name"] for c in cycle_fn.calls] == ["pr-2", "pr-3"]
     by_stage = {o.stage_name: o.status for o in result.outcomes}
@@ -429,10 +464,7 @@ def test_resuming_does_not_re_block_a_dependent_of_a_resumed_unit(tmp_path):
     ledger.mark_unit_terminal(workdir, "testplan", "pr-1", status="shipped", reason="merged in an earlier run")
     cycle_fn, ship_fn = _recorder()
 
-    result = run_plan(
-        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
-        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
-    )
+    result = _run(tmp_path, cycle_fn, ship_fn, workdir_override=workdir)
     assert result.passed
 
 
@@ -441,10 +473,7 @@ def test_a_unit_that_actually_ships_this_run_is_recorded_for_the_next_one(tmp_pa
 
     workdir = _repo(tmp_path)
     cycle_fn, ship_fn = _recorder()
-    run_plan(
-        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
-        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
-    )
+    _run(tmp_path, cycle_fn, ship_fn, workdir_override=workdir)
     assert ledger.unit_status(workdir, "testplan", "pr-1") == "shipped"
     assert ledger.unit_status(workdir, "testplan", "pr-2") == "shipped"
     assert ledger.unit_status(workdir, "testplan", "pr-3") == "shipped"
@@ -455,18 +484,12 @@ def test_a_failed_unit_is_not_marked_shipped_and_is_retried_on_the_next_run(tmp_
 
     workdir = _repo(tmp_path)
     cycle_fn, ship_fn = _recorder(cycle_by_stage={"pr-1": _fail_cycle()})
-    run_plan(
-        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
-        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
-    )
+    _run(tmp_path, cycle_fn, ship_fn, workdir_override=workdir)
     assert ledger.unit_status(workdir, "testplan", "pr-1") == "failed"
 
     # a second run must retry pr-1, not skip it
     cycle_fn2, ship_fn2 = _recorder()
-    run_plan(
-        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
-        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn2, ship_gate_fn=ship_fn2,
-    )
+    _run(tmp_path, cycle_fn2, ship_fn2, workdir_override=workdir)
     assert [c["stage_name"] for c in cycle_fn2.calls] == ["pr-1", "pr-2", "pr-3"]
 
 
@@ -477,9 +500,137 @@ def test_resume_false_ignores_the_ledger(tmp_path):
     ledger.mark_unit_terminal(workdir, "testplan", "pr-1", status="shipped", reason="merged in an earlier run")
     cycle_fn, ship_fn = _recorder()
 
-    run_plan(
-        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
-        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
-        resume=False,
-    )
+    _run(tmp_path, cycle_fn, ship_fn, workdir_override=workdir, resume=False)
     assert [c["stage_name"] for c in cycle_fn.calls] == ["pr-1", "pr-2", "pr-3"]
+
+
+# --- per-unit cycle-0 dispatch ------------------------------------------------
+
+def test_each_unit_gets_its_own_worktree_before_cycle0(tmp_path):
+    """The bug the whole worktree-per-unit design exists to fix: every unit
+    must get a DIFFERENT worktree, dispatched before that unit's own
+    review/scan -- never the shared top-level workdir."""
+    seen = []
+
+    def ensure_fn(workdir, plan_name, stage_name, *, base):
+        seen.append(stage_name)
+        return workdir / stage_name, f"reasona/{plan_name}/{stage_name}"
+
+    cycle_fn, ship_fn = _recorder()
+    result = _run(
+        tmp_path, cycle_fn, ship_fn,
+        ensure_worktree_fn=ensure_fn, remove_worktree_fn=_fake_remove_worktree,
+        dispatch_cycle0_fn=_fake_dispatch_cycle0,
+    )
+    assert seen == ["pr-1", "pr-2", "pr-3"]
+    workdirs = {c["stage_name"]: c["workdir"] for c in cycle_fn.calls}
+    assert len({str(w) for w in workdirs.values()}) == 3  # every unit got a distinct workdir
+    assert result.passed
+
+
+def test_skip_dev_never_calls_the_cycle0_dispatcher(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+
+    def _fail_dispatch(**kw):
+        pytest.fail("must not dispatch cycle-0 when skip_dev is set")
+
+    result = _run(tmp_path, cycle_fn, ship_fn, skip_dev=True, dispatch_cycle0_fn=_fail_dispatch)
+    assert result.passed
+
+
+def test_skip_dev_still_creates_the_worktree(tmp_path):
+    """`skip_dev` only skips the DISPATCH -- a unit's worktree is still
+    where review/scan runs against, and `--skip-dev` exists precisely for
+    "cycle-0/the worktree was already set up by hand"."""
+    seen = []
+
+    def ensure_fn(workdir, plan_name, stage_name, *, base):
+        seen.append(stage_name)
+        return workdir, f"reasona/{plan_name}/{stage_name}"
+
+    cycle_fn, ship_fn = _recorder()
+
+    def _fail_dispatch(**kw):
+        pytest.fail("must not dispatch")
+
+    _run(tmp_path, cycle_fn, ship_fn, skip_dev=True, ensure_worktree_fn=ensure_fn,
+         dispatch_cycle0_fn=_fail_dispatch)
+    assert seen == ["pr-1", "pr-2", "pr-3"]
+
+
+def test_an_already_dispatched_unit_is_not_dispatched_again_on_resume(tmp_path):
+    from reasona_dev import ledger
+
+    workdir = _repo(tmp_path)
+    ledger.mark_dev_dispatched(workdir, "testplan", "pr-1")
+    dispatched = []
+
+    def _dispatch(*, workdir, worktree_path, plan_name, plan_text, only_index, **kw):
+        dispatched.append(only_index)
+        return True, "ok"
+
+    cycle_fn, ship_fn = _recorder()
+    _run(tmp_path, cycle_fn, ship_fn, workdir_override=workdir, dispatch_cycle0_fn=_dispatch)
+    assert dispatched == ["2", "3"]  # pr-1's cycle-0 already ran -- not redispatched
+
+
+def test_a_failing_cycle0_dispatch_blocks_the_unit_without_running_review(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+
+    def _fail_dispatch(**kw):
+        return False, "dev cycle-0 failed (bernstein run exit 1): boom"
+
+    result = _run(tmp_path, cycle_fn, ship_fn, dispatch_cycle0_fn=_fail_dispatch)
+    statuses = {o.stage_name: o.status for o in result.outcomes}
+    # pr-1 blocked before review ever ran; its dependents (pr-2, pr-3) skip
+    assert statuses == {"pr-1": "blocked", "pr-2": "skipped", "pr-3": "skipped"}
+    assert cycle_fn.calls == []
+    assert "boom" in result.outcomes[0].reason
+
+
+def test_a_failing_worktree_creation_blocks_the_unit(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+
+    def _fail_ensure(workdir, plan_name, stage_name, *, base):
+        raise RuntimeError("git worktree add failed: disk full")
+
+    result = _run(tmp_path, cycle_fn, ship_fn, ensure_worktree_fn=_fail_ensure)
+    assert result.outcomes[0].status == "blocked"
+    assert "disk full" in result.outcomes[0].reason
+    assert cycle_fn.calls == []
+
+
+def test_a_shipped_units_worktree_is_removed(tmp_path):
+    removed = []
+
+    def _remove(workdir, plan_name, stage_name):
+        removed.append(stage_name)
+
+    def tail_fn(**kw):
+        return _tail_ok(kw["stage_name"])
+
+    cycle_fn, ship_fn = _recorder()
+    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn, remove_worktree_fn=_remove)
+    assert result.passed
+    assert removed == ["pr-1", "pr-2", "pr-3"]
+
+
+def test_a_pr_open_units_worktree_is_not_removed(tmp_path):
+    """Only an actual MERGED outcome earns cleanup -- PR_OPEN still has an
+    open PR pointing at that branch."""
+    from reasona_dev.final_phase import PR_OPEN, TailResult
+
+    removed = []
+
+    def _remove(workdir, plan_name, stage_name):
+        removed.append(stage_name)
+
+    def tail_fn(**kw):
+        return TailResult(
+            stage_name=kw["stage_name"], status=PR_OPEN, reason="merge not requested",
+            pr_url="https://gh/pr/1", ship_decision=_pass_ship(),
+        )
+
+    cycle_fn, ship_fn = _recorder()
+    _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn, remove_worktree_fn=_remove)
+    assert removed == []

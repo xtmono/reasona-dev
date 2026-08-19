@@ -32,16 +32,17 @@ review/recheck/bugbot/compliance/final_audit too -- omitting those flags here
 used to mean the "flag" layer was silently unreachable for every role
 except dev when syncing role_model_policy.
 
-`run-plan` compiles the plan and dispatches cycle-0 (`bernstein run ...
---auto-approve`) itself, then review -> scan -> ship_gate. It stops there
-by default -- no PR, no merge. `--ship` opts IN to the merge tail (stops at
-an open PR); `--merge` opts IN further to squash-merging it. Both default
-to off: `final_phase.create_pr()` is a narrow, incomplete reimplementation
-of dev-ralf's `/gh-pr` (no issue creation, no PR body validation, no
-repair loop) and `/gh-review` has no equivalent at all (docs/ARCHITECTURE.md
-§3.9), so PR creation is not something to run unattended until that gap is
-closed. `--skip-dev` opts out of the cycle-0 dispatch, for re-running the
-tail of a plan whose cycle-0 already ran.
+`run-plan` drives every PR unit through its own dedicated git worktree,
+dev-0 -> review -> scan -> ship_gate, in dependency order
+(`reasona_dev.orchestrate`; see its own module docstring on why cycle-0 is
+dispatched per unit, into that unit's worktree, rather than for the whole
+plan up front). It stops there by default -- no PR, no merge. `--ship` opts
+IN to the final stage (gh-pr, gh-review, squash-message guard; stops at an
+open PR); `--merge` opts IN further to squash-merging it. Both default to
+off: opening a real PR and squash-merging it are outward-facing, hard to
+undo actions, not something to run unattended by default. `--skip-dev`
+opts out of cycle-0 dispatch for every unit, for the rare case a unit's
+worktree/cycle-0 was already set up by hand.
 """
 
 from __future__ import annotations
@@ -141,9 +142,9 @@ def _cmd_prompts(args: argparse.Namespace) -> int:
 
 
 def _cmd_run_plan(args: argparse.Namespace) -> int:
-    from reasona_dev import bernstein_dispatch, config_file, ledger, orchestrate
+    from reasona_dev import ledger, orchestrate
     from reasona_dev.model_config import resolve_all
-    from reasona_dev.plan_compile import PlanError, write_plan_yaml
+    from reasona_dev.plan_compile import PlanError
 
     workdir = _workdir(args)
     plan_text = Path(args.plan_file).read_text(encoding="utf-8")
@@ -159,38 +160,6 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
             return 1
         ledger.clear(workdir, plan_name, [u.stage_name for u in units])
 
-    dev_needed = not args.skip_dev and not (
-        not args.restart and ledger.dev_already_dispatched(workdir, plan_name)
-    )
-    if dev_needed:
-        # Under the plan's own log directory, not a flat `.reasona/plan.yaml`
-        # -- two different plans would otherwise silently overwrite the
-        # same file (see reasona_dev/ledger.py on why every runtime path
-        # here is namespaced by plan_name).
-        plan_yaml_path = ledger.log_dir(workdir, plan_name) / "plan.yaml"
-        plan_yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            write_plan_yaml(
-                plan_text, str(plan_yaml_path),
-                plan_name=plan_name,
-                description=f"Compiled from {args.plan_file}",
-                dev_flag=flags.get("dev"),
-                workdir=workdir,
-                policy_flags=flags,
-            )
-        except PlanError as exc:
-            print(f"reasona-dev: {exc}", file=sys.stderr)
-            return 1
-        dispatch = bernstein_dispatch.run_plan_file(plan_yaml_path, workdir, port=args.port)
-        if dispatch.returncode != 0:
-            print(
-                f"reasona-dev: dev cycle-0 failed (bernstein run exit "
-                f"{dispatch.returncode}): {dispatch.stderr_tail}",
-                file=sys.stderr,
-            )
-            return 1
-        ledger.mark_dev_dispatched(workdir, plan_name)
-
     try:
         result = orchestrate.run_plan(
             workdir=workdir,
@@ -205,6 +174,10 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
             merge=args.merge,
             from_pr=args.from_pr,
             resume=not args.restart,
+            skip_dev=args.skip_dev,
+            dev_flag=flags.get("dev"),
+            policy_flags=flags,
+            gh_review_max_wait_seconds=args.gh_review_max_wait,
         )
     except PlanError as exc:
         print(f"reasona-dev: {exc}", file=sys.stderr)
@@ -273,6 +246,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--base", default="origin/main")
     p_run.add_argument("--head", default="HEAD")
     p_run.add_argument(
+        "--gh-review-max-wait", type=int, default=900, dest="gh_review_max_wait",
+        metavar="SECONDS",
+        help=(
+            "Wall-clock budget for gh-review's CI/bot-watch loop per unit "
+            "(--ship only). Matches /gh-review's own --max-wait default "
+            "(900s). This is wait time for GitHub's own workflows to "
+            "finish, not a dev-fix attempt count -- see "
+            "cycle_gate.MAX_GH_REVIEW_CYCLES for that bound."
+        ),
+    )
+    p_run.add_argument(
         "--skip-dev", action="store_true",
         help=(
             "Force-skip compiling and dispatching cycle-0, regardless of the ledger. "
@@ -284,23 +268,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--restart", action="store_true",
         help=(
-            "Ignore and clear this plan's ledger (.reasona/ledger-*.json) and run "
-            "every unit fresh, including re-dispatching cycle-0. Use when the plan "
-            "itself changed since the last run, not for a plain retry after an "
-            "interruption -- a plain re-run of the same command already resumes "
-            "automatically."
+            "Ignore and clear this plan's ledger (.reasona/log/<plan>/<stage>/ledger.json) "
+            "and run every unit fresh, including re-dispatching cycle-0 into a fresh "
+            "worktree. Use when the plan itself changed since the last run, not for a "
+            "plain retry after an interruption -- a plain re-run of the same command "
+            "already resumes automatically."
         ),
     )
     p_run.add_argument(
         "--ship", action="store_true",
         help=(
-            "Run the merge tail after a passing review: sync-main, conditional "
-            "final audit, squash-message guard, PR creation. Stops at an open PR "
-            "unless --merge is also given. Off by default -- see docs/ARCHITECTURE.md "
-            "§3.9 for what `create_pr()` actually implements (a narrow subset of "
-            "dev-ralf's /gh-pr) and what it does not (/gh-review has no equivalent "
-            "at all): PR creation is not something to run unattended by default "
-            "until that gap is closed."
+            "Run the final stage after a passing review: sync-main, conditional final "
+            "audit, ship_gate, gh-pr (issue + PR, structural validation and repair), "
+            "gh-review (CI/bot watch and auto-fix). Stops at an open PR unless --merge "
+            "is also given. Off by default -- opening a real PR is not something to run "
+            "unattended by default."
         ),
     )
     p_run.add_argument(

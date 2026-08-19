@@ -4,21 +4,38 @@ PLAN = "testplan"
 
 
 def test_dev_not_dispatched_by_default(tmp_path):
-    assert ledger.dev_already_dispatched(tmp_path, PLAN) is False
+    assert ledger.dev_already_dispatched(tmp_path, PLAN, "pr-1") is False
 
 
 def test_mark_dev_dispatched_is_read_back(tmp_path):
-    ledger.mark_dev_dispatched(tmp_path, PLAN)
-    assert ledger.dev_already_dispatched(tmp_path, PLAN) is True
+    ledger.mark_dev_dispatched(tmp_path, PLAN, "pr-1")
+    assert ledger.dev_already_dispatched(tmp_path, PLAN, "pr-1") is True
+
+
+def test_dev_dispatched_flag_is_per_unit(tmp_path):
+    """Cycle-0 is now dispatched per PR unit, into that unit's own
+    worktree -- the flag must not leak across units in the same plan."""
+    ledger.mark_dev_dispatched(tmp_path, PLAN, "pr-1")
+    assert ledger.dev_already_dispatched(tmp_path, PLAN, "pr-1") is True
+    assert ledger.dev_already_dispatched(tmp_path, PLAN, "pr-2") is False
 
 
 def test_dev_dispatched_flag_is_plan_scoped(tmp_path):
     """Two plans that both exist under the same workdir must not share a
     cycle-0 flag -- see reasona_dev/ledger.py's own docstring on why every
     path here is namespaced by plan_name."""
-    ledger.mark_dev_dispatched(tmp_path, "plan-a")
-    assert ledger.dev_already_dispatched(tmp_path, "plan-a") is True
-    assert ledger.dev_already_dispatched(tmp_path, "plan-b") is False
+    ledger.mark_dev_dispatched(tmp_path, "plan-a", "pr-1")
+    assert ledger.dev_already_dispatched(tmp_path, "plan-a", "pr-1") is True
+    assert ledger.dev_already_dispatched(tmp_path, "plan-b", "pr-1") is False
+
+
+def test_dev_dispatched_flag_survives_alongside_terminal_status(tmp_path):
+    """Both live in the same unit ledger.json -- marking one must not
+    clobber the other."""
+    ledger.mark_dev_dispatched(tmp_path, PLAN, "pr-1")
+    ledger.mark_unit_terminal(tmp_path, PLAN, "pr-1", status="shipped", reason="merged")
+    assert ledger.dev_already_dispatched(tmp_path, PLAN, "pr-1") is True
+    assert ledger.unit_status(tmp_path, PLAN, "pr-1") == "shipped"
 
 
 def test_unit_status_is_none_by_default(tmp_path):
@@ -82,24 +99,26 @@ def test_pr_url_hint_roundtrips(tmp_path):
 
 
 def test_clear_wipes_dev_flag_and_every_unit_ledger(tmp_path):
-    ledger.mark_dev_dispatched(tmp_path, PLAN)
+    ledger.mark_dev_dispatched(tmp_path, PLAN, "pr-1")
+    ledger.mark_dev_dispatched(tmp_path, PLAN, "pr-2")
     ledger.mark_unit_terminal(tmp_path, PLAN, "pr-1", status="shipped", reason="merged")
     ledger.mark_unit_terminal(tmp_path, PLAN, "pr-2", status="shipped", reason="merged")
 
     ledger.clear(tmp_path, PLAN, ["pr-1", "pr-2"])
 
-    assert ledger.dev_already_dispatched(tmp_path, PLAN) is False
+    assert ledger.dev_already_dispatched(tmp_path, PLAN, "pr-1") is False
+    assert ledger.dev_already_dispatched(tmp_path, PLAN, "pr-2") is False
     assert ledger.unit_status(tmp_path, PLAN, "pr-1") is None
     assert ledger.unit_status(tmp_path, PLAN, "pr-2") is None
 
 
 def test_clear_does_not_touch_a_different_plan(tmp_path):
-    ledger.mark_dev_dispatched(tmp_path, "plan-a")
+    ledger.mark_dev_dispatched(tmp_path, "plan-a", "pr-1")
     ledger.mark_unit_terminal(tmp_path, "plan-a", "pr-1", status="shipped", reason="merged")
 
     ledger.clear(tmp_path, PLAN, ["pr-1"])  # a different (unrelated) plan
 
-    assert ledger.dev_already_dispatched(tmp_path, "plan-a") is True
+    assert ledger.dev_already_dispatched(tmp_path, "plan-a", "pr-1") is True
     assert ledger.unit_status(tmp_path, "plan-a", "pr-1") == "shipped"
 
 
@@ -108,10 +127,17 @@ def test_clear_on_a_never_written_ledger_does_not_raise(tmp_path):
 
 
 def test_a_corrupt_ledger_file_is_treated_as_absent(tmp_path):
-    path = ledger.log_dir(tmp_path, PLAN) / "ledger-plan.json"
+    path = ledger.unit_dir(tmp_path, PLAN, "pr-1") / "ledger.json"
     path.parent.mkdir(parents=True)
     path.write_text("{not valid json")
-    assert ledger.dev_already_dispatched(tmp_path, PLAN) is False
+    assert ledger.dev_already_dispatched(tmp_path, PLAN, "pr-1") is False
+    assert ledger.unit_status(tmp_path, PLAN, "pr-1") is None
+
+
+def test_issue_number_hint_roundtrips(tmp_path):
+    assert ledger.known_issue_number(tmp_path, PLAN, "pr-1") is None
+    ledger.mark_issue_created(tmp_path, PLAN, "pr-1", 42)
+    assert ledger.known_issue_number(tmp_path, PLAN, "pr-1") == 42
 
 
 def test_unit_dir_is_namespaced_by_plan_then_stage(tmp_path):

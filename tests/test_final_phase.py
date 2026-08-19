@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from reasona_dev import final_phase
+from reasona_dev import final_phase, gh_pr, gh_review
 from reasona_dev.cycle_gate import (
     MAX_FINAL_PHASE_ROUNDS,
     MAX_SHIP_CYCLES,
@@ -23,8 +23,11 @@ from reasona_dev.final_phase import (
     sync_main,
 )
 from reasona_dev.model_config import ResolvedModel
+from reasona_dev.plan_compile import PRUnit
 from reasona_dev.pr_cycle import RoleRunResult
 from reasona_dev.ship_gate import GateOutcome, ShipDecision
+
+_UNIT = PRUnit(index="1", title="add subtract()", section="## PR 1: add subtract()\n\n- [ ] x\n")
 
 _RESOLVED = {
     "dev": ResolvedModel("dev", "sonnet", "claude", "high", "d"),
@@ -152,12 +155,23 @@ def test_audit_findings_spend_the_final_stage_budget(tmp_path, generic_prompts):
 # --- composition ------------------------------------------------------------
 
 def _stub(monkeypatch, *, gh=None, sync=(True, "ok"), up=(True, "ok"),
-          pr=("https://gh/pr/1", "PR created"), merged=(True, "squash-merged")):
+          pr=("https://gh/pr/1", "PR created"), merged=(True, "squash-merged"),
+          gh_pr_passed=True, gh_pr_reason="ok", gh_review_passed=True, gh_review_reason="ok"):
     monkeypatch.setattr(final_phase, "gh_available", lambda w: gh)
     monkeypatch.setattr(final_phase, "sync_main", lambda w, *, base: sync)
     monkeypatch.setattr(final_phase, "is_up_to_date", lambda w, *, base: up)
-    monkeypatch.setattr(final_phase, "create_pr", lambda w, m, **kw: pr)
     monkeypatch.setattr(final_phase, "squash_merge", lambda w, m: merged)
+    monkeypatch.setattr(
+        gh_pr, "run_gh_pr",
+        lambda **kw: gh_pr.GhPrResult(
+            passed=gh_pr_passed, reason=gh_pr_reason,
+            pr_url=pr[0] if gh_pr_passed else None, pr_num=1, issue_num=1, branch="issue/1-x",
+        ),
+    )
+    monkeypatch.setattr(
+        gh_review, "run_gh_review",
+        lambda **kw: gh_review.GhReviewResult(passed=gh_review_passed, reason=gh_review_reason),
+    )
 
 
 def _ship_fn(*, passed=True, reason="ok"):
@@ -172,7 +186,7 @@ def _ship_fn(*, passed=True, reason="ok"):
 def _tail(tmp_path, ship_gate_fn=None, **kw):
     return run_final_stage(
         workdir=tmp_path, stage_name="pr-1", pr_title="add subtract()",
-        unit_type="feat", profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
+        unit_type="feat", unit=_UNIT, profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
         cycle_verdict="PASS", ship_gate_fn=ship_gate_fn or _ship_fn(),
         budget=FixBudget(), recurrence=RecurrenceTracker(), **kw,
     )
@@ -276,9 +290,24 @@ def test_a_failed_merge_call_blocks_rather_than_reporting_success(tmp_path, monk
     assert r.status == BLOCKED and "not mergeable" in r.reason
 
 
+def test_a_failing_gh_pr_blocks_before_gh_review_runs(tmp_path, monkeypatch):
+    _stub(monkeypatch, gh_pr_passed=False, gh_pr_reason="pr-meta violation: ['P4']")
+    monkeypatch.setattr(gh_review, "run_gh_review", lambda **kw: pytest.fail("must not run gh-review"))
+    r = _tail(tmp_path)
+    assert r.status == BLOCKED and "pr-meta violation" in r.reason
+
+
+def test_a_failing_gh_review_blocks_before_squash_message_is_built(tmp_path, monkeypatch):
+    _stub(monkeypatch, gh_review_passed=False, gh_review_reason="fix budget exhausted (3 cycles)")
+    monkeypatch.setattr(final_phase, "build_squash_message", lambda **kw: pytest.fail("must not build squash message"))
+    r = _tail(tmp_path)
+    assert r.status == BLOCKED and "fix budget exhausted" in r.reason
+    assert r.pr_url == "https://gh/pr/1"  # the PR itself still exists, just not merge-ready
+
+
 def test_a_failing_audit_blocks_before_a_pr_is_created(tmp_path, monkeypatch, generic_prompts):
     _stub(monkeypatch)
-    monkeypatch.setattr(final_phase, "create_pr", lambda w, m, **kw: pytest.fail("must not create PR"))
+    monkeypatch.setattr(gh_pr, "run_gh_pr", lambda **kw: pytest.fail("must not create PR"))
     budget = FixBudget()
     budget.spend("review")  # earns an audit
 
@@ -289,7 +318,7 @@ def test_a_failing_audit_blocks_before_a_pr_is_created(tmp_path, monkeypatch, ge
 
     r = run_final_stage(
         workdir=tmp_path, stage_name="pr-1", pr_title="add subtract()",
-        unit_type="feat", profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
+        unit_type="feat", unit=_UNIT, profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
         cycle_verdict="PASS", ship_gate_fn=_ship_fn(), budget=budget, recurrence=RecurrenceTracker(),
         merge=True, run_role_fn=_fn,
     )

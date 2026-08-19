@@ -267,6 +267,7 @@ def compile_to_bernstein_plan(
     write_acceptance: bool = True,
     strict_plan: bool = True,
     validate_profiles: bool = True,
+    only_index: str | None = None,
 ) -> dict:
     """Return a dict matching Bernstein's plan.yaml schema (validated shape).
 
@@ -274,6 +275,20 @@ def compile_to_bernstein_plan(
     plan's declared PR dependencies -- the same DAG dev-ralf's scheduler
     used to compute a ready-set for; here Bernstein's own stage scheduler
     resolves it natively (no ready-set loop needed on our side).
+
+    `only_index`, when given, compiles a plan.yaml carrying ONLY that one PR
+    unit's stage (no `depends_on`, since there is nothing else in the
+    output for it to depend on). `reasona_dev.orchestrate` uses this to
+    dispatch each unit's cycle-0 into that unit's own git worktree,
+    one unit at a time, in the dependency order it already enforces at the
+    Python level -- rather than handing Bernstein a whole-plan multi-stage
+    DAG to run unattended, which is what forced every unit's cycle-0 onto
+    the SAME shared checkout before any unit-level worktree could exist
+    (see docs/ARCHITECTURE.md §3.11 on why that was wrong). Every other
+    side effect of this function (acceptance files, the audit trail, the
+    `bernstein.yaml` bootstrap/sync) still runs for the filtered unit only,
+    anchored at `workdir` as always -- which the caller points at that
+    unit's own worktree, not the top-level repo.
 
     `dev_model` defaults to `reasona_dev.model_config.resolve("dev")` --
     the same flag > env var (`REASONA_DEV_DEV_MODEL`) > default chain
@@ -371,6 +386,11 @@ def compile_to_bernstein_plan(
         )
     units = manifest_units or parse_plan_units(plan_text)
 
+    if only_index is not None:
+        units = [u for u in units if u.index == only_index]
+        if not units:
+            raise PlanError(f"only_index {only_index!r} does not match any PR unit in this plan")
+
     # Resolve every unit's profile now, at compile time, rather than at
     # dispatch. A unit whose files span two profiles is a plan defect, and a
     # plan defect should surface while the author still has the plan open --
@@ -441,7 +461,12 @@ def compile_to_bernstein_plan(
             "name": stage_name,
             "steps": [step],
         }
-        if u.depends_on:
+        # `only_index` compiles a single-stage plan.yaml -- any `depends_on`
+        # would reference a stage name that does not exist in `stages`
+        # (the dependency's own unit was filtered out). The dependency order
+        # is already enforced one level up, by `orchestrate.py` running
+        # units sequentially -- see this function's own docstring.
+        if u.depends_on and only_index is None:
             stage["depends_on"] = [_stage_name(d) for d in u.depends_on]
         stages.append(stage)
 

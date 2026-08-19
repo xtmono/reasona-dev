@@ -1,5 +1,6 @@
-"""Runs a whole plan's PR units through review -> scan -> ship, in
-dependency order, each under the profile its own files resolve to.
+"""Runs a whole plan's PR units through dev-0 -> review -> scan -> ship, in
+dependency order, each in its own git worktree and under the profile its
+own files resolve to.
 
 **The gap this closes.** `plan_compile` knows a plan's units, their
 `files:`, their `depends_on:`, and their profiles. `pr_cycle` reviews one
@@ -9,12 +10,22 @@ a plan meant invoking three modules by hand, once per unit, with the right
 arguments derived by the operator. That is the same "available, if you
 remember" state `ship_gate` was built to remove -- one level up.
 
-**Where the dev step is.** Not here. `plan_compile` emits a Bernstein
-plan.yaml whose stages carry each unit's cycle-0 implementation step, and
-Bernstein's own scheduler runs that DAG. This module picks up exactly where
-`pr_cycle` documents its own entry point: after the implementation exists.
-Owning the dev step here would mean re-implementing a DAG scheduler that
-already runs, which is the opposite of this project's premise.
+**Where the dev step is: HERE now, per unit, in that unit's own worktree.**
+This used to be different -- `cli.py` compiled the WHOLE plan into one
+Bernstein plan.yaml (one stage per unit, wired with `depends_on`) and
+dispatched it as a single `bernstein run`, entirely before this module ever
+started. That put every unit's cycle-0 commits on the SAME shared
+`workdir` checkout, sequentially, before any unit-level isolation could
+exist -- so a real per-unit branch/PR was structurally impossible without
+commit surgery (`docs/ARCHITECTURE.md` §3.11 has the full account). Fixed
+by moving cycle-0 in here: each unit gets its own worktree
+(`reasona_dev.worktree.ensure_unit_worktree()`) before its cycle-0 is
+dispatched (`plan_compile.compile_to_bernstein_plan(..., only_index=...)`,
+one unit at a time), and every later stage for that unit -- review, scan,
+the final phase, gh-pr, gh-review, squash-merge -- runs against that same
+worktree. Dependency ordering no longer needs to be expressed as a
+Bernstein DAG at all: this module's own sequential unit loop already
+enforces it.
 
 **Dependency order, and what a failure does to dependents.** Units run in
 topological order of their declared `depends_on`. A unit whose dependency
@@ -35,9 +46,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import config_file, final_phase as final_phase_mod, ledger, ship_gate
+from reasona_dev import bernstein_dispatch, config_file, final_phase as final_phase_mod, ledger, worktree
+from reasona_dev import gh_review as gh_review_mod
+from reasona_dev import ship_gate
 from reasona_dev.model_config import ResolvedModel
-from reasona_dev.plan_compile import PRUnit, PlanError, _stage_name, parse_manifest_units, parse_plan_units
+from reasona_dev.plan_compile import (
+    PRUnit,
+    PlanError,
+    _stage_name,
+    parse_manifest_units,
+    parse_plan_units,
+    write_plan_yaml,
+)
 from reasona_dev.cycle_gate import FixBudget, RecurrenceTracker
 from reasona_dev.final_phase import TailResult
 from reasona_dev.pr_cycle import CycleResult, run_pr_cycle
@@ -207,6 +227,45 @@ def _blocking_dependency(unit: UnitPlan, outcomes: dict[str, UnitOutcome], known
     return None
 
 
+def dispatch_unit_cycle0(
+    *,
+    workdir: Path,
+    worktree_path: Path,
+    plan_name: str,
+    plan_text: str,
+    only_index: str,
+    dev_flag: str | None = None,
+    policy_flags: dict[str, str] | None = None,
+    port: int = 8052,
+) -> tuple[bool, str]:
+    """Compile a single-unit plan.yaml (`only_index`) and dispatch it into
+    `worktree_path` -- this unit's own worktree, not the top-level repo. The
+    compiled plan.yaml itself is written under the top-level `workdir`'s log
+    directory (alongside this unit's other run artifacts), even though it
+    gets DISPATCHED against the worktree; only the git checkout moves, not
+    where logs/ledger live (`reasona_dev.ledger`'s own layout is unaffected).
+
+    Returns `(ok, reason)`.
+    """
+    plan_yaml_path = ledger.log_dir(workdir, plan_name) / only_index / "plan.yaml"
+    plan_yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        write_plan_yaml(
+            plan_text, str(plan_yaml_path),
+            plan_name=plan_name, description=f"Compiled from plan (PR {only_index})",
+            dev_flag=dev_flag, workdir=worktree_path, policy_flags=policy_flags,
+            only_index=only_index,
+        )
+    except PlanError as exc:
+        return False, str(exc)
+    dispatch = bernstein_dispatch.run_plan_file(plan_yaml_path, worktree_path, port=port)
+    if dispatch.returncode != 0:
+        return False, (
+            f"dev cycle-0 failed (bernstein run exit {dispatch.returncode}): {dispatch.stderr_tail}"
+        )
+    return True, "ok"
+
+
 def run_plan(
     *,
     workdir: str | Path,
@@ -221,14 +280,26 @@ def run_plan(
     merge: bool = False,
     from_pr: str | None = None,
     resume: bool = True,
+    skip_dev: bool = False,
+    dev_flag: str | None = None,
+    policy_flags: dict[str, str] | None = None,
+    gh_review_max_wait_seconds: int = gh_review_mod.DEFAULT_MAX_WAIT_SECONDS,
+    ensure_worktree_fn=worktree.ensure_unit_worktree,
+    remove_worktree_fn=worktree.remove_unit_worktree,
+    dispatch_cycle0_fn=dispatch_unit_cycle0,
     run_pr_cycle_fn=run_pr_cycle,
     ship_gate_fn=ship_gate.evaluate,
     final_stage_fn=final_phase_mod.run_final_stage,
 ) -> PlanRunResult:
-    """review -> scan -> ship, per unit, in dependency order.
+    """dev-0 -> review -> scan -> ship, per unit, in dependency order, each
+    in its own git worktree (see module docstring).
 
-    Assumes each unit's cycle-0 implementation already exists (see module
-    docstring on where the dev step lives).
+    **`skip_dev`** force-skips cycle-0 dispatch for every unit regardless of
+    the ledger -- for the rare case a unit's worktree/cycle-0 was set up by
+    hand. `dev_flag`/`policy_flags` are the raw CLI flag layer
+    (`cli.py`'s `_collect_flags()`), threaded through to
+    `dispatch_unit_cycle0()`'s `plan_compile.compile_to_bernstein_plan()`
+    call the same way `compile-plan` uses them.
 
     **Automatic resume (`resume=True`, the default).** Before dispatching a
     unit, its ledger (`reasona_dev.ledger`) is checked -- a unit already
@@ -295,8 +366,50 @@ def run_plan(
                 by_index[up.index] = outcome
                 continue
 
+            try:
+                unit_workdir, _branch = ensure_worktree_fn(workdir, plan_name, up.stage_name, base=base)
+            except RuntimeError as exc:
+                # Cannot even get a checkout for this unit -- outside
+                # code-quality judgment entirely, same class as `gh`
+                # unavailable (§ final_phase.py's blocked/failed split).
+                outcome = UnitOutcome(
+                    stage_name=up.stage_name, profile=up.profile, status="blocked",
+                    reason=f"worktree: {exc}",
+                )
+                if resume:
+                    ledger.mark_unit_terminal(
+                        workdir, plan_name, up.stage_name, status=outcome.status, reason=outcome.reason,
+                    )
+                result.outcomes.append(outcome)
+                by_index[up.index] = outcome
+                continue
+
+            dev_needed = not skip_dev and not (
+                resume and ledger.dev_already_dispatched(workdir, plan_name, up.stage_name)
+            )
+            if dev_needed:
+                ok, reason = dispatch_cycle0_fn(
+                    workdir=workdir, worktree_path=unit_workdir, plan_name=plan_name,
+                    plan_text=plan_text, only_index=up.index,
+                    dev_flag=dev_flag, policy_flags=policy_flags, port=port,
+                )
+                if not ok:
+                    outcome = UnitOutcome(
+                        stage_name=up.stage_name, profile=up.profile, status="blocked",
+                        reason=reason,
+                    )
+                    if resume:
+                        ledger.mark_unit_terminal(
+                            workdir, plan_name, up.stage_name, status=outcome.status, reason=outcome.reason,
+                        )
+                    result.outcomes.append(outcome)
+                    by_index[up.index] = outcome
+                    continue
+                if resume:
+                    ledger.mark_dev_dispatched(workdir, plan_name, up.stage_name)
+
             cycle = run_pr_cycle_fn(
-                workdir=workdir,
+                workdir=unit_workdir,
                 pr_title=f"PR {up.index}: {up.title}",
                 resolved=resolved,
                 rundir=log_base / up.stage_name,
@@ -326,8 +439,8 @@ def run_plan(
                     # final_phase.run_final_phase() on why it can no longer be
                     # evaluated up front here.
                     tail = final_stage_fn(
-                        workdir=workdir, stage_name=up.stage_name,
-                        pr_title=f"{up.title}", unit_type=up.unit.unit_type,
+                        workdir=unit_workdir, stage_name=up.stage_name,
+                        pr_title=f"{up.title}", unit_type=up.unit.unit_type, unit=up.unit,
                         profile=up.profile, resolved=resolved,
                         rundir=log_base / up.stage_name,
                         cycle_verdict=cycle.verdict, ship_gate_fn=ship_gate_fn,
@@ -335,8 +448,14 @@ def run_plan(
                         recurrence=cycle.recurrence or RecurrenceTracker(),
                         base=base, merge=merge,
                         plan_name=plan_name if resume else None,
+                        gh_review_max_wait_seconds=gh_review_max_wait_seconds,
                     )
                     decision = tail.ship_decision
+                    if tail.status == final_phase_mod.MERGED:
+                        # Shipped -- the worktree has done its job. A
+                        # failed/blocked unit's worktree is left in place
+                        # deliberately (module docstring on why).
+                        remove_worktree_fn(workdir, plan_name, up.stage_name)
                 else:
                     # No `--ship`: no sync, no final_audit, no PR, no merge --
                     # just the review/scan verdict's own preview of whether
@@ -344,7 +463,7 @@ def run_plan(
                     # check (that only exists inside the merge tail, on
                     # post-sync/post-audit code), but a real signal costs
                     # nothing extra here since nothing merges either way.
-                    decision = ship_gate_fn(workdir, up.stage_name, cycle_verdict=cycle.verdict)
+                    decision = ship_gate_fn(unit_workdir, up.stage_name, cycle_verdict=cycle.verdict)
                 if tail is not None and tail.blocked:
                     # Every non-passing outcome inside the final phase (gh
                     # unavailable, a sync conflict or ship-gate fix budget
