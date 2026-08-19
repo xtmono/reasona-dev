@@ -298,8 +298,8 @@ _KV_NON_BLOCKING_RE = re.compile(r"^NON_BLOCKING_JSON=(.*)$", re.MULTILINE)
 def parse_kv_contract(text: str) -> ReviewResult:
     """Parse an external skill's own KV wire shape (worker.md -> *Role I/O*:
     dev-ralf's ``finding_adapter.py --input kv`` mode) -- the
-    ``=== <skill> RESULT ===`` ... ``=== END ===`` block ``ext-bugbot``/
-    ``ext-review`` emit:
+    ``=== <skill> RESULT ===`` ... ``=== END ===`` block that external
+    review skills (``ext-bugbot``/``ext-review``) emit:
 
         === ext-bugbot RESULT ===
         VERDICT: PASS|FAIL
@@ -446,10 +446,10 @@ def parse_role_output(text: str) -> ReviewResult:
     the parser from the role name (`bugbot`/`compliance` -> KV, everything
     else -> text), which encodes an assumption that is false the moment a
     profile changes: the wire shape is a property of the PROMPT, not the
-    role. dev-ralf's Rust-monorepo profile delegates bugbot to an external skill that
-    emits the KV block; this project's packaged `generic` profile asks for
-    the same `||` text contract as review. Both are legitimate, and the role
-    is `bugbot` either way.
+    role. dev-ralf's Rust-monorepo profile delegates bugbot to an external
+    skill that emits the KV block; this project's packaged `generic` profile
+    asks for the same `||` text contract as review. Both are legitimate, and
+    the role is `bugbot` either way.
 
     Live consequence of getting this wrong: the generic bugbot and
     compliance prompts produced perfectly well-formed text contracts, the

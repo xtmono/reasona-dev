@@ -1,9 +1,10 @@
 """Per-project review/bugbot/compliance prompt profiles.
 
 dev-ralf's actual review/bugbot/compliance prompts (worker.md -> *Verify
-cycles* / *Role I/O*) are project- and language-specific -- a Rust monorepo's are
-Rust-aware (`agent/rust-rules.md`, cargo-specific bug classes) and dispatch
-to a target repo's own skills (`ext-bugbot`, `ext-review`). A different project
+cycles* / *Role I/O*) are project- and language-specific -- a Rust
+monorepo's are Rust-aware (`agent/rust-rules.md`, cargo-specific bug
+classes) and dispatch to that project's own skills (`ext-bugbot`,
+`ext-review`). A different project
 (a Python monorepo, a Go service) needs different prompts, not reasona-dev's
 own hardcoded ones -- so these live as plain files under `.reasona/prompts/
 <profile>/`, selected by NAME through the same flag > env var > project cfg
