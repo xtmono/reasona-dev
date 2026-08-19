@@ -856,6 +856,13 @@ moving to that substrate, and the alternative (compiling and running each PR uni
 sequence) gives up some of the parallel-DAG benefit. This will be judged once §3.7.6's measurements
 are in.
 
+**The runtime feedback loop (the source analysis's other deferred proposal) was also examined and
+not built.** It is product-specific — what "the runtime told us this was wrong" means depends on
+the target product's own observability, which this project cannot assume. Its general form already
+exists here in a substrate-agnostic shape: post-merge acceptance (§3.7.3's `acceptance.py`, run as
+a pre-merge gate today, extendable to a scheduled post-merge check) is the same idea — verify a
+claim by running it — without requiring a product-specific feedback channel.
+
 ### 3.7.5 `poll_task`'s handling of the approval wait
 
 The approval gate itself was removed (§3.7.2), but the polling fix that surfaced alongside it while
@@ -894,8 +901,9 @@ basis exist for deciding which role to cut.
 `.reasona/memory/*.md` is **generated** from `cycles.jsonl`. The constraint that it must never be
 hand-written is itself the design. The memory directory is the same kind of surface as skill
 documentation, and skill documentation bloats not because of its format but because adding an entry
-is easy while nobody is ever responsible for removing one. Moving that habit into `memory/` would
-just reproduce it.
+is easy while nobody is ever responsible for removing one — dev-ralf's own `SKILL.md` reached 472
+lines, much of it explaining why superseded revisions were wrong, all of it loaded into every
+agent's context on every run. Moving that habit into `memory/` would just reproduce it.
 
 Generation gives three properties for free, with no discipline required — drift is impossible
 because it is computed from what actually happened, patterns that have stopped recurring
@@ -977,7 +985,13 @@ disadvantaged (in scan, bugbot dispatches before compliance). A role with high `
 `unique` near zero is a drop candidate, and the table supports that conclusion directly, with no
 interpretation needed.
 
-`gate_vs_acceptance()` produces the four-way split. It counts only units that **declare** an AC —
+```
+acceptance coverage: 2/3 units declare criteria (67%), 1 passed, 1 failed
+gate vs acceptance (units with declared criteria only)
+  gate_only=1  acceptance_only=1  both=0  neither=0
+```
+
+`gate_vs_acceptance()` produces the four-way split above. It counts only units that **declare** an AC —
 a unit that does not declare one cannot testify to "what would AC have caught," and counting it as
 "AC caught nothing" would misread plan coverage as AC's value.
 
