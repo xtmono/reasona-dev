@@ -20,8 +20,34 @@ from reasona_dev.finding_adapter import Finding, ReviewResult
 # dev-ralf-renewal-claude.md §3.9 -- stage caps + one binding total.
 MAX_REVIEW_CYCLES = 8
 MAX_SCAN_CYCLES = 8
-MAX_FINAL_CYCLES = 2
+MAX_FINAL_CYCLES = 3
+MAX_SYNC_CYCLES = 3
 MAX_TOTAL_FIX_CYCLES = 16
+
+# `ship_gate`'s acceptance axis used to have no fix loop at all -- the first
+# failure terminated the unit immediately, unlike every other check in this
+# pipeline (review/scan/final_audit/sync all dispatch a bounded dev-fix
+# before giving up). That made a genuinely fixable acceptance failure
+# terminate the unit with zero attempts at a real fix. `MAX_SHIP_CYCLES`
+# bounds dev's chance to fix a failing acceptance criterion the same way
+# every other stage is bounded. This budget being exhausted is still a
+# `blocked` outcome, not a `failed` one -- see final_phase.py's module
+# docstring: everything past review/scan (sync, final_audit, ship_gate,
+# final-phase non-convergence) reports `blocked` when its own bounded
+# dev-fix attempts run out, since by that point three independent roles
+# have already vetted the code and a stall this late is an anomaly to
+# investigate, not an ordinary review-found defect.
+MAX_SHIP_CYCLES = 3
+
+# How many times the sync -> final_audit -> ship_gate tail re-verifies
+# itself. A conflict resolved by `sync_cycle` or a fix made by
+# `final_audit` both change the code AFTER the step before it already
+# looked -- so either one, in the same round, means that round's verdict
+# is stale and the whole tail runs again from sync. Bounded rather than
+# unconditional: base moving again during our own tail processing is rare,
+# and a plan whose target keeps moving faster than this pipeline can settle
+# is not something retrying indefinitely would fix.
+MAX_FINAL_PHASE_ROUNDS = 3
 
 # New rule agreed in this design track: a MUST_FIX key surviving one
 # completed fix earns exactly one bounded escalation of the dev role to a
@@ -55,6 +81,8 @@ class FixBudget:
     review_cycles: int = 0
     scan_cycles: int = 0
     final_cycles: int = 0
+    sync_cycles: int = 0
+    ship_cycles: int = 0
     total_used: int = 0
 
     def can_spend(self, stage: str) -> bool:
@@ -62,8 +90,14 @@ class FixBudget:
             "review": MAX_REVIEW_CYCLES,
             "scan": MAX_SCAN_CYCLES,
             "final": MAX_FINAL_CYCLES,
+            "sync": MAX_SYNC_CYCLES,
+            "ship": MAX_SHIP_CYCLES,
         }[stage]
-        used = {"review": self.review_cycles, "scan": self.scan_cycles, "final": self.final_cycles}[stage]
+        used = {
+            "review": self.review_cycles, "scan": self.scan_cycles,
+            "final": self.final_cycles, "sync": self.sync_cycles,
+            "ship": self.ship_cycles,
+        }[stage]
         return used < cap and self.total_used < MAX_TOTAL_FIX_CYCLES
 
     def spend(self, stage: str) -> None:
@@ -73,7 +107,31 @@ class FixBudget:
             self.scan_cycles += 1
         elif stage == "final":
             self.final_cycles += 1
+        elif stage == "sync":
+            self.sync_cycles += 1
+        elif stage == "ship":
+            self.ship_cycles += 1
         self.total_used += 1
+
+    # JSON roundtrip -- the ledger (reasona_dev.ledger) checkpoints this
+    # every cycle so a resumed run does not re-litigate a budget an
+    # interrupted run had already spent. Every field is a plain int, so
+    # this is asdict()/the constructor, named for symmetry with the other
+    # two trackers below (RecurrenceTracker.escalated needs real conversion).
+    def to_dict(self) -> dict:
+        return {
+            "review_cycles": self.review_cycles, "scan_cycles": self.scan_cycles,
+            "final_cycles": self.final_cycles, "sync_cycles": self.sync_cycles,
+            "total_used": self.total_used,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FixBudget":
+        return cls(
+            review_cycles=d.get("review_cycles", 0), scan_cycles=d.get("scan_cycles", 0),
+            final_cycles=d.get("final_cycles", 0), sync_cycles=d.get("sync_cycles", 0),
+            total_used=d.get("total_used", 0),
+        )
 
 
 @dataclass
@@ -100,6 +158,16 @@ class RecurrenceTracker:
             self.escalated.add(key)
             return "ESCALATE_ONCE"
         return "FAIL"  # survived escalation too -- stop-the-world, not another retry
+
+    def to_dict(self) -> dict:
+        # `escalated` is a set -- JSON has no set literal, so it round-trips
+        # as a sorted list (sorted only for a stable diff in the ledger
+        # file, membership is what `decide()` actually uses).
+        return {"survived": dict(self.survived), "escalated": sorted(self.escalated)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RecurrenceTracker":
+        return cls(survived=dict(d.get("survived", {})), escalated=set(d.get("escalated", [])))
 
 
 @dataclass
@@ -146,6 +214,13 @@ class ConvergenceTracker:
             return False
         recent = self.counts[-window:]
         return recent[-1] >= recent[0]
+
+    def to_dict(self) -> dict:
+        return {"counts": list(self.counts)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ConvergenceTracker":
+        return cls(counts=list(d.get("counts", [])))
 
 
 def recheck_route(repo: str, pre_fix_head: str, finding_files: set[str]) -> str:

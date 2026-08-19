@@ -1,7 +1,7 @@
 """Drives one PR unit through dev-ralf's actual cycle -- worker.md's
 "Pipeline you run": ``develop -> review (max 8 cycles) -> bug+compliance
 scan (parallel, max 8 cycles)``. `reasona_dev.ship_gate` and
-`reasona_dev.merge_tail` pick up after this returns.
+`reasona_dev.final_phase` pick up after this returns.
 
 **Why this exists instead of a bigger `plan.yaml`.** The number of review
 cycles, whether bugbot+compliance even run, and whether a MUST_FIX
@@ -46,7 +46,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import cycles_log, memory
+from reasona_dev import cycles_log, ledger, memory
 from reasona_dev.bernstein_dispatch import DEFAULT_ROLE_SCOPE, run_plan_file, write_role_plan
 from reasona_dev.cycle_gate import (
     ConvergenceTracker,
@@ -56,6 +56,7 @@ from reasona_dev.cycle_gate import (
     recheck_route,
 )
 from reasona_dev.finding_adapter import (
+    Finding,
     ReviewResult,
     RoleStatus,
     merge,
@@ -362,6 +363,8 @@ def run_pr_cycle(
     port: int = 8052,
     stage_name: str | None = None,
     files: list[str] | None = None,
+    plan_name: str | None = None,
+    resume: bool = False,
     run_role_fn=run_role,
 ) -> CycleResult:
     """develop -> review -> bug+compliance scan, worker.md-faithful.
@@ -374,23 +377,48 @@ def run_pr_cycle(
     Each role dispatch is its own `bernstein run`, so there is no server
     lifetime to manage here and no cleanup path to get wrong.
 
+    **Resume (`resume=True`, `plan_name` given).** `FixBudget`/
+    `RecurrenceTracker`/`ConvergenceTracker` are checkpointed to
+    `reasona_dev.ledger` after every review/scan cycle -- a `git`/`gh`
+    query can't re-derive them the way `final_phase.py` re-derives its own
+    state, since they're pure in-memory bookkeeping with no external
+    system of record. A resumed run restores them instead of starting a
+    fresh `FixBudget()` at cycle 0, so a unit interrupted mid-review picks
+    back up at its next cycle rather than repeating cycles it already
+    spent budget on.
+
     `run_role_fn` is injectable purely for testing -- production callers
     never pass it.
     """
     workdir = Path(workdir)
     rundir = Path(rundir)
     stage_name = stage_name or _slug(pr_title)
-    recurrence = RecurrenceTracker()
-    review_budget = FixBudget()
-    scan_budget = FixBudget()
-    review_convergence = ConvergenceTracker()
-    scan_convergence = ConvergenceTracker()
+
+    progress = ledger.load_progress(workdir, plan_name, stage_name) if (resume and plan_name) else None
+
+    recurrence = RecurrenceTracker.from_dict(progress["recurrence"]) if progress else RecurrenceTracker()
+    review_budget = (
+        FixBudget.from_dict(progress["review_budget"]) if progress else FixBudget()
+    )
+    scan_budget = (
+        FixBudget.from_dict(progress["scan_budget"]) if progress else FixBudget()
+    )
+    review_convergence = (
+        ConvergenceTracker.from_dict(progress["review_convergence"]) if progress else ConvergenceTracker()
+    )
+    scan_convergence = (
+        ConvergenceTracker.from_dict(progress["scan_convergence"]) if progress else ConvergenceTracker()
+    )
     # Carried across cycles, reset the moment a stage produces a conclusive
     # result. Passing a literal 0 (as this did) makes `evaluate`'s
     # INCONCLUSIVE branch unable to ever reach its own cap.
-    review_inconclusive = 0
-    scan_inconclusive = 0
+    review_inconclusive = progress["review_inconclusive"] if progress else 0
+    scan_inconclusive = progress["scan_inconclusive"] if progress else 0
     role_results: list[RoleRunResult] = []
+
+    def _checkpoint(**kw) -> None:
+        if resume and plan_name:
+            ledger.save_progress(workdir, plan_name, stage_name, kw)
 
     def _log(stage: str, cycle: int, result: RoleRunResult, model: ResolvedModel) -> None:
         cycles_log.record_dispatch(
@@ -426,12 +454,41 @@ def run_pr_cycle(
     # review it did not define the contract for.
     recheck_profile_prompt = resolve_prompt("recheck", profile=profile, workdir=workdir)
 
+    resuming_into_scan = bool(progress) and progress.get("phase") == "scan"
+
+    def _snapshot(*, phase: str, review_cycle: int, route: str, pending_confirm: list[Finding],
+                  scan_cycle: int, scope_suffix: str) -> None:
+        _checkpoint(
+            phase=phase, review_cycle=review_cycle, route=route,
+            pending_confirm=[f.to_dict() for f in pending_confirm],
+            scan_cycle=scan_cycle, scope_suffix=scope_suffix,
+            review_budget=review_budget.to_dict(), scan_budget=scan_budget.to_dict(),
+            review_convergence=review_convergence.to_dict(), scan_convergence=scan_convergence.to_dict(),
+            review_inconclusive=review_inconclusive, scan_inconclusive=scan_inconclusive,
+            recurrence=recurrence.to_dict(),
+        )
+
     try:
         # --- Review cycles, max 8 -- worker.md -> *Develop & review* ---
-        cycle = 0
-        route = "FULL"
-        pending_confirm: list = []
-        while True:
+        # `while not resuming_into_scan` -- when resuming into the scan
+        # phase, review already reached a "pass" decision in the
+        # interrupted run (that's the only way `phase` ever advances past
+        # "review", see the checkpoint right after this loop), so the body
+        # never executes even once and `cycle` stays at its restored value.
+        # Re-running review would just re-spend cycles it already spent.
+        # `role_results` stays empty for this phase on that path: the
+        # review phase's own `RoleRunResult`s live in the interrupted run's
+        # (lost) return value, not reconstructed here -- `CycleResult.
+        # role_results` is informational (nothing downstream gates on it),
+        # so an incomplete list on a resumed run is a real but
+        # non-correctness-affecting gap, not silently pretended otherwise.
+        cycle = progress["review_cycle"] if (progress and not resuming_into_scan) else 0
+        route = progress["route"] if (progress and not resuming_into_scan) else "FULL"
+        pending_confirm: list[Finding] = (
+            [Finding.from_dict(f) for f in progress["pending_confirm"]]
+            if (progress and not resuming_into_scan) else []
+        )
+        while not resuming_into_scan:
             cycle += 1
             bounded = route == "BOUNDED" and recheck_profile_prompt is not None
             model = resolved["recheck"] if bounded else resolved["review"]
@@ -463,12 +520,24 @@ def run_pr_cycle(
             if decision.action in ("pass",):
                 break
             if decision.action in ("fail", "abort"):
+                # "fail" -- review actually evaluated the code and it does
+                # not meet the bar (findings survived, or the review budget
+                # ran out chasing real findings): a genuine defect. "abort"
+                # -- ERROR (role/model unavailable) or an exhausted
+                # INCONCLUSIVE retry budget (verification never ran): both
+                # are `cycle_gate.evaluate()`'s own "environment problem,
+                # not a code one" cases, so ABORT stays a distinct verdict
+                # rather than collapsing into FAIL -- `orchestrate.py` maps
+                # it to a `blocked` unit outcome, not `failed` (§3.7.11.1).
+                verdict = "ABORT" if decision.action == "abort" else "FAIL"
                 return CycleResult(
-                    verdict="FAIL", stage="review", reason=decision.reason,
+                    verdict=verdict, stage="review", reason=decision.reason,
                     review_cycles=cycle, role_results=role_results,
                 )
             if decision.action == "inconclusive_retry":
                 review_inconclusive += 1
+                _snapshot(phase="review", review_cycle=cycle, route=route, pending_confirm=pending_confirm,
+                          scan_cycle=0, scope_suffix="")
                 continue  # re-run the SAME reviewer, no dev dispatch, no budget spend
             review_inconclusive = 0  # conclusive result -- the streak is over
             # spawn_fix / spawn_fix_escalated
@@ -483,8 +552,17 @@ def run_pr_cycle(
             role_results.append(fix_result)
             _log("review", cycle, fix_result, resolved["dev"])
             route = _safe_recheck_route(workdir, pre_fix_head, finding_files)
+            _snapshot(phase="review", review_cycle=cycle, route=route, pending_confirm=pending_confirm,
+                      scan_cycle=0, scope_suffix="")
 
-        review_cycles_used = cycle
+        review_cycles_used = progress["review_cycle"] if resuming_into_scan else cycle
+        if not resuming_into_scan:
+            # Review just reached "pass" -- checkpoint the phase boundary so an
+            # interruption between here and the scan loop's first dispatch
+            # still resumes into scan (fresh, cycle 0) instead of re-running
+            # review from scratch.
+            _snapshot(phase="scan", review_cycle=review_cycles_used, route=route,
+                      pending_confirm=[], scan_cycle=0, scope_suffix="")
 
         # --- Bug + compliance scan, parallel, max 8 -- worker.md -> *Pipeline* ---
         bugbot_prompt = resolve_prompt("bugbot", profile=profile, workdir=workdir)
@@ -499,8 +577,8 @@ def run_pr_cycle(
         bugbot_prompt += memory_block
         compliance_prompt += memory_block
 
-        cycle = 0
-        scope_suffix = ""
+        cycle = progress["scan_cycle"] if resuming_into_scan else 0
+        scope_suffix = progress["scope_suffix"] if resuming_into_scan else ""
         while True:
             cycle += 1
             bugbot_result = run_role_fn(
@@ -527,12 +605,18 @@ def run_pr_cycle(
             if decision.action == "pass":
                 break
             if decision.action in ("fail", "abort"):
+                # See the review loop's identical branch above: ABORT stays
+                # distinct from FAIL so `orchestrate.py` can report a
+                # `blocked` unit outcome rather than `failed`.
+                verdict = "ABORT" if decision.action == "abort" else "FAIL"
                 return CycleResult(
-                    verdict="FAIL", stage="scan", reason=decision.reason,
+                    verdict=verdict, stage="scan", reason=decision.reason,
                     review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
                 )
             if decision.action == "inconclusive_retry":
                 scan_inconclusive += 1
+                _snapshot(phase="scan", review_cycle=review_cycles_used, route="FULL",
+                          pending_confirm=[], scan_cycle=cycle, scope_suffix=scope_suffix)
                 continue
             scan_inconclusive = 0  # conclusive result -- the streak is over
             # spawn_fix / spawn_fix_escalated
@@ -549,6 +633,8 @@ def run_pr_cycle(
                 scope_suffix = _bounded_scope_suffix(_changed_files(workdir, pre_fix_head))
             else:
                 scope_suffix = ""
+            _snapshot(phase="scan", review_cycle=review_cycles_used, route="FULL",
+                      pending_confirm=[], scan_cycle=cycle, scope_suffix=scope_suffix)
 
         return CycleResult(
             verdict="PASS", stage="scan", reason="review + bug/compliance scan clean",

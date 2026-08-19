@@ -114,7 +114,7 @@ def test_conflicts_surface_before_anything_runs(tmp_path):
     started = []
     with pytest.raises(PlanError):
         run_plan(
-            workdir=_repo(tmp_path), plan_text=plan, resolved=_RESOLVED,
+            workdir=_repo(tmp_path), plan_name="testplan", plan_text=plan, resolved=_RESOLVED,
             rundir=tmp_path / "run",
         )
     assert started == []
@@ -156,6 +156,10 @@ def _fail_cycle():
     return CycleResult(verdict="FAIL", stage="review", reason="not converging")
 
 
+def _abort_cycle():
+    return CycleResult(verdict="ABORT", stage="review", reason="role/model unavailable")
+
+
 def _pass_ship():
     return ShipDecision(stage_name="x", passed=True, outcomes=[GateOutcome("review", True, "PASS")])
 
@@ -183,10 +187,24 @@ def _recorder(cycle_by_stage=None, ship_passes=True):
 
 def _run(tmp_path, cycle_fn, ship_fn, plan=MIXED_PLAN, **kw):
     return run_plan(
-        workdir=_repo(tmp_path), plan_text=plan, resolved=_RESOLVED,
+        workdir=_repo(tmp_path), plan_name="testplan", plan_text=plan, resolved=_RESOLVED,
         rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
         **kw,
     )
+
+
+def test_the_real_ship_gate_fn_is_called_without_unsupported_kwargs(tmp_path):
+    """Regression: this used to call `ship_gate_fn(..., base=base,
+    head=head)`, which `ship_gate.evaluate()` has never accepted -- so the
+    default (real, non-injected) ship_gate_fn raised TypeError on every unit
+    whose review/scan cycle passed. `run_plan` here does not override
+    `ship_gate_fn`, so this exercises the real function."""
+    cycle_fn, _ = _recorder()
+    result = run_plan(
+        workdir=_repo(tmp_path), plan_name="testplan", plan_text=MIXED_PLAN,
+        resolved=_RESOLVED, rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn,
+    )
+    assert result.passed
 
 
 def test_each_unit_is_dispatched_under_its_own_profile(tmp_path):
@@ -243,6 +261,16 @@ def test_an_independent_unit_still_runs_after_a_sibling_fails(tmp_path):
     assert statuses["pr-3"] == "shipped"     # independent
 
 
+def test_an_abort_verdict_blocks_the_unit_rather_than_failing_it(tmp_path):
+    """ABORT (role/model unavailable, or an exhausted INCONCLUSIVE retry
+    budget) means the code was never actually judged -- an environment
+    problem, not a defect -- so the unit reports `blocked`, not `failed`."""
+    cycle_fn, ship_fn = _recorder(cycle_by_stage={"pr-1": _abort_cycle()})
+    result = _run(tmp_path, cycle_fn, ship_fn)
+    statuses = {o.stage_name: o.status for o in result.outcomes}
+    assert statuses["pr-1"] == "blocked"
+
+
 def test_a_failing_ship_gate_fails_the_unit_even_when_the_cycle_passed(tmp_path):
     cycle_fn, ship_fn = _recorder(ship_passes=False)
     result = _run(tmp_path, cycle_fn, ship_fn)
@@ -282,13 +310,13 @@ def test_render_names_status_and_profile_per_unit(tmp_path):
 # --- merge tail wiring ------------------------------------------------------
 
 def _tail_ok(stage_name):
-    from reasona_dev.merge_tail import MERGED, TailResult
+    from reasona_dev.final_phase import MERGED, TailResult
     return TailResult(stage_name=stage_name, status=MERGED, reason="squash-merged",
                       pr_url=f"https://gh/pr/{stage_name}")
 
 
 def _tail_blocked(stage_name):
-    from reasona_dev.merge_tail import BLOCKED, TailResult
+    from reasona_dev.final_phase import BLOCKED, TailResult
     return TailResult(stage_name=stage_name, status=BLOCKED, reason="merge conflict")
 
 
@@ -296,7 +324,7 @@ def test_the_tail_is_not_run_unless_ship_is_requested(tmp_path):
     cycle_fn, ship_fn = _recorder()
     called = []
     _run(tmp_path, cycle_fn, ship_fn,
-         merge_tail_fn=lambda **kw: called.append(1))
+         final_stage_fn=lambda **kw: called.append(1))
     assert called == []
 
 
@@ -308,22 +336,25 @@ def test_ship_runs_the_tail_for_every_passing_unit(tmp_path):
         seen.append(kw["stage_name"])
         return _tail_ok(kw["stage_name"])
 
-    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, merge_tail_fn=tail_fn)
+    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn)
     assert seen == ["pr-1", "pr-2", "pr-3"]
     assert result.passed
 
 
-def test_a_blocked_tail_fails_the_unit_and_skips_its_dependents(tmp_path):
+def test_a_blocked_tail_blocks_the_unit_and_skips_its_dependents(tmp_path):
     """A unit whose merge was refused did not ship, so anything depending on
-    its contract is reviewing against something that is not on main."""
+    its contract is reviewing against something that is not on main. The
+    unit itself reports `blocked`, not `failed` -- its code was never
+    judged deficient, something outside code-quality judgment (here: an
+    unresolved sync conflict) stopped it."""
     cycle_fn, ship_fn = _recorder()
 
     def tail_fn(**kw):
         return _tail_blocked(kw["stage_name"]) if kw["stage_name"] == "pr-1" else _tail_ok(kw["stage_name"])
 
-    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, merge_tail_fn=tail_fn)
+    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn)
     statuses = {o.stage_name: o.status for o in result.outcomes}
-    assert statuses == {"pr-1": "failed", "pr-2": "skipped", "pr-3": "skipped"}
+    assert statuses == {"pr-1": "blocked", "pr-2": "skipped", "pr-3": "skipped"}
     assert "merge conflict" in result.outcomes[0].reason
 
 
@@ -335,5 +366,120 @@ def test_the_tail_receives_the_units_type_for_the_squash_title(tmp_path):
         seen[kw["stage_name"]] = (kw["unit_type"], kw["merge"])
         return _tail_ok(kw["stage_name"])
 
-    _run(tmp_path, cycle_fn, ship_fn, ship=True, merge=True, merge_tail_fn=tail_fn)
+    _run(tmp_path, cycle_fn, ship_fn, ship=True, merge=True, final_stage_fn=tail_fn)
     assert seen["pr-1"][1] is True
+
+
+# --- resuming with from_pr ---------------------------------------------------
+
+def test_from_pr_skips_units_ordered_before_it(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+    result = _run(tmp_path, cycle_fn, ship_fn, from_pr="2")
+    assert [c["stage_name"] for c in cycle_fn.calls] == ["pr-2", "pr-3"]
+    assert {o.stage_name for o in result.outcomes} == {"pr-2", "pr-3"}
+
+
+def test_from_pr_treats_earlier_units_as_already_shipped(tmp_path):
+    """A dependency on a unit this resumed run never touches is ignored,
+    the same rule an earlier plan's already-merged unit already gets --
+    resuming asserts pr-1 shipped in a prior attempt, it does not re-verify it."""
+    cycle_fn, ship_fn = _recorder()
+    _run(tmp_path, cycle_fn, ship_fn, from_pr="2")
+    # pr-2 depends on pr-1, which is not in this run -- must not be blocked
+    assert [c["stage_name"] for c in cycle_fn.calls] == ["pr-2", "pr-3"]
+
+
+def test_from_pr_matching_the_first_unit_is_a_no_op(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+    result = _run(tmp_path, cycle_fn, ship_fn, from_pr="1")
+    assert len(result.outcomes) == 3
+
+
+def test_from_pr_with_an_unknown_index_raises(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+    with pytest.raises(PlanError, match="from-pr"):
+        _run(tmp_path, cycle_fn, ship_fn, from_pr="99")
+
+
+# --- automatic resume via the ledger -----------------------------------------
+
+def test_a_unit_already_marked_shipped_is_not_redispatched(tmp_path):
+    from reasona_dev import ledger
+
+    workdir = _repo(tmp_path)
+    ledger.mark_unit_terminal(workdir, "testplan", "pr-1", status="shipped", reason="merged in an earlier run")
+    cycle_fn, ship_fn = _recorder()
+
+    result = run_plan(
+        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
+        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
+    )
+
+    assert [c["stage_name"] for c in cycle_fn.calls] == ["pr-2", "pr-3"]
+    by_stage = {o.stage_name: o.status for o in result.outcomes}
+    assert by_stage == {"pr-1": "shipped", "pr-2": "shipped", "pr-3": "shipped"}
+
+
+def test_resuming_does_not_re_block_a_dependent_of_a_resumed_unit(tmp_path):
+    """pr-2/pr-3 depend on pr-1 -- a pr-1 resumed from the ledger (not
+    re-run) must still count as shipped for that dependency check."""
+    from reasona_dev import ledger
+
+    workdir = _repo(tmp_path)
+    ledger.mark_unit_terminal(workdir, "testplan", "pr-1", status="shipped", reason="merged in an earlier run")
+    cycle_fn, ship_fn = _recorder()
+
+    result = run_plan(
+        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
+        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
+    )
+    assert result.passed
+
+
+def test_a_unit_that_actually_ships_this_run_is_recorded_for_the_next_one(tmp_path):
+    from reasona_dev import ledger
+
+    workdir = _repo(tmp_path)
+    cycle_fn, ship_fn = _recorder()
+    run_plan(
+        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
+        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
+    )
+    assert ledger.unit_status(workdir, "testplan", "pr-1") == "shipped"
+    assert ledger.unit_status(workdir, "testplan", "pr-2") == "shipped"
+    assert ledger.unit_status(workdir, "testplan", "pr-3") == "shipped"
+
+
+def test_a_failed_unit_is_not_marked_shipped_and_is_retried_on_the_next_run(tmp_path):
+    from reasona_dev import ledger
+
+    workdir = _repo(tmp_path)
+    cycle_fn, ship_fn = _recorder(cycle_by_stage={"pr-1": _fail_cycle()})
+    run_plan(
+        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
+        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
+    )
+    assert ledger.unit_status(workdir, "testplan", "pr-1") == "failed"
+
+    # a second run must retry pr-1, not skip it
+    cycle_fn2, ship_fn2 = _recorder()
+    run_plan(
+        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
+        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn2, ship_gate_fn=ship_fn2,
+    )
+    assert [c["stage_name"] for c in cycle_fn2.calls] == ["pr-1", "pr-2", "pr-3"]
+
+
+def test_resume_false_ignores_the_ledger(tmp_path):
+    from reasona_dev import ledger
+
+    workdir = _repo(tmp_path)
+    ledger.mark_unit_terminal(workdir, "testplan", "pr-1", status="shipped", reason="merged in an earlier run")
+    cycle_fn, ship_fn = _recorder()
+
+    run_plan(
+        workdir=workdir, plan_name="testplan", plan_text=MIXED_PLAN, resolved=_RESOLVED,
+        rundir=tmp_path / "run", run_pr_cycle_fn=cycle_fn, ship_gate_fn=ship_fn,
+        resume=False,
+    )
+    assert [c["stage_name"] for c in cycle_fn.calls] == ["pr-1", "pr-2", "pr-3"]

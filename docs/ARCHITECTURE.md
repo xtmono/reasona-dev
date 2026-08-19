@@ -1093,6 +1093,32 @@ a plan with a unit spanning two languages is rejected before the first agent is 
 after four units have already merged. Conflicting units are reported **all at once**, not just the
 first one found.
 
+### 3.7.11.1 `blocked` is a distinct outcome from `failed`
+
+`UnitOutcome.status` used to be one of `shipped` / `failed` / `skipped` only. Every non-passing
+final-phase outcome (`gh` unavailable, a sync conflict whose fix budget ran out, `final_audit`
+failing, a ship-gate fix budget exhausted, the final phase not settling within
+`MAX_FINAL_PHASE_ROUNDS`) collapsed into `failed` — the same label as "review/scan actually
+evaluated this code and it does not meet the bar." That conflated two operationally different
+situations: a `failed` unit's code was judged and found wanting, so the right response is editing
+the plan or the code; a unit stopped by, say, `gh` not being authenticated was never judged at all,
+so the right response is fixing the environment and re-running the exact same command.
+
+**Fix: `status` gained a fourth value, `blocked`.** `pr_cycle.py`'s review/scan loop already
+produces two different terminal verdicts from `cycle_gate.evaluate()`'s own `action` field — `FAIL`
+(the `"fail"` action: budget exhausted against real MUST_FIX findings, `RecurrenceTracker`'s
+stop-the-world, or non-convergence) and `ABORT` (the `"abort"` action: `ERROR` — role/model
+unavailable — or an INCONCLUSIVE role's retry budget exhausted, which `cycle_gate.evaluate()`'s own
+comment already called "an environment problem, not a code one"). `orchestrate.py` used to map both
+to `verdict="FAIL"` and both to `status="failed"`; it now preserves `ABORT` as its own
+`CycleResult.verdict` and maps it to `status="blocked"`. Everything final_phase.py itself reports as
+`BLOCKED` (§3.9) is mapped to `status="blocked"` the same way, replacing the old blanket `"failed"`.
+
+Nothing about `_blocking_dependency`'s own logic needed to change — it already treats any
+`status != "shipped"` as blocking a dependent, so `blocked` and `failed` behave identically there,
+and the ledger stores whichever string is passed without validating it, so a `blocked` unit is
+retried on the next run exactly like a `failed` one.
+
 ## 3.8 Live end-to-end verification (2026-08-18) — 11 defects
 
 The full path `compile-plan → bernstein run (dev cycle-0) → run-plan
@@ -1264,23 +1290,29 @@ unchanged file size are treated as recording-complete.
   gate, an unrelated concept. The actual mechanism for merge approval is
   `TaskCreate.approval_required`, which `orchestrate` sets on a plan's first unit.
 
-## 3.9 The merge tail — `merge_tail.py`
+## 3.9 The final phase — `final_phase.py`
 
-Implements the final third of `worker.md` (`sync-main → gh-pr → up-to-date gate →
-conditional final_audit → squash-merge`). It **consumes** the verdict `ship_gate` has already made
-and does not re-judge it — keeping the verdict upstream is what stops this module from becoming a
-quiet second gate.
+Renamed from `merge_tail.py`: that name described only the last step (a squash-merge), but the
+module now also owns the sync-conflict fix loop, the conditional final audit, and ship_gate's
+verdict itself (§3.9.4) — a squash-merge is just where it ends, not what it is.
+
+Implements the final third of `worker.md`, restructured: `sync → final_audit → ship_gate` now runs
+as one self-verifying loop (§3.9.4), followed by `gh-pr → squash-merge`. `ship_gate`'s verdict used
+to be computed by `orchestrate.py` before the tail ran at all; it moved inside the tail, and behind
+sync and the audit, for the reason in §3.9.4.
 
 **Merging is opt-in.** `merge=False` is the default, stopping at PR creation. A squash-merge is a
 hard-to-reverse external action that rewrites the real repository's default branch, so the caller
 must ask for it explicitly, and it must never be something discovered only after the fact. The
 earlier steps (sync, audit, message construction, PR creation) are safe to run repeatedly.
 
-**Every stage fails with a name.** `gh` missing, `gh` not authenticated, a sync conflict, a
-rejected squash title, a PR that has fallen behind base — each returns a `blocked` naming its exact
-condition. None of them degrade into "merged anyway" or "silently skipped." A merge tail that
-occasionally does nothing is worse than one that refuses outright — the operator ends up believing
-the work shipped.
+**What still fails with a name rather than being retried.** `gh` missing, `gh` not authenticated, a
+non-conflict sync failure (fetch failed, nothing to point dev at), a rejected squash title, a PR
+that has fallen behind base at the final pre-merge check: each returns a `blocked` naming its exact
+condition, immediately, because none of these are something dev editing files can fix. A conflict
+is the one sync failure that IS handled by a fix loop instead (§3.9.2) — everything else here still
+degrades to "blocked," never "merged anyway" or "silently skipped," because a merge tail that
+occasionally does nothing is worse than one that refuses outright.
 
 ### 3.9.1 Why `final_audit` is conditional
 
@@ -1293,11 +1325,10 @@ has ever seen in its final combined form, and interaction between fixes is exact
 review structurally cannot see. So the trigger is `budget.total_used > 0`.
 
 The audit runs in the `"final"` phase of the **same `FixBudget`** review and scan already consumed
-(`MAX_FINAL_CYCLES` = 2). Until now nothing produced work for that phase. Giving it a separate
-budget would let a PR spend 8+8+2 cycles while every stage still reports itself within its own
-ceiling, and giving it a fresh `RecurrenceTracker` would let it forget that a finding the audit
-raises already survived one fix earlier. So `pr_cycle` exports budget and recurrence via
-`CycleResult`.
+(`MAX_FINAL_CYCLES` = 3). Giving it a separate budget would let a PR spend 8+8+3+3 cycles (review +
+scan + final + sync, §3.9.2) while every stage still reports itself within its own ceiling, and
+giving it a fresh `RecurrenceTracker` would let it forget that a finding the audit raises already
+survived one fix earlier. So `pr_cycle` exports budget and recurrence via `CycleResult`.
 
 The audit dispatches under the `compliance` role. What makes an audit an audit is the prompt, and
 Bernstein's role whitelist and per-role worktree conventions are shared with it — this keeps the
@@ -1305,17 +1336,29 @@ tail from depending on a target repository's `role_model_policy` necessarily hav
 `final_audit` entry. **The model** comes from `resolved["final_audit"]`, so the audit runs under
 whatever model that resolves to.
 
-### 3.9.2 sync is a merge, not a rebase
+### 3.9.2 sync is a merge, not a rebase — and a conflict is now a fix loop, not a block
 
 The branch may already have been pushed, and rebasing published history turns every subsequent push
-into a force-push, at which point the up-to-date gate can no longer tell it apart from someone
-overwriting another person's work. Conflicts are not auto-resolved — they are returned as a failure
-naming the conflicting paths, since a conflict means main changed something this PR also touched,
-which is a semantic question no deterministic rule here can answer.
+into a force-push, at which point the final pre-merge check can no longer tell it apart from someone
+overwriting another person's work.
 
-**Up-to-date is re-checked right before the merge.** Checking only right after sync would let base
-advance in between, and merging a PR that no longer contains base is exactly the path by which a
-green PR lands red.
+**A merge conflict used to be an immediate terminal block**, on the same footing as `gh` being
+missing. That was wrong: unlike a missing `gh` binary, a conflict is a defect dev can resolve by
+editing files, exactly like a review MUST_FIX — and reasona-dev's own completion contract is that a
+run reaches a shipped PR unless something genuinely outside its control stops it (network, `gh`,
+`git` itself). `sync_main()` now leaves a real conflict in place (conflict markers on disk,
+`MERGE_HEAD` still set) instead of auto-aborting it, and `run_sync_cycle()` dispatches dev with the
+conflicting paths, instructing it to resolve the markers and run `git commit --no-edit` to conclude
+the merge, then retries. Bounded by the `"sync"` stage of the same `FixBudget` (`MAX_SYNC_CYCLES` =
+3) — the same shape as every other stage in this pipeline. Every retry starts by aborting any merge
+left over from a previous attempt where dev edited files but never committed, so a cycle that fails
+never leaves the tree stuck mid-merge; a non-conflict sync failure (fetch failed, no conflicting
+paths to name) still blocks immediately, since there is nothing there for dev to fix.
+
+**Up-to-date is still re-checked right before the actual merge call**, separately from the final
+phase loop below — `create_pr()`'s own push/`gh pr create` round trip is more time for base to move
+in. Unlike a conflict found during sync, a failure here is not looped back into the final phase; it
+still blocks immediately (§3.9's "what still fails with a name").
 
 ### 3.9.3 The squash message
 
@@ -1324,6 +1367,81 @@ than referring back to it. A mismatch between the two means they disagree, not "
 by hand." A `T#` (title) violation blocks the merge; a `B#` (body-only) violation still allows a
 merge with just the title — `squash.classify`'s TITLE_ONLY judgment. GitHub appends
 ` (#<pr>)` to the squash title itself, so `build` never appends it.
+
+### 3.9.4 `run_final_phase()` — why ship_gate moved behind sync and the audit, and why the tail is a round-bounded loop
+
+`ship_gate.evaluate()` runs `acceptance.run_all()` against whatever is on disk when it is called.
+The original pipeline called it BEFORE the merge tail (`orchestrate.py`, computed once, passed into
+`run_final_stage()` as an already-decided `ship_decision`), then ran sync and the audit afterward.
+Both of those change what is on disk — a sync conflict resolved by dev (§3.9.2), a fix from the
+audit (§3.9.1). So the original order stamped a PASS on code that was not what actually ended up in
+the PR: neither a sync-conflict fix nor an audit fix was ever re-verified by acceptance before the
+squash-merge that shipped it.
+
+**Fix: `ship_gate` now runs inside `final_phase.run_final_phase()`, after sync and the audit have
+both already run in the same pass.** This closes the gap for a single pass, but reopens a smaller
+version of the same problem: if EITHER sync or the audit changed something in this pass, that
+pass's own ship_gate verdict already ran on a tree the OTHER step never saw operating on the
+pre-change version of. `run_final_phase()` tracks whether a pass changed anything (a sync conflict
+resolved this pass, or `run_final_audit()` dispatching more than one role call meaning a fix
+happened) and only accepts a pass's `ship_gate` verdict once a pass changes nothing:
+
+```
+for round in 1..MAX_FINAL_PHASE_ROUNDS:
+    sync_status, sync_changed    = run_sync_cycle(...)        # may block, may resolve a conflict
+    audit_changed                = run_final_audit(...) if should_run_final_audit(budget) else False
+    decision, ship_changed       = run_ship_cycle(...)         # may block, may fix a failing criterion (§3.9.5)
+    if not decision.passed: return blocked
+    if not sync_changed and not audit_changed and not ship_changed: return decision  # settled
+    # else: something changed this round -- loop, re-verify from sync
+```
+
+Bounded by `MAX_FINAL_PHASE_ROUNDS` (3), on the same reasoning as every other cap in this pipeline:
+`origin/main` moving faster than this pipeline's own final-phase processing can settle is not
+something retrying forever would fix, and in practice a pass settles in one or two rounds since the
+window in which base can move again is just this pass's own sync+audit+ship_gate wall-clock time.
+
+**`orchestrate.py`'s non-`--ship` path is unaffected.** Without `--ship`, none of sync,
+`final_audit`, or the authoritative `ship_gate` run at all — the unit is provisionally reported
+`shipped`/`failed` on the review/scan verdict alone, using a direct `ship_gate_fn(...)` call as a
+preview only (no side effects either way, since nothing merges without `--ship`). This is the same
+"default stops at the review/scan verdict" behaviour documented in `README.md`/`docs/INSTALL.md`;
+only the `--ship` path's INTERNAL ordering changed.
+
+**Bonus fix found while moving this call.** The original `orchestrate.py` call site was
+`ship_gate_fn(workdir, stage_name, cycle_verdict=cycle.verdict, base=base, head=head)`, but
+`ship_gate.evaluate()` has never accepted `base`/`head` — every test exercising this path injected a
+`ship_gate_fn` stub accepting `**kwargs`, which silently absorbed the mismatch, so the bug reached
+this refactor undetected. The real default `ship_gate_fn=ship_gate.evaluate` would have raised
+`TypeError` on the very first unit whose review/scan cycle passed in any run that did not override
+it. Fixed as part of relocating the call; a regression test now runs `orchestrate.run_plan()`
+without overriding `ship_gate_fn`.
+
+### 3.9.5 `run_ship_cycle()` — a failing acceptance criterion earns a fix, not an immediate stop
+
+`ship_gate`'s acceptance axis used to have no fix loop at all: the moment `decision.passed` was
+False, the unit was done. Every OTHER check in this pipeline dispatches a bounded dev-fix before
+giving up — review, scan, `final_audit`, sync's own conflict handling (§3.9.2) — so a ship-gate
+failure was the one place a genuinely fixable problem (a failing executable acceptance criterion)
+got zero attempts at a fix. This directly contradicted this project's own completion contract:
+reasona-dev runs to a shipped PR unless something outside its control stops it, and an acceptance
+criterion is not outside dev's control the way `gh` being unauthenticated is.
+
+**Fix: `run_ship_cycle()` re-checks `ship_gate_fn` in a loop, dispatching dev against the failing
+criteria (`ShipDecision.failures`, each `GateOutcome`'s `name`/`detail`) between checks, bounded by
+the `"ship"` stage of the same `FixBudget` (`MAX_SHIP_CYCLES`).** The review axis is already
+guaranteed to pass by the time this runs — `orchestrate.py` only enters the final phase when the
+review/scan cycle itself passed — so a ship-gate failure reaching this loop is always the
+acceptance axis. A fix here is exactly the kind of code change `run_final_phase()`'s round loop
+already exists to catch: it sets the same `changed` signal `sync_changed`/`audit_changed` use, so a
+ship-gate fix forces the whole round to re-verify from sync rather than being accepted on its own.
+
+**Exhausting `MAX_SHIP_CYCLES` is still a `blocked` outcome, not `failed`** (§3.7.11.1) — by the
+point ship_gate runs, review, scan, and (conditionally) `final_audit` have all already vetted this
+code; a stall specifically here, after three-to-four independent checks already passed it, is
+treated as an anomaly needing investigation rather than an ordinary review-found defect. This
+mirrors `MAX_INCONCLUSIVE_ATTEMPTS`'s own framing in `cycle_gate.py` — budget exhaustion this deep
+in the pipeline is closer to "verification could not complete" than "the code is bad."
 
 ## 3.10 Reverting to batch — withdrawing the HTTP approach
 
@@ -1398,6 +1516,93 @@ substrate, not an orchestrator** (spawning, worktrees, merge-back, supervision, 
 trying to use it as the latter is what produced the missing hooks, the static DAG, and the signal-
 visibility problems.
 
+## 3.11 `run-plan` dispatches cycle-0 itself
+
+The CLI used to require two separate manual commands to run a plan: `compile-plan` (write
+`plan.yaml`), then a raw `bernstein run plan.yaml --auto-approve` typed by hand, then `run-plan`
+(review → scan → ship). This split had a real cost: an operator typing `bernstein run` directly
+against a real target repo, with no reasona-dev gate wrapping that step, is the exact shape of an
+incident where the step merged straight to the target's remote `main` with nothing reviewing it
+first — not because `bernstein run` is the wrong step to run, but because it was a manual,
+easy-to-get-wrong entry into a pipeline the rest of which is otherwise fully driven by one command.
+
+**Fix: `reasona-dev run-plan` now compiles the plan and dispatches cycle-0 itself**, before handing
+off to `orchestrate.run_plan()` exactly as before. Concretely, `cli._cmd_run_plan()` calls
+`plan_compile.write_plan_yaml()` (writing `<workdir>/.reasona/log/<plan_name>/plan.yaml`, the same call
+`compile-plan` makes) and then `bernstein_dispatch.run_plan_file()` (the same `bernstein run
+<plan> --auto-approve` call `pr_cycle.py` already uses for every other role dispatch) — reusing the
+existing dispatch path rather than adding a new one. A non-zero exit from that dispatch aborts
+before `orchestrate.run_plan()` is ever called, so a broken cycle-0 never reaches review.
+
+This does **not** contradict §3.7.11's "owning the dev step here would mean re-implementing a DAG
+scheduler" -- that concern was about `orchestrate.py` (which orders/reviews units) re-deriving
+Bernstein's own stage-DAG execution logic itself. Calling `bernstein run` as a subprocess is not
+that; it is the same one-line invocation an operator used to type, now issued by the CLI layer
+instead. `orchestrate.py`'s own module docstring ("the dev step is not here") stays true of that
+module; the dispatch now happens one layer up, in `cli.py`, immediately before `orchestrate.run_plan()`
+is called.
+
+**The default stops at the review/scan `ship_gate` verdict -- no PR, no merge.** `--ship`/`--merge`
+opt IN to the merge tail and are not on by default, unlike cycle-0 (which now runs unconditionally
+unless `--skip-dev`/the ledger says otherwise). The asymmetry is deliberate: `final_phase.create_pr()`
+(§3.9) is a narrow, hand-rolled subset of dev-ralf's `/gh-pr` -- no issue creation, no PR body
+structural validation, no title/body repair loop -- and `/gh-review` has no reasona-dev equivalent
+whatsoever. Running review/scan unattended is safe because `ship_gate` only produces a verdict;
+running `create_pr()`/`squash_merge()` unattended by default would mean the least-verified part of
+this project's own pipeline is the one touching the target repo's real GitHub state. `compile-plan`
+remains a standalone subcommand for inspecting a compiled `plan.yaml` without dispatching anything,
+but is no longer a required manual step before `run-plan`.
+
+### 3.11.1 Resuming after an interruption -- `reasona_dev/ledger.py`
+
+A single command that runs a whole plan through squash-merge is also a single command that can be
+killed partway through by exactly the same class of failure the split-command design was trying to
+avoid in the first place -- a network drop, a killed process. Re-running the same `run-plan`
+command needs to pick up where it left off, not redo units that already shipped or re-dispatch
+cycle-0 against code that already exists.
+
+**Layout: `<workdir>/.reasona/log/<plan_name>/<stage_name>/`, namespaced by plan first, then PR
+unit** -- not a flat `<workdir>/.reasona/`. Two plans that both exist under the same workdir (or two
+different plans that both happen to name a unit `pr-1`, the common case since
+`plan_compile._stage_name()` is just `f"pr-{index}"`) must not share a ledger file or a compiled
+`plan.yaml`; the flat layout silently collided on both before this. `reasona_dev/ledger.py` is the
+single module owning this layout:
+
+    <workdir>/.reasona/log/<plan_name>/plan.yaml                the compiled cycle-0 plan
+    <workdir>/.reasona/log/<plan_name>/ledger-plan.json          one flag -- has cycle-0 been dispatched
+    <workdir>/.reasona/log/<plan_name>/<stage_name>/ledger.json  this unit's progress + terminal outcome + PR-url hint
+    <workdir>/.reasona/log/<plan_name>/<stage_name>/<role>-c<cycle>.raw.txt  raw per-role output, same as before
+
+**Per-unit progress is now checkpointed inside the review/scan loop itself, not only at the unit's
+terminal outcome.** An earlier version of this section recorded, as a known gap, that
+`pr_cycle.run_pr_cycle()`'s loop had no persisted cycle-N state and a unit interrupted mid-loop
+would restart its review from cycle 1. That gap is now closed: `run_pr_cycle()` takes `plan_name`
+and `resume`, and after every cycle (including an `inconclusive_retry`) it snapshots `FixBudget`,
+`RecurrenceTracker`, `ConvergenceTracker`, the pending `must_fix` findings, and the current
+phase/cycle/route via `ledger.save_progress()` -- all four gained `to_dict()`/`from_dict()` for
+exactly this. A resumed run reloads that snapshot and continues from the same cycle with the same
+budget already spent, instead of re-entering at zero. `ledger.mark_unit_terminal()` clears the
+progress snapshot once a unit reaches `shipped`/`failed` -- nothing is left to resume past that
+point.
+
+**`create_pr()` and `sync_main()` still ask gh/git first -- the ledger is a fallback, never a
+replacement.** `create_pr()` calls `existing_pr_url()` (`gh pr view`) exactly as before; only when
+that live check finds nothing does it fall back to `ledger.known_pr_url()`, a PR URL this same unit
+recorded on an earlier, interrupted run (`git push` can succeed and the process still die before the
+URL is read back, which is exactly the case the live check alone cannot recover from). A successful
+`create_pr()` records the URL via `ledger.mark_pr_created()` for the next run's fallback.
+`sync_main()` gained no ledger integration at all -- git's own merge is already fully idempotent
+(re-running `git merge origin/main` on an already-merged tree is a no-op), so a ledger check there
+would duplicate what `git status` already answers for free, exactly the reasoning §3.11.1 already
+applied to the rest of `final_phase.py`'s re-entrant substeps.
+
+**Manual overrides exist for when the ledger itself is wrong or unavailable.** `from_pr` drops every
+unit ordered before the named one from the run regardless of ledger state (`run_plan(resume=...)`'s
+own check is skipped for those units by construction -- they are never in the unit list to begin
+with). `--skip-dev` force-skips cycle-0 regardless of the ledger. `--restart`
+(`ledger.clear()`) wipes both files and reruns everything fresh -- the right tool when the plan
+document itself changed since the last run, not for a plain retry.
+
 ## 4. Directory structure
 
 ```
@@ -1414,8 +1619,8 @@ reasona-dev/
 │   ├── bernstein_dispatch.py 1-step plan.yaml + `bernstein run` — one synchronous role dispatch (§3.10)
 │   ├── acceptance.py         executable acceptance criteria — runs the manifest's acceptance: deterministically right before merge (§3.7.3)
 │   ├── structure_gate.py     structural judgment — file size, duplication, dependency direction, public-API growth (§3.7.2)
-│   ├── ship_gate.py          the single pre-merge verdict — review AND acceptance AND structure, logical AND (§3.7.8)
-│   ├── merge_tail.py         sync-main → conditional final audit → squash guard → PR → squash-merge (§3.9)
+│   ├── ship_gate.py          the single pre-merge verdict — review AND acceptance, logical AND; called FROM final_phase, with its own bounded dev-fix loop (§3.7.8, §3.9.4, §3.9.5)
+│   ├── final_phase.py        gh check → final phase (sync ↔ conflict-fix → conditional final_audit → ship_gate ↔ acceptance-fix, re-verified as a round) → PR → squash-merge (§3.9)
 │   ├── cycles_log.py         per-cycle finding measurement (.reasona/cycles.jsonl) — the basis for attribution measurement (§3.7.6)
 │   ├── cycles_query.py       attribution/budget/AC-coverage queries — turns the log into judgment (§3.7.9)
 │   ├── memory.py             per-repo prior-observation notes generated from cycles.jsonl, file-scoped retrieval (§3.7.7)

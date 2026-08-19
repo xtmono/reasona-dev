@@ -14,26 +14,49 @@ upstream PRD/plan-authoring layer this project consumes.
 
 ## Quick start (use reasona-dev on a new target repo)
 
+**Setup, once per machine:**
 ```bash
-# one-time, this machine
 uv tool install bernstein
 uv pip install -e .                                # this repo
 mkdir -p ~/.reasona
 cp -r .reasona/prompts ~/.reasona/prompts
 cp    .reasona/bernstein-template.yaml .reasona/reasona.yaml ~/.reasona/
+```
 
-# per target repo, once
+**Setup, once per target repo:**
+```bash
 cd <target-repo>
 cp ~/.reasona/bernstein-template.yaml bernstein.yaml   # plain file at repo root, no .bernstein/, no symlink
 printf '%s\n' bernstein.yaml .reasona/ .sdd/ .worktrees/ >> .gitignore
-
-# run
-reasona-dev prompts --workdir .
-reasona-dev compile-plan docs/plans/<plan>.md -o plan.yaml --workdir .
-bernstein run plan.yaml --auto-approve --hard-budget 20usd   # cycle-0
-reasona-dev run-plan docs/plans/<plan>.md --workdir . --ship    # stop at an open PR
-reasona-dev run-plan docs/plans/<plan>.md --workdir . --merge   # after you've read the PR
 ```
+
+**Run a plan** (compile → cycle-0 → review → scan → ship_gate verdict --
+stops there, no PR):
+```bash
+reasona-dev run-plan docs/plans/<plan>.md --workdir .
+```
+
+**PR creation and merge are opt-in, not automatic.** `final_phase.create_pr()`
+is an incomplete stand-in for dev-ralf's `/gh-pr` (no issue, no PR body
+validation, no repair loop), and there is no `/gh-review` equivalent at
+all -- see `docs/ARCHITECTURE.md` §3.9. Ask for them explicitly, and check
+the PR yourself:
+```bash
+reasona-dev run-plan docs/plans/<plan>.md --workdir . --ship    # + opens a PR
+reasona-dev run-plan docs/plans/<plan>.md --workdir . --merge   # + squash-merges it
+```
+
+**Interrupted partway (network failure, killed process)? Just run the exact
+same command again:**
+```bash
+reasona-dev run-plan docs/plans/<plan>.md --workdir .
+```
+A progress ledger (`.reasona/log/<plan>/`) skips cycle-0 if it already ran,
+resumes any PR unit's review/scan cycle from where it stopped (not from
+cycle 1), and skips any PR unit that already shipped -- all automatically,
+no flags needed. `--from-pr <index>`/`--skip-dev` are manual overrides for
+when the ledger itself is unavailable; `--restart` clears it and reruns
+everything from scratch (use only when the plan itself changed).
 
 Details, global vs. per-repo config, and everything else: `docs/INSTALL.md`.
 Design rationale for every decision below: `docs/ARCHITECTURE.md`.
@@ -64,8 +87,8 @@ reasona_dev/
   pr_cycle.py                 develop -> review -> bug+compliance scan driver
   bernstein_dispatch.py        one-step plan.yaml + `bernstein run` -- one role dispatch
   acceptance.py                 executable acceptance criteria
-  ship_gate.py                    pre-merge verdict: review AND acceptance AND structure
-  merge_tail.py                    sync-main -> final audit -> squash guard -> PR -> squash-merge
+  ship_gate.py                    pre-merge verdict: review AND acceptance, called from final_phase, own bounded dev-fix loop
+  final_phase.py                   gh check -> final phase (sync<->conflict-fix -> final_audit -> ship_gate<->acceptance-fix, re-verified as a round) -> PR -> squash-merge
   cycles_log.py / cycles_query.py    per-cycle measurement log + queries
   memory.py                        repo-scoped priors generated from cycles.jsonl
   prompt_profile.py            per-unit profile resolution, two-layer prompt lookup
@@ -144,11 +167,17 @@ refused at compile time — split it or set `profile:` explicitly.
 reasona-dev run-plan docs/plans/<plan>.md --workdir .
 ```
 
-`orchestrate.py` resolves each unit's profile, orders by `depends_on`, skips
-a unit whose dependency didn't ship (rather than attempting it), gates
-approval on the first unit only, and shares one Bernstein server for the
-whole plan. The dev (cycle-0) step is not run here — it's Bernstein's own
-scheduler, driven separately (Quick start above). Design rationale for each
-of these choices, plus how a role is dispatched (batch `bernstein run`, not
-HTTP), the quality-budget shape, and the generated-memory design: all in
-`docs/ARCHITECTURE.md` (§3.5.3, §3.7, "Memory").
+`run-plan` compiles the plan and dispatches cycle-0 (`bernstein run
+--auto-approve`) itself before `orchestrate.py` takes over: resolves each
+unit's profile, orders by `depends_on`, skips a unit whose dependency
+didn't ship (rather than attempting it), gates approval on the first unit
+only, and shares one Bernstein server for the whole plan. Progress is
+recorded in a ledger (`reasona_dev/ledger.py`) as each unit ships, so a
+re-run after an interruption resumes at the first not-yet-shipped unit
+automatically -- no flags needed for the common case. `--ship`/`--merge`
+opt IN to PR creation and squash-merge (both off by default -- see the PR
+caveat above); `--from-pr`/`--skip-dev` manually override the ledger, and `--restart`
+clears it. Design rationale for each of these choices, plus how a role
+is dispatched (batch `bernstein run`, not HTTP), the quality-budget shape,
+and the generated-memory design: all in `docs/ARCHITECTURE.md` (§3.5.3,
+§3.7, §3.11, "Memory").

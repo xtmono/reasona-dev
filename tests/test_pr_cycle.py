@@ -102,7 +102,11 @@ def test_role_error_status_aborts_immediately(tmp_path, generic_prompts):
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
         profile="generic", run_role_fn=_stub_role_fn(script=script),
     )
-    assert result.verdict == "FAIL"  # cycle_gate.evaluate(): ERROR -> abort action -> CycleResult FAIL
+    # cycle_gate.evaluate(): ERROR (role/model unavailable) -> abort action ->
+    # CycleResult ABORT, distinct from FAIL -- orchestrate.py reports this as
+    # a `blocked` unit outcome, not `failed` (§3.7.11.1): the role never
+    # actually ran, so nothing about the code was judged deficient.
+    assert result.verdict == "ABORT"
     assert result.stage == "review"
 
 

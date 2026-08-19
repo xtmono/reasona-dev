@@ -3,15 +3,7 @@
 Which files to touch when setting up reasona-dev, and which are
 auto-generated (don't hand-edit those — they get overwritten).
 
-## 0. Before your first run
-
-- **Protect `main` on the target repo** (Settings → Branches → require a
-  PR, apply to admins/tokens too). reasona-dev's gates only run inside
-  `run-plan`; the cycle-0 step (§8) is a raw `bernstein run --auto-approve`
-  with no gate on it at all.
-- **Always `--ship` before `--merge`** (§8) and read the PR yourself.
-
-## 0.1 Prerequisites
+## 0. Prerequisites
 
 | Item | Requirement | Check |
 |---|---|---|
@@ -169,9 +161,12 @@ into every agent worktree and fails Bernstein's isolation check.
 | `bernstein.yaml` entry in `.gitignore` | `compile-plan` | added if missing |
 | `<repo>/.reasona/acceptance-<stage>.json` | `compile-plan` | the manifest's `acceptance:` |
 | `<repo>/.reasona/model_config.json` | `compile-plan` | audit trail |
+| `<repo>/.reasona/log/<plan>/plan.yaml` | `run-plan` (unless `--skip-dev`) | cycle-0's compiled plan, recompiled every run |
+| `<repo>/.reasona/log/<plan>/ledger-plan.json` | `run-plan` | has cycle-0 for this plan been dispatched |
+| `<repo>/.reasona/log/<plan>/<stage>/ledger.json` | `run-plan` | this PR unit's review/scan progress, terminal outcome, and PR-url hint (resume state) |
+| `<repo>/.reasona/log/<plan>/<stage>/*.raw.txt` | `run-plan` | raw per-role output |
 | `<repo>/.reasona/cycles.jsonl` | `run-plan` | instrumentation |
 | `<repo>/.reasona/memory/*.md` | `run-plan` | generated from `cycles.jsonl` |
-| `<repo>/.reasona/runs/<stage>/*.raw.txt` | `run-plan` | raw per-role output |
 
 ## 6. Priority chain
 
@@ -206,21 +201,58 @@ cat <repo>/.reasona/model_config.json     # 4. resolved model config
 
 ## 8. Running
 
+`run-plan` compiles the plan and dispatches cycle-0 (`bernstein run
+--auto-approve`, no reasona-dev gate runs on this step) itself, then
+review -> scan -> ship_gate. It stops there by default.
+
 ```bash
-# dev cycle-0 -- ungated (see §0)
-bernstein run plan.yaml --auto-approve --hard-budget 20usd
-
-# review -> scan -> ship
 reasona-dev run-plan docs/plans/<plan>.md --workdir <repo>
-
-# + PR creation, stops at an open PR
-reasona-dev run-plan docs/plans/<plan>.md --workdir <repo> --ship
-
-# + squash-merge, after you've read the PR
-reasona-dev run-plan docs/plans/<plan>.md --workdir <repo> --merge
 ```
 
-`--merge` defaults to off and must be requested explicitly.
+**PR creation and merge are opt-in**, not automatic:
+
+```bash
+reasona-dev run-plan docs/plans/<plan>.md --workdir <repo> --ship   # + opens a PR
+reasona-dev run-plan docs/plans/<plan>.md --workdir <repo> --merge  # + squash-merges it
+```
+
+They default to off on purpose. `final_phase.create_pr()` is a narrow,
+incomplete reimplementation of dev-ralf's `/gh-pr` -- no issue creation, no
+PR body validation, no repair loop -- and `/gh-review` has no equivalent
+here at all (docs/ARCHITECTURE.md §3.9). Read the PR yourself before
+passing `--merge`.
+
+**Resume an interrupted run** (network failure, killed process) by running
+the exact same command again:
+
+```bash
+reasona-dev run-plan docs/plans/<plan>.md --workdir <repo>
+```
+
+A progress ledger under `.reasona/log/<plan>/` (see `reasona_dev/ledger.py`)
+records whether cycle-0 has already been dispatched, and for each PR unit
+both its terminal outcome and its in-progress review/scan checkpoint
+(cycle number, phase, `FixBudget`/`RecurrenceTracker` state, pending
+findings). `run-plan` checks it automatically: cycle-0 is skipped if the
+ledger says it already ran, a unit already marked shipped is reused as-is
+instead of re-dispatched, and a unit interrupted mid-review/scan resumes
+from its last checkpointed cycle rather than restarting from cycle 1. No
+flags are needed for a plain retry.
+
+`create_pr()` still asks `gh pr view` first on every resume; the ledger's
+recorded PR URL is consulted only as a fallback when that live check finds
+nothing (e.g. the push succeeded but the process died before the URL was
+read back). `sync_main()` uses no ledger at all -- git's own merge is
+already idempotent, so re-running it is always safe on its own.
+
+`--from-pr <index>` / `--skip-dev` manually override this when the ledger
+itself is unavailable or wrong -- they drop units / skip cycle-0
+regardless of what's recorded, trusting the caller instead of the ledger.
+`--restart` clears the ledger and reruns the whole plan from scratch; use
+it only when the plan document itself changed, not for a plain retry.
+
+To compile and inspect `plan.yaml` without dispatching anything,
+`compile-plan` (§7) still works standalone.
 
 ## 9. Measurement
 

@@ -77,6 +77,237 @@ def test_compile_plan_without_flag_uses_default(tmp_path):
     assert compiled["stages"][0]["steps"][0]["model"] == "sonnet"
 
 
+# --- run-plan dispatches cycle-0 itself --------------------------------------
+
+def _plan(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text("## PR 1: bootstrap\ntype: feat\ndepends_on: none\n\n- [ ] x\n")
+    workdir = tmp_path / "target-repo"
+    workdir.mkdir()
+    return plan, workdir
+
+
+def _shipped_result():
+    from reasona_dev.orchestrate import PlanRunResult, UnitOutcome
+
+    return PlanRunResult(outcomes=[UnitOutcome(stage_name="pr-1", profile="generic", status="shipped", reason="ok")])
+
+
+def test_run_plan_compiles_and_dispatches_cycle0_by_default(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, orchestrate
+    from reasona_dev.bernstein_dispatch import DispatchResult
+
+    plan, workdir = _plan(tmp_path)
+    calls = {}
+
+    def _fake_dispatch(plan_path, wd, *, port=8052, timeout=3600):
+        assert plan_path.is_file()  # compiled before dispatch
+        calls["plan_path"] = plan_path
+        calls["workdir"] = wd
+        return DispatchResult(returncode=0, stderr_tail="")
+
+    monkeypatch.setattr(bernstein_dispatch, "run_plan_file", _fake_dispatch)
+    monkeypatch.setattr(orchestrate, "run_plan", lambda **kw: _shipped_result())
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir)])
+    assert rc == 0
+    assert calls == {"plan_path": workdir / ".reasona" / "log" / "plan" / "plan.yaml", "workdir": workdir}
+
+
+def test_run_plan_skip_dev_does_not_dispatch_cycle0(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, orchestrate
+
+    plan, workdir = _plan(tmp_path)
+    monkeypatch.setattr(
+        bernstein_dispatch, "run_plan_file",
+        lambda *a, **kw: pytest.fail("must not dispatch cycle-0 when --skip-dev is given"),
+    )
+    monkeypatch.setattr(orchestrate, "run_plan", lambda **kw: _shipped_result())
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--skip-dev"])
+    assert rc == 0
+    assert not (workdir / ".reasona" / "log" / "plan" / "plan.yaml").exists()
+
+
+def test_run_plan_aborts_before_review_if_cycle0_fails(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, orchestrate
+    from reasona_dev.bernstein_dispatch import DispatchResult
+
+    plan, workdir = _plan(tmp_path)
+    monkeypatch.setattr(
+        bernstein_dispatch, "run_plan_file",
+        lambda *a, **kw: DispatchResult(returncode=1, stderr_tail="boom"),
+    )
+    monkeypatch.setattr(
+        orchestrate, "run_plan",
+        lambda **kw: pytest.fail("must not review/ship after a failed cycle-0"),
+    )
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir)])
+    assert rc == 1
+
+
+def test_run_plan_defaults_to_no_ship_and_no_merge(tmp_path, monkeypatch):
+    """PR creation and merge are opt-in -- create_pr() is an incomplete
+    /gh-pr subset and /gh-review has no equivalent at all, so nothing
+    reaches gh by default."""
+    from reasona_dev import bernstein_dispatch, orchestrate
+    from reasona_dev.bernstein_dispatch import DispatchResult
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["ship"] = kw["ship"]
+        seen["merge"] = kw["merge"]
+        return _shipped_result()
+
+    monkeypatch.setattr(bernstein_dispatch, "run_plan_file", lambda *a, **kw: DispatchResult(returncode=0, stderr_tail=""))
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir)])
+    assert rc == 0
+    assert seen == {"ship": False, "merge": False}
+
+
+def test_run_plan_ship_opts_in_and_stops_at_the_open_pr(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, orchestrate
+    from reasona_dev.bernstein_dispatch import DispatchResult
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["ship"] = kw["ship"]
+        seen["merge"] = kw["merge"]
+        return _shipped_result()
+
+    monkeypatch.setattr(bernstein_dispatch, "run_plan_file", lambda *a, **kw: DispatchResult(returncode=0, stderr_tail=""))
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--ship"])
+    assert rc == 0
+    assert seen == {"ship": True, "merge": False}
+
+
+def test_run_plan_merge_implies_ship(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, orchestrate
+    from reasona_dev.bernstein_dispatch import DispatchResult
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["ship"] = kw["ship"]
+        seen["merge"] = kw["merge"]
+        return _shipped_result()
+
+    monkeypatch.setattr(bernstein_dispatch, "run_plan_file", lambda *a, **kw: DispatchResult(returncode=0, stderr_tail=""))
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    # --merge alone (no --ship) must still ship, since merge requires it
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--merge"])
+    assert rc == 0
+    assert seen == {"ship": True, "merge": True}
+
+
+def test_run_plan_from_pr_reaches_orchestrate(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, orchestrate
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["from_pr"] = kw["from_pr"]
+        return _shipped_result()
+
+    monkeypatch.setattr(bernstein_dispatch, "run_plan_file", lambda *a, **kw: pytest.fail("must not dispatch cycle-0 when --skip-dev is given"))
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--skip-dev", "--from-pr", "2"])
+    assert rc == 0
+    assert seen == {"from_pr": "2"}
+
+
+def test_run_plan_without_from_pr_passes_none(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, orchestrate
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["from_pr"] = kw["from_pr"]
+        return _shipped_result()
+
+    monkeypatch.setattr(bernstein_dispatch, "run_plan_file", lambda *a, **kw: pytest.fail("must not dispatch cycle-0 when --skip-dev is given"))
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--skip-dev"])
+    assert rc == 0
+    assert seen == {"from_pr": None}
+
+
+# --- ledger-based resume ------------------------------------------------------
+
+def test_run_plan_skips_cycle0_when_the_ledger_already_says_done(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, ledger, orchestrate
+
+    plan, workdir = _plan(tmp_path)
+    ledger.mark_dev_dispatched(workdir, "plan")
+
+    monkeypatch.setattr(
+        bernstein_dispatch, "run_plan_file",
+        lambda *a, **kw: pytest.fail("must not dispatch cycle-0 -- the ledger says it's done"),
+    )
+    monkeypatch.setattr(orchestrate, "run_plan", lambda **kw: _shipped_result())
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir)])
+    assert rc == 0
+
+
+def test_run_plan_passes_resume_true_by_default(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, orchestrate
+    from reasona_dev.bernstein_dispatch import DispatchResult
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["resume"] = kw["resume"]
+        return _shipped_result()
+
+    monkeypatch.setattr(bernstein_dispatch, "run_plan_file", lambda *a, **kw: DispatchResult(returncode=0, stderr_tail=""))
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir)])
+    assert rc == 0
+    assert seen == {"resume": True}
+
+
+def test_run_plan_restart_clears_the_ledger_and_redispatches_cycle0(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, ledger, orchestrate
+    from reasona_dev.bernstein_dispatch import DispatchResult
+
+    plan, workdir = _plan(tmp_path)
+    ledger.mark_dev_dispatched(workdir, "plan")
+    ledger.mark_unit_terminal(workdir, "plan", "pr-1", status="shipped", reason="an earlier run")
+    seen = {}
+
+    def _fake_dispatch(plan_path, wd, *, port=8052, timeout=3600):
+        seen["dispatched"] = True
+        return DispatchResult(returncode=0, stderr_tail="")
+
+    def _fake_run_plan(**kw):
+        seen["resume"] = kw["resume"]
+        return _shipped_result()
+
+    monkeypatch.setattr(bernstein_dispatch, "run_plan_file", _fake_dispatch)
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--restart"])
+    assert rc == 0
+    assert seen == {"dispatched": True, "resume": False}
+    assert ledger.unit_status(workdir, "plan", "pr-1") is None
 
 
 # --- workdir resolution ------------------------------------------------------

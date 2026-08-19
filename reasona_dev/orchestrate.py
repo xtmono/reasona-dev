@@ -35,11 +35,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import config_file, merge_tail as merge_tail_mod, ship_gate
+from reasona_dev import config_file, final_phase as final_phase_mod, ledger, ship_gate
 from reasona_dev.model_config import ResolvedModel
 from reasona_dev.plan_compile import PRUnit, PlanError, _stage_name, parse_manifest_units, parse_plan_units
 from reasona_dev.cycle_gate import FixBudget, RecurrenceTracker
-from reasona_dev.merge_tail import TailResult
+from reasona_dev.final_phase import TailResult
 from reasona_dev.pr_cycle import CycleResult, run_pr_cycle
 from reasona_dev.prompt_profile import (
     ProfileConflict,
@@ -70,7 +70,7 @@ class UnitPlan:
 class UnitOutcome:
     stage_name: str
     profile: str
-    status: str  # "shipped" | "failed" | "skipped"
+    status: str  # "shipped" | "failed" | "blocked" | "skipped"
     reason: str
     cycle_result: CycleResult | None = None
     ship_decision: ShipDecision | None = None
@@ -87,7 +87,21 @@ class PlanRunResult:
 
     @property
     def failed(self) -> list[UnitOutcome]:
+        """Review/scan actually evaluated this unit's code and it did not
+        meet the bar -- a genuine defect, distinct from `blocked` (see that
+        property)."""
         return [o for o in self.outcomes if o.status == "failed"]
+
+    @property
+    def blocked(self) -> list[UnitOutcome]:
+        """Something outside code-quality judgment stopped this unit: `gh`
+        unavailable, a merge conflict or acceptance failure whose bounded
+        dev-fix budget ran out, an ERROR/INCONCLUSIVE role, or the final
+        phase not settling within `MAX_FINAL_PHASE_ROUNDS`. Not the same as
+        `failed` -- a `blocked` unit's code was never actually judged
+        deficient, so re-running the exact same command later (once the
+        blocker clears) is the right response, not editing the plan."""
+        return [o for o in self.outcomes if o.status == "blocked"]
 
     @property
     def skipped(self) -> list[UnitOutcome]:
@@ -100,7 +114,8 @@ class PlanRunResult:
     def render(self) -> str:
         lines = [
             f"plan run: {len(self.shipped)} shipped, "
-            f"{len(self.failed)} failed, {len(self.skipped)} skipped"
+            f"{len(self.failed)} failed, {len(self.blocked)} blocked, "
+            f"{len(self.skipped)} skipped"
         ]
         for o in self.outcomes:
             lines.append(f"  [{o.status:>7}] {o.stage_name} ({o.profile}): {o.reason}")
@@ -195,32 +210,68 @@ def _blocking_dependency(unit: UnitPlan, outcomes: dict[str, UnitOutcome], known
 def run_plan(
     *,
     workdir: str | Path,
+    plan_name: str,
     plan_text: str,
     resolved: dict[str, ResolvedModel],
-    rundir: str | Path,
+    rundir: str | Path | None = None,
     port: int = 8052,
     base: str = "origin/main",
     head: str = "HEAD",
     ship: bool = False,
     merge: bool = False,
+    from_pr: str | None = None,
+    resume: bool = True,
     run_pr_cycle_fn=run_pr_cycle,
     ship_gate_fn=ship_gate.evaluate,
-    merge_tail_fn=merge_tail_mod.run_merge_tail,
+    final_stage_fn=final_phase_mod.run_final_stage,
 ) -> PlanRunResult:
     """review -> scan -> ship, per unit, in dependency order.
 
     Assumes each unit's cycle-0 implementation already exists (see module
     docstring on where the dev step lives).
 
+    **Automatic resume (`resume=True`, the default).** Before dispatching a
+    unit, its ledger (`reasona_dev.ledger`) is checked -- a unit already
+    marked `shipped` from a prior run of this same plan is reused as-is
+    (no re-dispatch), so re-running `run_plan` after an interruption picks
+    up at the first unit that has not shipped yet, automatically. A unit
+    that actually ships in THIS run is recorded the same way, for the next
+    resume. Pass `resume=False` to force every unit to run fresh regardless
+    of what an earlier run recorded (`--restart` at the CLI).
+
+    `from_pr` is a manual override of the same idea: every unit ordered
+    BEFORE the one named by `from_pr` is dropped from this run entirely,
+    not re-attempted and not reported, regardless of ledger state. This
+    reuses `_blocking_dependency`'s existing rule for a dependency this run
+    never touches -- a unit outside `known` is treated as already merged.
+    Useful when the ledger itself is unavailable or wrong.
+
+    `plan_name` namespaces every ledger/run-output path under
+    `<workdir>/.reasona/log/<plan_name>/<stage_name>/` (`reasona_dev.ledger`)
+    -- two plans that both happen to name a unit `pr-1` (a common name,
+    since `plan_compile._stage_name()` is just `f"pr-{index}"`) do not
+    share files or corrupt each other's resume state. `rundir` overrides
+    the log base directory (rarely needed); it defaults to
+    `reasona_dev.ledger.log_dir(workdir, plan_name)`.
+
     Every `*_fn` is injectable purely for testing; production callers pass
     none of them.
     """
     workdir = Path(workdir)
-    rundir = Path(rundir)
+    log_base = Path(rundir) if rundir is not None else ledger.log_dir(workdir, plan_name)
     units = order_units(resolve_plan_units(plan_text, workdir))
     result = PlanRunResult()
     if not units:
         return result
+
+    if from_pr is not None:
+        positions = {u.index: i for i, u in enumerate(units)}
+        if from_pr not in positions:
+            raise PlanError(
+                f"--from-pr {from_pr!r} does not match any PR unit in this plan "
+                f"(have: {', '.join(u.index for u in units)})"
+            )
+        units = units[positions[from_pr]:]
 
     known = {u.index for u in units}
     by_index: dict[str, UnitOutcome] = {}
@@ -235,39 +286,72 @@ def run_plan(
                 by_index[up.index] = outcome
                 continue
 
+            if resume and ledger.unit_status(workdir, plan_name, up.stage_name) == "shipped":
+                outcome = UnitOutcome(
+                    stage_name=up.stage_name, profile=up.profile, status="shipped",
+                    reason="resumed: already shipped in an earlier run of this plan",
+                )
+                result.outcomes.append(outcome)
+                by_index[up.index] = outcome
+                continue
+
             cycle = run_pr_cycle_fn(
                 workdir=workdir,
                 pr_title=f"PR {up.index}: {up.title}",
                 resolved=resolved,
-                rundir=rundir / up.stage_name,
+                rundir=log_base / up.stage_name,
                 profile=up.profile,
                 stage_name=up.stage_name,
+                plan_name=plan_name,
+                resume=resume,
                 files=up.unit.files,
             )
 
             if cycle.verdict not in ("PASS", "PASS_WITH_NOTES"):
+                # ABORT (role/model unavailable, or an INCONCLUSIVE role's
+                # retry budget ran out -- verification never actually ran)
+                # is `cycle_gate.evaluate()`'s own "environment problem, not
+                # a code one" case (see pr_cycle.py's review/scan branches
+                # on this), so it reports `blocked`, not `failed`.
+                status = "blocked" if cycle.verdict == "ABORT" else "failed"
                 outcome = UnitOutcome(
-                    stage_name=up.stage_name, profile=up.profile, status="failed",
+                    stage_name=up.stage_name, profile=up.profile, status=status,
                     reason=f"{cycle.stage}: {cycle.reason}", cycle_result=cycle,
                 )
             else:
-                decision = ship_gate_fn(
-                    workdir, up.stage_name,
-                    cycle_verdict=cycle.verdict, base=base, head=head,
-                )
                 tail: TailResult | None = None
-                if decision.passed and ship:
-                    tail = merge_tail_fn(
+                if ship:
+                    # ship_gate itself now runs INSIDE the final stage, after
+                    # sync and final_audit have both settled -- see
+                    # final_phase.run_final_phase() on why it can no longer be
+                    # evaluated up front here.
+                    tail = final_stage_fn(
                         workdir=workdir, stage_name=up.stage_name,
                         pr_title=f"{up.title}", unit_type=up.unit.unit_type,
                         profile=up.profile, resolved=resolved,
-                        rundir=rundir / up.stage_name, ship_decision=decision,
+                        rundir=log_base / up.stage_name,
+                        cycle_verdict=cycle.verdict, ship_gate_fn=ship_gate_fn,
                         budget=cycle.budget or FixBudget(),
                         recurrence=cycle.recurrence or RecurrenceTracker(),
                         base=base, merge=merge,
+                        plan_name=plan_name if resume else None,
                     )
+                    decision = tail.ship_decision
+                else:
+                    # No `--ship`: no sync, no final_audit, no PR, no merge --
+                    # just the review/scan verdict's own preview of whether
+                    # ship_gate would pass right now. Not the authoritative
+                    # check (that only exists inside the merge tail, on
+                    # post-sync/post-audit code), but a real signal costs
+                    # nothing extra here since nothing merges either way.
+                    decision = ship_gate_fn(workdir, up.stage_name, cycle_verdict=cycle.verdict)
                 if tail is not None and tail.blocked:
-                    status, reason = "failed", tail.reason
+                    # Every non-passing outcome inside the final phase (gh
+                    # unavailable, a sync conflict or ship-gate fix budget
+                    # exhausted, final_audit failing, non-convergence) is
+                    # `blocked`, never `failed` -- see final_phase.py's
+                    # module docstring and `cycle_gate.MAX_SHIP_CYCLES`.
+                    status, reason = "blocked", tail.reason
                 elif tail is not None:
                     status, reason = "shipped", tail.reason
                 else:
@@ -277,6 +361,10 @@ def run_plan(
                     stage_name=up.stage_name, profile=up.profile,
                     status=status, reason=reason,
                     cycle_result=cycle, ship_decision=decision, tail=tail,
+                )
+            if resume:
+                ledger.mark_unit_terminal(
+                    workdir, plan_name, up.stage_name, status=outcome.status, reason=outcome.reason,
                 )
             result.outcomes.append(outcome)
             by_index[up.index] = outcome

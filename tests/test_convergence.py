@@ -161,8 +161,10 @@ def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, generic
         profile="generic", run_role_fn=_fn,
     )
 
-    # bounded, not infinite: 3 retries then abort
-    assert result.verdict == "FAIL"
+    # bounded, not infinite: 3 retries then abort -- ABORT, not FAIL, since
+    # verification never actually ran (orchestrate.py reports this as
+    # `blocked`, not `failed`).
+    assert result.verdict == "ABORT"
     assert "inconclusive retry budget exhausted" in result.reason
     assert len(calls) == 4
 

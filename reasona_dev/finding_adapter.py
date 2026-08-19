@@ -32,7 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 
 
@@ -96,6 +96,25 @@ class Finding:
         if self.disposition is not Disposition.MUST_FIX:
             return True
         return bool(self.contract and self.scenario and self.fix)
+
+    def to_dict(self) -> dict:
+        """JSON roundtrip -- `reasona_dev.ledger` checkpoints `pending_confirm`
+        (the MUST_FIX list a bounded recheck confirms) between cycles.
+        `disposition`/`severity` are `str`-subclassed enums, so `json.dumps`
+        already serializes them as their plain string value; `from_dict`
+        re-wraps that string back into the enum so `is disposition.MUST_FIX`
+        identity checks elsewhere keep working after a resume."""
+        d = asdict(self)
+        d["disposition"] = self.disposition.value
+        d["severity"] = self.severity.value if self.severity is not None else None
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Finding":
+        d = dict(d)
+        d["disposition"] = Disposition(d["disposition"])
+        d["severity"] = Severity(d["severity"]) if d.get("severity") is not None else None
+        return cls(**d)
 
 
 @dataclass

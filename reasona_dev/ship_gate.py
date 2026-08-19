@@ -33,7 +33,7 @@ sub-gate decided the outcome, so which gate actually stops units in practice
 is measurable rather than assumed.
 
 **What this does NOT do: it does not merge.** It returns a verdict;
-`reasona_dev.merge_tail` acts on it. Keeping the decision separate from the
+`reasona_dev.final_phase` acts on it. Keeping the decision separate from the
 action is what lets this run as a CI step, a pre-merge hook, or a driver
 call without change.
 
