@@ -60,13 +60,17 @@ def test_a_title_violation_blocks_rather_than_being_repaired():
     assert "rejected by its own guard" in reason
 
 
-def test_a_body_only_violation_merges_with_the_title_alone():
+def test_a_trailer_only_body_is_cleaned_by_the_builder_not_the_guard():
+    # squash.build() strips a trailer line outright (dev-ralf squash_build.py
+    # clean_body step 5), so guard() finds nothing left to object to -- the
+    # body ends up empty either way, but via the builder doing its job, not
+    # via the TITLE_ONLY fallback below.
     msg, reason = build_squash_message(
         unit_type="fix", title="repair parser",
         body_lines=["Co-authored-by: someone <x@y>"],
     )
     assert msg is not None and msg.body == ""
-    assert "body dropped" in reason
+    assert reason == "ok"
 
 
 # --- final audit trigger ----------------------------------------------------
