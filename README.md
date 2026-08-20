@@ -106,7 +106,7 @@ reasona_dev/
   squash.py                        squash message builder + guard
   ledger.py                         per-plan, per-unit resume state
   plugin.py                         pluggy hookimpl
-tests/                      pytest, 469 cases
+tests/                      pytest, 471 cases
 ```
 
 ## CLI

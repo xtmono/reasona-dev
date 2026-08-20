@@ -1,6 +1,13 @@
-"""The last third of worker.md, restructured: `sync -> final_audit ->
-ship_gate` as one self-verifying loop, then `gh-pr -> gh-review ->
-squash-merge`.
+"""The last third of worker.md: pre-ship sync -> `gh-pr` -> `gh-review` ->
+final phase (`sync -> final_audit -> ship_gate`, one self-verifying loop) ->
+squash-merge -- this module's own `run_final_stage()` composes them in that
+order, matching worker.md's *Ship via /gh-pr* / *Final phase* sections. (An
+earlier revision of this module ran the WHOLE round loop BEFORE gh-pr/
+gh-review, ordering itself around a `run_final_phase()` design that
+predated gh-pr/gh-review's own port -- found and fixed once that inversion
+was checked against worker.md directly: a gh-review fix commit was never
+re-verified by anything before squash-merge, see docs/ARCHITECTURE.md
+§3.14.5.)
 
 **Why ship_gate moved behind sync and final_audit.** `ship_gate.evaluate()`
 runs `acceptance.run_all()` against whatever is on disk at call time. Both
@@ -648,14 +655,30 @@ def run_final_stage(
     port: int = 8052,
     run_role_fn=run_role,
 ) -> TailResult:
-    """gh -> final phase (sync -> final_audit -> ship_gate) -> gh-pr ->
-    gh-review -> squash-merge.
+    """gh -> pre-ship sync -> gh-pr -> gh-review -> final phase (sync ->
+    final_audit -> ship_gate) -> squash-merge.
+
+    Ordering matches worker.md's actual pipeline (`~/repository/
+    tas-dev-plugins/plugins/dev/skills/dev-ralf/reference/worker.md`
+    -> *Ship via /gh-pr* / *Final phase*), not the order this function used
+    to run in. worker.md syncs main TWICE: once here, before gh-pr/gh-review
+    even start ("sync to main FIRST -- before any CI runs"), and once more
+    INSIDE the final phase's round loop, positioned deliberately AFTER
+    gh-review -- specifically to catch "main moving DURING this PR's
+    gh-pr+gh-review CI window", and specifically so `final_audit`/
+    `ship_gate` re-verify whatever fix commits `gh_review.run_gh_review()`
+    just made. This function used to run the WHOLE round loop (including
+    final_audit/ship_gate) before gh-pr/gh-review ever ran -- an ordering
+    bug found and fixed after gh-pr/gh-review were ported onto an already-
+    settled final-phase design without re-checking worker.md's real
+    position for them: a gh-review fix commit was never re-verified by
+    anything before squash-merge. See docs/ARCHITECTURE.md §3.9/§3.12/
+    §3.13/§3.14.5.
 
     Named separately from `run_final_phase()` because it is a superset: `gh`
-    availability, gh-pr/gh-review, and squash-merge are not part of the
-    round-verified sync/audit/ship_gate loop (they run once, after that loop
-    has already settled), so they stay outside `run_final_phase()` and are
-    composed here instead. See docs/ARCHITECTURE.md §3.9/§3.12/§3.13.
+    availability, the pre-ship sync, gh-pr/gh-review, and squash-merge are
+    not part of the round-verified sync/audit/ship_gate loop, so they stay
+    outside `run_final_phase()` and are composed here instead.
 
     `cycle_verdict` and `ship_gate_fn` replace the old pre-computed
     `ship_decision` parameter: the verdict can no longer be computed by the
@@ -689,35 +712,47 @@ def run_final_stage(
         )
         return result
 
-    unavailable = gh_available(workdir)
-    if unavailable:
-        return _blocked(unavailable)
-
-    decision, status, dispatches, reason = run_final_phase(
-        workdir=workdir, stage_name=stage_name, pr_title=pr_title, profile=profile,
-        resolved=resolved, rundir=rundir, budget=budget, recurrence=recurrence,
-        cycle_verdict=cycle_verdict, ship_gate_fn=ship_gate_fn, base=base,
-        port=port, run_role_fn=run_role_fn,
-    )
-    audit = next((d for d in dispatches if d.role == "compliance"), None)
-    if status == "needs_review":
-        # Stop here -- gh-pr/gh-review/squash-merge must not run against a
-        # substantive conflict resolution review/scan never saw. Distinct
-        # from `_blocked()`: this is not a stall, it is a signal for the
-        # CALLER (`orchestrate.py`'s `_process_unit()`) to re-run
-        # `pr_cycle.run_pr_cycle()` and retry this stage, not something an
-        # operator needs to intervene on.
+    def _needs_review(
+        reason: str, dispatches: list[RoleRunResult],
+        decision: ShipDecision | None = None, pr_url: str | None = None,
+    ) -> TailResult:
+        # A SUBSTANTIVE conflict resolution -- from either sync point below
+        # -- means gh-pr/gh-review/squash-merge must not run (or must not be
+        # trusted, if they already ran) against code review/scan never saw.
+        # Distinct from `_blocked()`: this is not a stall, it is a signal
+        # for the CALLER (`orchestrate.py`'s `_process_unit()`) to re-run
+        # `pr_cycle.run_pr_cycle()` and retry this WHOLE stage from the top
+        # -- which naturally redoes gh-pr (idempotent, reuses the existing
+        # PR) and gh-review too, matching worker.md's own substantive branch
+        # ("re-enter review+scan on the resolved diff first ... commit ->
+        # push -> re-run /gh-review -> loop back to retry the merge").
         result = TailResult(
             stage_name=stage_name, status=NEEDS_REVIEW, reason=reason,
-            final_audit=audit, role_results=dispatches, ship_decision=decision,
+            role_results=dispatches, ship_decision=decision, pr_url=pr_url,
         )
         cycles_log.record_ship(
             workdir=workdir, stage_name=stage_name, passed=False,
             gates={"final_stage": False}, reason=reason,
         )
         return result
-    if status != "passed":
-        return _blocked(reason, final_audit=audit, role_results=dispatches, ship_decision=decision)
+
+    unavailable = gh_available(workdir)
+    if unavailable:
+        return _blocked(unavailable)
+
+    # --- Pre-ship sync: "sync to main FIRST -- before any CI runs" -------
+    pre_status, pre_reason, dispatches, pre_changed, pre_substantive = run_sync_cycle(
+        workdir=workdir, pr_title=pr_title, resolved=resolved, rundir=rundir,
+        budget=budget, base=base, port=port, run_role_fn=run_role_fn,
+    )
+    if pre_status != "ok":
+        return _blocked(pre_reason, role_results=dispatches)
+    if pre_substantive:
+        return _needs_review(
+            "pre-ship sync resolved a substantive merge conflict -- review/scan must re-run "
+            "before this unit may proceed (worker.md's mechanical/substantive rule)",
+            dispatches,
+        )
 
     # Imported lazily -- gh_pr.py imports this module (to reuse create_pr()'s
     # idempotency logic), so a module-level import here would be circular.
@@ -727,8 +762,7 @@ def run_final_stage(
         workdir=workdir, stage_name=stage_name, unit=unit, plan_name=plan_name, base=base,
     )
     if not gh_pr_result.passed:
-        return _blocked(gh_pr_result.reason, pr_url=gh_pr_result.pr_url, final_audit=audit,
-                        role_results=dispatches, ship_decision=decision)
+        return _blocked(gh_pr_result.reason, pr_url=gh_pr_result.pr_url, role_results=dispatches)
     url = gh_pr_result.pr_url
 
     review_result = gh_review_mod.run_gh_review(
@@ -738,8 +772,26 @@ def run_final_stage(
     )
     dispatches = dispatches + review_result.dispatches
     if not review_result.passed:
-        return _blocked(review_result.reason, pr_url=url, final_audit=audit,
-                        role_results=dispatches, ship_decision=decision)
+        return _blocked(review_result.reason, pr_url=url, role_results=dispatches)
+
+    # --- Final phase: sync (catches main moving DURING the gh-pr+gh-review
+    # CI window) -> conditional final_audit -> ship_gate, round-bounded.
+    # Runs HERE -- after gh-pr/gh-review, not before -- so it re-verifies
+    # whatever fix commits gh-review just made (`should_run_final_audit()`
+    # already triggers on `budget.total_used > 0`, and gh_review.py spends
+    # the SAME shared `budget` on its own fix dispatches).
+    decision, status, phase_dispatches, reason = run_final_phase(
+        workdir=workdir, stage_name=stage_name, pr_title=pr_title, profile=profile,
+        resolved=resolved, rundir=rundir, budget=budget, recurrence=recurrence,
+        cycle_verdict=cycle_verdict, ship_gate_fn=ship_gate_fn, base=base,
+        port=port, run_role_fn=run_role_fn,
+    )
+    dispatches = dispatches + phase_dispatches
+    audit = next((d for d in phase_dispatches if d.role == "compliance"), None)
+    if status == "needs_review":
+        return _needs_review(reason, dispatches, decision, pr_url=url)
+    if status != "passed":
+        return _blocked(reason, pr_url=url, final_audit=audit, role_results=dispatches, ship_decision=decision)
 
     msg, msg_reason = build_squash_message(unit_type=unit_type, title=pr_title)
     if msg is None:

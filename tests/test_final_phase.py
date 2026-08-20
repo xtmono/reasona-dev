@@ -266,23 +266,42 @@ def test_run_ship_cycle_stops_dispatching_once_ship_gate_passes(tmp_path):
     assert len(dispatches) == 1 and budget.ship_cycles == 1
 
 
-def test_needs_review_status_stops_before_gh_pr_or_gh_review_run(tmp_path, monkeypatch):
-    """`run_final_phase()` returning `"needs_review"` (a substantive sync
-    conflict resolution) must stop `run_final_stage()` right there --
-    gh-pr/gh-review/squash-merge must never run against code review/scan
-    never saw."""
+def test_a_substantive_pre_ship_sync_stops_before_gh_pr_or_gh_review_run(tmp_path, monkeypatch):
+    """A SUBSTANTIVE conflict at the PRE-ship sync (worker.md's "sync to
+    main FIRST -- before any CI runs") must stop `run_final_stage()` right
+    there -- gh-pr/gh-review/squash-merge must never run against code
+    review/scan never saw."""
     monkeypatch.setattr(final_phase, "gh_available", lambda w: None)
     monkeypatch.setattr(
-        final_phase, "run_final_phase",
-        lambda **kw: (None, "needs_review", [], "sync resolved a substantive merge conflict"),
+        final_phase, "run_sync_cycle",
+        lambda **kw: ("ok", "ok", [], True, True),  # substantive=True
     )
     monkeypatch.setattr(gh_pr, "run_gh_pr", lambda **kw: pytest.fail("must not create a PR"))
     monkeypatch.setattr(gh_review, "run_gh_review", lambda **kw: pytest.fail("must not watch gh-review"))
+    monkeypatch.setattr(final_phase, "run_final_phase", lambda **kw: pytest.fail("must not run the final phase"))
 
     r = _tail(tmp_path)
     assert r.status == final_phase.NEEDS_REVIEW
     assert "substantive" in r.reason
     assert r.blocked is False  # distinct status -- not the generic BLOCKED
+
+
+def test_a_substantive_final_phase_sync_stops_before_squash_merge(tmp_path, monkeypatch):
+    """A SUBSTANTIVE conflict at the FINAL PHASE's own sync (worker.md's
+    residual-race catcher, now positioned after gh-pr/gh-review) must also
+    surface as `NEEDS_REVIEW` -- even though gh-pr/gh-review already ran by
+    the time it is found."""
+    _stub(monkeypatch)
+    monkeypatch.setattr(
+        final_phase, "run_final_phase",
+        lambda **kw: (None, "needs_review", [], "sync resolved a substantive merge conflict"),
+    )
+    monkeypatch.setattr(final_phase, "build_squash_message", lambda **kw: pytest.fail("must not build squash message"))
+
+    r = _tail(tmp_path)
+    assert r.status == final_phase.NEEDS_REVIEW
+    assert "substantive" in r.reason
+    assert r.pr_url == "https://gh/pr/1"  # gh-pr/gh-review already ran, unlike the pre-ship case above
 
 
 def test_missing_gh_blocks_before_an_audit_is_spent(tmp_path, monkeypatch):
@@ -347,9 +366,47 @@ def test_a_failing_gh_review_blocks_before_squash_message_is_built(tmp_path, mon
     assert r.pr_url == "https://gh/pr/1"  # the PR itself still exists, just not merge-ready
 
 
-def test_a_failing_audit_blocks_before_a_pr_is_created(tmp_path, monkeypatch, generic_prompts):
+def test_a_gh_review_fix_commit_is_re_verified_by_the_final_audit(tmp_path, monkeypatch, generic_prompts):
+    """The actual defect this reorder fixes: gh-review's own fix commit
+    (a CI failure / compliance fail / bugbot found repair) used to reach
+    squash-merge with NOTHING re-verifying it -- the sync/final_audit/
+    ship_gate round loop ran BEFORE gh-pr/gh-review, not after. Confirms
+    `should_run_final_audit()` now actually sees the budget gh-review spent
+    and dispatches the audit before merge, matching worker.md's *Final
+    phase* position (docs/ARCHITECTURE.md §3.14.5)."""
     _stub(monkeypatch)
-    monkeypatch.setattr(gh_pr, "run_gh_pr", lambda **kw: pytest.fail("must not create PR"))
+
+    def _gh_review_that_made_a_fix(**kw):
+        kw["budget"].spend("gh_review")  # what a real FIX_COMMITS>0 return does
+        return gh_review.GhReviewResult(passed=True, reason="ci green after 1 fix", fix_commits=["abc123"])
+
+    monkeypatch.setattr(gh_review, "run_gh_review", _gh_review_that_made_a_fix)
+
+    audit_calls = []
+
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        if role == "compliance":
+            audit_calls.append(cycle)
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=parse_text_contract(PASS_TEXT),
+                             raw_output_path=Path("/dev/null"))
+
+    r = run_final_stage(
+        workdir=tmp_path, stage_name="pr-1", pr_title="add subtract()",
+        unit_type="feat", unit=_UNIT, profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
+        cycle_verdict="PASS", ship_gate_fn=_ship_fn(), budget=FixBudget(), recurrence=RecurrenceTracker(),
+        merge=True, run_role_fn=_fn,
+    )
+    assert r.status == MERGED
+    assert audit_calls  # the audit actually ran -- it used to never be reached after gh-review
+
+
+def test_a_failing_audit_blocks_the_squash_but_the_pr_already_exists(tmp_path, monkeypatch, generic_prompts):
+    """`final_audit` now runs AFTER gh-pr/gh-review (worker.md's actual
+    *Final phase* position, docs/ARCHITECTURE.md §3.14.5) -- so a failing
+    audit blocks the SQUASH-MERGE, not PR creation. The PR itself legitimately
+    exists by the time the audit runs."""
+    _stub(monkeypatch)
     budget = FixBudget()
     budget.spend("review")  # earns an audit
 
@@ -365,6 +422,7 @@ def test_a_failing_audit_blocks_before_a_pr_is_created(tmp_path, monkeypatch, ge
         merge=True, run_role_fn=_fn,
     )
     assert r.status == BLOCKED and "final audit" in r.reason
+    assert r.pr_url == "https://gh/pr/1"
 
 
 # --- run_final_phase: the sync -> final_audit -> ship_gate round loop -------

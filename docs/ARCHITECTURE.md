@@ -1329,10 +1329,13 @@ Renamed from `merge_tail.py`: that name described only the last step (a squash-m
 module now also owns the sync-conflict fix loop, the conditional final audit, and ship_gate's
 verdict itself (§3.9.4) — a squash-merge is just where it ends, not what it is.
 
-Implements the final third of `worker.md`, restructured: `sync → final_audit → ship_gate` now runs
-as one self-verifying loop (§3.9.4), followed by `gh-pr → squash-merge`. `ship_gate`'s verdict used
-to be computed by `orchestrate.py` before the tail ran at all; it moved inside the tail, and behind
-sync and the audit, for the reason in §3.9.4.
+Implements the final third of `worker.md`: `sync → final_audit → ship_gate` runs as one
+self-verifying loop (§3.9.4) — the design in this section predates `gh-pr`/`gh-review` (§3.12/
+§3.13) even existing in this project, and describes that loop's INTERNAL structure only.
+**Where this loop sits relative to `gh-pr`/`gh-review` is covered in §3.14.5, not here** — it moved
+once, incorrectly (appended after them instead of worker.md's real position), and was corrected.
+`ship_gate`'s verdict used to be computed by `orchestrate.py` before the tail ran at all; it moved
+inside the tail, and behind sync and the audit, for the reason in §3.9.4.
 
 **Merging is opt-in.** `merge=False` is the default, stopping at PR creation. A squash-merge is a
 hard-to-reverse external action that rewrites the real repository's default branch, so the caller
@@ -1690,8 +1693,10 @@ not for a plain retry.
 ## 3.12 Porting `/gh-pr` -- `reasona_dev/gh_pr.py`
 
 Read in full from `~/repository/tas-dev-plugins/plugins/dev/skills/gh-pr/SKILL.md` before porting.
-Runs inside `final_phase.run_final_stage()`, right after `run_final_phase()`'s sync/audit/ship_gate
-round loop settles (§3.9.4) — in place of what used to be a direct `create_pr()` call.
+Runs inside `final_phase.run_final_stage()`, right after the pre-ship sync -- BEFORE
+`run_final_phase()`'s sync/audit/ship_gate round loop, which now runs after `gh-review` instead
+(§3.14.5 has the corrected ordering; this section originally said the opposite, from before that
+fix) — in place of what used to be a direct `create_pr()` call.
 
 **Not ported: §4's `make ci`/`make lint-md` re-validation gate — and this is a real gap, not a
 clean substitution.** The original skill runs this UNCONDITIONALLY for any source-touching change.
@@ -1937,6 +1942,84 @@ reasoning as `MAX_FINAL_PHASE_ROUNDS`: a target repo whose base keeps moving fas
 pipeline can settle is not something retrying indefinitely would fix) -- exhausting it reports
 `blocked` (an anomaly to investigate, not an ordinary review-found defect), while a genuine defect
 the forced re-review actually finds reports `failed`, same as any other review-found failure.
+
+### 3.14.5 A gh-review fix commit was never re-verified — `run_final_stage()`'s ordering bug
+
+Found by a `tas-dev-plugins` session agent re-checking this project's `final_phase.py` against
+worker.md directly, and confirmed by re-reading worker.md itself
+(`~/repository/tas-dev-plugins/plugins/dev/skills/dev-ralf/reference/worker.md` -- *Ship via
+/gh-pr* / *Final phase*).
+
+**The defect.** `run_final_stage()` used to run the WHOLE `sync -> final_audit -> ship_gate` round
+loop (`run_final_phase()`) BEFORE `gh_pr.run_gh_pr()`/`gh_review_mod.run_gh_review()` — the module's
+own docstring said so explicitly ("`sync -> final_audit -> ship_gate` as one self-verifying loop,
+then `gh-pr -> gh-review -> squash-merge`"). After `gh_review.run_gh_review()` returned, only
+`review_result.passed` was checked before going straight to `build_squash_message()` /
+`squash_merge()` — `run_final_phase()`, `run_final_audit()`, and `ship_gate_fn` never ran again. A
+fix commit `gh_review.py`'s own auto-fix loop makes (CI failure / compliance fail / bugbot found —
+`GhReviewResult.fix_commits`) reached squash-merge with **nothing re-verifying it**: not
+`final_audit`, not `ship_gate`'s acceptance axis.
+
+**Why it happened.** `run_final_phase()`'s round-loop design (§3.9.4, "why ship_gate moved behind
+sync and the audit") was finished in commit `7f906d4`, BEFORE `gh_pr.py`/`gh_review.py` even
+existed. When they were ported later (commit `b182e6d`, §3.12/§3.13), they were appended AFTER the
+already-settled round loop rather than inserted at worker.md's actual position for them — an
+integration-time ordering mistake that neither `run_final_stage()`'s own callers nor its test suite
+caught, since every existing test exercised sync/audit/ship_gate and gh-pr/gh-review as separate,
+independently-mocked concerns and none asserted their RELATIVE order.
+
+**worker.md's real pipeline, confirmed by direct re-read:** `develop -> review -> scan -> sync-main
+-> /gh-pr -> /gh-review -> Final phase (sync -> conditional final_audit -> ship_gate,
+round-bounded) -> squash-merge`. Two DISTINCT sync points, not one:
+1. **Pre-ship sync** ("Ship via /gh-pr" -- "sync to main FIRST, before any CI runs"), so `/gh-pr`'s
+   own `make ci` and `/gh-review`'s GitHub CI run once, against an already-current base, instead of
+   running, finding main moved, and re-running.
+2. **Final-phase sync** (inside the round loop, positioned AFTER `/gh-review`) -- catches "main
+   moving DURING this PR's gh-pr+gh-review CI window", the residual race the pre-ship sync cannot
+   prevent. This is the position where `final_audit`/`ship_gate` re-verify whatever `/gh-review`'s
+   fix commits changed.
+
+reasona-dev only ever had ONE `run_sync_cycle()` call site, positioned where worker.md's PRE-ship
+sync belongs (this is also where item 5's mechanical/substantive self-report logic, §3.14.4, was
+originally implemented — a placement that turned out to already be correct for the pre-ship sync).
+The final-phase round loop's OWN internal sync (worker.md's residual-race catcher) was simply
+missing from the pipeline entirely, folded into the single misplaced call.
+
+**Fix: `run_final_stage()` recomposed to match worker.md's real order.**
+```
+gh_available check
+run_sync_cycle()                      -- pre-ship sync (worker.md's "sync FIRST")
+    substantive -> NEEDS_REVIEW, stop (nothing below has run yet)
+gh_pr.run_gh_pr()
+gh_review_mod.run_gh_review()         -- may spend budget on a fix commit
+run_final_phase()                     -- sync -> final_audit -> ship_gate, round-bounded
+    (this call's OWN internal run_sync_cycle() is worker.md's residual-race catcher)
+    "needs_review" -> NEEDS_REVIEW, stop (gh-pr/gh-review already ran -- pr_url is set)
+    "blocked"      -> BLOCKED
+is_up_to_date() -> squash_merge()      -- unchanged, already ran last
+```
+`should_run_final_audit(budget) -> budget.total_used > 0` already implements worker.md's audit-skip
+condition correctly once positioned here: `gh_review.py` spends the SAME shared `budget` object on
+its own fix dispatches (`budget.spend("gh_review")`), so a gh-review fix commit now legitimately
+earns an audit the same way a review/scan fix does. No new skip-condition logic was needed — only
+the reorder.
+
+**`NEEDS_REVIEW` (§3.14.4) now covers BOTH sync points, symmetrically**, and composes with
+`orchestrate.py`'s existing resync loop without any change there: whether the substantive conflict
+is found at the pre-ship sync (before gh-pr/gh-review ever ran) or inside the final phase's own
+sync (after they did), `_process_unit()` re-reviews and retries the WHOLE `final_stage_fn()` call
+from the top — which naturally redoes `gh_pr.run_gh_pr()` (idempotent, reuses the existing PR) and
+`gh_review.run_gh_review()` too. This happens to match worker.md's own substantive-conflict branch
+for the final-phase sync exactly ("re-enter review+scan on the resolved diff first ... commit ->
+push -> re-run /gh-review -> loop back to retry the merge") even though `orchestrate.py`'s resync
+loop was not designed with that specific branch in mind — the general "retry the whole stage"
+mechanism already built for item 5 turned out to be sufficient.
+
+**A regression test proves the actual defect is fixed**
+(`test_a_gh_review_fix_commit_is_re_verified_by_the_final_audit`): a `gh_review.run_gh_review()`
+stub that spends the `"gh_review"` budget stage (simulating a real `FIX_COMMITS > 0` return) now
+causes `final_audit` to actually dispatch before the squash-merge — under the old ordering this
+never happened.
 
 ## 4. Directory structure
 
