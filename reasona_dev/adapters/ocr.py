@@ -28,19 +28,22 @@ all three):
   no stream-json framing -- reasona_dev.finding_adapter.parse_ocr_result
   consumes it directly.
 
-**No reasona_dev module calls this, by design.** It is registered under the
-`bernstein.adapters` entry-point group (see pyproject.toml), so the consumer
-is Bernstein's own adapter registry, not this package: a role whose
-`role_model_policy.provider` is `ocr` is spawned through here without any
-reasona-dev code being involved. Grepping for a caller inside `reasona_dev/`
-finds nothing, and that is the correct state -- not dead code.
+**No reasona_dev module calls this directly, by design.** It is registered
+under the `bernstein.adapters` entry-point group (see pyproject.toml), so the
+immediate consumer is Bernstein's own adapter registry, not this package: a
+role whose `role_model_policy.provider` is `ocr` is spawned through here
+without any reasona-dev code touching the subprocess itself. Grepping for a
+caller inside `reasona_dev/` finds nothing, and that is the correct state --
+not dead code.
 
-What IS unbuilt is the reviewer that would use it. `.reasona/reasona.yaml`
-carries `review: claude:opus:high,ocr`, whose `,ocr` extra was meant to run
-OCR as an ADDITIONAL reviewer beside the primary one, merging both verdicts
-through `finding_adapter.merge()`. Nothing dispatches that second reviewer
-yet, so the extra is parsed and ignored. `parse_ocr_result` is the other half
-already in place: it maps OCR's `failed[]` to INCONCLUSIVE rather than to a
+The reviewer that dispatches it exists now (`docs/ARCHITECTURE.md §3.14.1`).
+`.reasona/reasona.yaml` can carry `review: claude:opus:high,ocr`; the `,ocr`
+extra is captured on `model_config.ResolvedModel.ocr`, and `pr_cycle.py`'s
+FULL-route review cycle dispatches the `ocr_reviewer` role (whose
+`role_model_policy` entry sets `provider: ocr`, routing it here) as one more
+reviewer alongside whichever LLM reviewer(s) were requested, merging every
+verdict through `finding_adapter.merge()`. `parse_ocr_result` is the other
+half, unchanged: it maps OCR's `failed[]` to INCONCLUSIVE rather than to a
 synthetic finding, which is the one INCONCLUSIVE producer this project has.
 """
 

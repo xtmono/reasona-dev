@@ -29,7 +29,7 @@ MUST_FIX_TEXT = (
 def _recording_role_fn(script):
     calls = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         calls.append({
             "role": role, "title": title, "prompt": prompt, "model": model.model,
             "cycle": cycle,

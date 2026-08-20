@@ -32,7 +32,7 @@ def _stub_role_fn(*, script):
     """
     calls = {"n": 0}
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         idx = calls["n"]
         calls["n"] += 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)
@@ -126,3 +126,38 @@ def test_scan_stage_runs_bugbot_and_compliance_in_kv_shape(tmp_path, generic_pro
         profile="generic", run_role_fn=_stub_role_fn(script=script),
     )
     assert result.verdict == "PASS"
+
+
+def test_port_reaches_every_run_role_fn_dispatch(tmp_path, generic_prompts):
+    """`run_pr_cycle(port=...)` used to accept the argument and never use
+    it -- every dispatch (review, scan, dev fix) silently fell back to
+    `run_role`'s own default (8052) regardless of what was passed here.
+    With concurrent unit dispatch (`orchestrate.run_plan(job=...)`), two
+    units running at once need genuinely different ports, so every
+    dispatch inside one unit's cycle must actually carry the port it was
+    given.
+    """
+    seen_ports = []
+    calls = {"n": 0}
+
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        seen_ports.append(port)
+        idx = calls["n"]
+        calls["n"] += 1
+        script = [
+            parse_text_contract(MUST_FIX_TEXT),  # review c1 -- forces a dev fix + review c2
+            ReviewResult(role_status=RoleStatus.COMPLETE),  # dev fix
+            parse_text_contract(PASS_TEXT),  # review c2
+            parse_text_contract(PASS_TEXT),  # bugbot
+            parse_text_contract(PASS_TEXT),  # compliance
+        ]
+        result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)
+        return RoleRunResult(role=label or role, cycle=cycle, review_result=result, raw_output_path=Path("/dev/null"))
+
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="generic", run_role_fn=fn, port=19999,
+    )
+    assert result.verdict == "PASS"
+    assert seen_ports  # at least one dispatch happened
+    assert all(p == 19999 for p in seen_ports)

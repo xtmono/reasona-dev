@@ -50,6 +50,7 @@ than entering a fix loop that could never converge.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,12 +72,17 @@ from reasona_dev.squash import SquashMessage
 MERGED = "merged"
 PR_OPEN = "pr_open"
 BLOCKED = "blocked"
+# sync resolved a SUBSTANTIVE merge conflict (`parse_conflict_kind()`) --
+# gh-pr/gh-review/squash-merge never ran this call. `orchestrate.py`'s
+# `_process_unit()` is what re-invokes `pr_cycle.run_pr_cycle()` on seeing
+# this, then retries the final stage -- see `docs/ARCHITECTURE.md` §3.14.4.
+NEEDS_REVIEW = "needs_review"
 
 
 @dataclass
 class TailResult:
     stage_name: str
-    status: str  # MERGED | PR_OPEN | BLOCKED
+    status: str  # MERGED | PR_OPEN | BLOCKED | NEEDS_REVIEW
     reason: str
     pr_url: str | None = None
     squash_message: SquashMessage | None = None
@@ -151,6 +157,24 @@ def sync_main(workdir: Path, *, base: str = "origin/main") -> tuple[bool, str]:
     return False, f"merge with {base} failed: {(err or out).strip()[:200]}"
 
 
+_CONFLICT_KIND_RE = re.compile(r"^CONFLICT_KIND:\s*(mechanical|substantive)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_conflict_kind(text: str) -> str:
+    """The dev role's own self-report of whether ITS conflict resolution was
+    `"mechanical"` (import order, formatting, a line moved -- no semantic
+    change) or `"substantive"` (overlapping logic, the same function edited
+    on both sides -- a real code change review/scan never saw). Defaults to
+    `"substantive"` when the marker is missing or unparseable -- the same
+    "an unanswerable routing question never narrows scope" rule
+    `_safe_recheck_route()` already follows: guessing MECHANICAL on missing
+    evidence could let a real conflicting change skip re-review entirely,
+    which is the one direction this decision must never guess in.
+    """
+    match = _CONFLICT_KIND_RE.search(text)
+    return match.group(1).lower() if match else "substantive"
+
+
 def _build_conflict_fix_prompt(base: str, conflicted_files: list[str]) -> str:
     listed = "\n".join(f"- {p}" for p in conflicted_files)
     return "\n".join(
@@ -163,19 +187,30 @@ def _build_conflict_fix_prompt(base: str, conflicted_files: list[str]) -> str:
             "file not listed here.",
             "",
             listed,
+            "",
+            "When you are completely done, on its own final line write "
+            "exactly one of:",
+            "CONFLICT_KIND: mechanical",
+            "CONFLICT_KIND: substantive",
+            "",
+            "Write `mechanical` ONLY if your resolution involved no semantic "
+            "change at all (e.g. import order, formatting, a line moved "
+            "without altering behavior). Write `substantive` if resolving "
+            "the conflict required combining or reconciling actual logic "
+            "changes from both sides -- when in doubt, write `substantive`.",
         ]
     )
 
 
 def _run_conflict_fix(
     *, workdir: Path, pr_title: str, base: str, conflicted_files: list[str],
-    dev_model: ResolvedModel, rundir: Path, cycle: int, run_role_fn,
+    dev_model: ResolvedModel, rundir: Path, cycle: int, port: int, run_role_fn,
 ) -> RoleRunResult:
     return run_role_fn(
         workdir=workdir, role="backend",
         title=f"{pr_title} -- resolve merge conflict c{cycle}",
         prompt=_build_conflict_fix_prompt(base, conflicted_files),
-        model=dev_model, rundir=rundir, cycle=cycle,
+        model=dev_model, rundir=rundir, cycle=cycle, port=port,
     )
 
 
@@ -187,19 +222,27 @@ def run_sync_cycle(
     rundir: Path,
     budget: FixBudget,
     base: str = "origin/main",
+    port: int = 8052,
     run_role_fn=run_role,
-) -> tuple[str, str, list[RoleRunResult], bool]:
+) -> tuple[str, str, list[RoleRunResult], bool, bool]:
     """Sync with `base`, resolving a conflict via dev instead of blocking on it.
 
-    Returns `(status, reason, dispatches, changed)`. `status` is `"ok"` (in
-    sync, whether or not a conflict needed resolving) or `"blocked"` (a
-    non-conflict sync failure, or the `"sync"` stage budget ran out while
-    still conflicted). `changed` is True iff a conflict-resolution commit
-    was made this call -- the caller uses it to decide whether `final_audit`
-    and `ship_gate` need to run again on top of it.
+    Returns `(status, reason, dispatches, changed, substantive)`. `status`
+    is `"ok"` (in sync, whether or not a conflict needed resolving) or
+    `"blocked"` (a non-conflict sync failure, or the `"sync"` stage budget
+    ran out while still conflicted). `changed` is True iff a
+    conflict-resolution commit was made this call -- the caller uses it to
+    decide whether `final_audit` and `ship_gate` need to run again on top
+    of it. `substantive` is True iff ANY conflict resolution this call made
+    was self-reported (`parse_conflict_kind()`) as substantive rather than
+    mechanical -- `run_final_phase()` uses it to force a full
+    `pr_cycle.run_pr_cycle()` re-review before the unit is allowed past
+    this tail (worker.md's mechanical/substantive distinction,
+    `docs/ARCHITECTURE.md` §3.14.4).
     """
     dispatches: list[RoleRunResult] = []
     changed = False
+    substantive = False
     cycle = 0
     while True:
         # Idempotent cleanup: aborts a merge left over from a prior
@@ -209,22 +252,28 @@ def run_sync_cycle(
         _run(["git", "merge", "--abort"], workdir)
         ok, reason = sync_main(workdir, base=base)
         if ok:
-            return "ok", reason, dispatches, changed
+            return "ok", reason, dispatches, changed, substantive
 
         conflicted = _conflicted_files(workdir)
         if not conflicted:
-            return "blocked", reason, dispatches, changed
+            return "blocked", reason, dispatches, changed, substantive
         if not budget.can_spend("sync"):
             _run(["git", "merge", "--abort"], workdir)
-            return "blocked", f"sync budget exhausted: {reason}", dispatches, changed
+            return "blocked", f"sync budget exhausted: {reason}", dispatches, changed, substantive
 
         budget.spend("sync")
         cycle += 1
-        dispatches.append(_run_conflict_fix(
+        fix_result = _run_conflict_fix(
             workdir=workdir, pr_title=pr_title, base=base, conflicted_files=conflicted,
-            dev_model=resolved["dev"], rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
-        ))
+            dev_model=resolved["dev"], rundir=rundir, cycle=cycle, port=port, run_role_fn=run_role_fn,
+        )
+        dispatches.append(fix_result)
         changed = True
+        if fix_result.raw_output_path.is_file():
+            kind = parse_conflict_kind(fix_result.raw_output_path.read_text(encoding="utf-8"))
+        else:
+            kind = "substantive"  # no output at all -- same fail-safe default
+        substantive = substantive or (kind == "substantive")
 
 
 def is_up_to_date(workdir: Path, *, base: str = "origin/main") -> tuple[bool, str]:
@@ -349,6 +398,7 @@ def run_final_audit(
     rundir: Path,
     budget: FixBudget,
     recurrence: RecurrenceTracker,
+    port: int = 8052,
     run_role_fn=run_role,
 ) -> tuple[bool, str, list[RoleRunResult]]:
     """A fresh whole-PR audit, with its own bounded fix loop.
@@ -382,6 +432,7 @@ def run_final_audit(
             workdir=workdir, role="compliance",
             title=f"{pr_title} -- final audit c{cycle}",
             prompt=prompt, model=resolved["final_audit"], rundir=rundir, cycle=cycle,
+            port=port,
         )
         dispatches.append(result)
         cycles_log.record_dispatch(
@@ -415,7 +466,7 @@ def run_final_audit(
             workdir=workdir, pr_title=pr_title,
             findings=result.review_result.must_fix, dev_model=resolved["dev"],
             escalated_model=decision.escalated_model, rundir=rundir,
-            cycle=cycle, run_role_fn=run_role_fn,
+            cycle=cycle, run_role_fn=run_role_fn, port=port,
         )
         dispatches.append(fix)
 
@@ -437,12 +488,13 @@ def _build_ship_fix_prompt(decision: ShipDecision) -> str:
 
 def _run_ship_fix(
     *, workdir: Path, pr_title: str, decision: ShipDecision,
-    dev_model: ResolvedModel, rundir: Path, cycle: int, run_role_fn,
+    dev_model: ResolvedModel, rundir: Path, cycle: int, port: int, run_role_fn,
 ) -> RoleRunResult:
     return run_role_fn(
         workdir=workdir, role="backend",
         title=f"{pr_title} -- ship gate fix c{cycle}",
         prompt=_build_ship_fix_prompt(decision), model=dev_model, rundir=rundir, cycle=cycle,
+        port=port,
     )
 
 
@@ -456,6 +508,7 @@ def run_ship_cycle(
     budget: FixBudget,
     cycle_verdict: str,
     ship_gate_fn,
+    port: int = 8052,
     run_role_fn=run_role,
 ) -> tuple[ShipDecision, bool, list[RoleRunResult]]:
     """Runs `ship_gate_fn` and, on a failing acceptance criterion, dispatches
@@ -483,7 +536,7 @@ def run_ship_cycle(
         cycle += 1
         dispatches.append(_run_ship_fix(
             workdir=workdir, pr_title=pr_title, decision=decision,
-            dev_model=resolved["dev"], rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
+            dev_model=resolved["dev"], rundir=rundir, cycle=cycle, port=port, run_role_fn=run_role_fn,
         ))
         changed = True
 
@@ -503,6 +556,7 @@ def run_final_phase(
     cycle_verdict: str,
     ship_gate_fn,
     base: str = "origin/main",
+    port: int = 8052,
     run_role_fn=run_role,
 ) -> tuple[ShipDecision | None, str, list[RoleRunResult], str]:
     """`sync -> (conditional) final_audit -> ship_gate (with its own bounded
@@ -512,7 +566,14 @@ def run_final_phase(
 
     Returns `(ship_decision, status, dispatches, reason)`. `status` is
     `"passed"` (a round changed nothing and its `ship_decision.passed` is
-    True) or `"blocked"` (a sync/audit/ship step's own bounded dev-fix
+    True), `"needs_review"` (`sync` resolved a SUBSTANTIVE merge conflict --
+    see `parse_conflict_kind()` -- so nothing here, and nothing gh-pr/
+    gh-review/squash-merge would do next, may proceed until
+    `pr_cycle.run_pr_cycle()` re-reviews the result; `run_final_stage()`
+    stops immediately on this status, without dispatching `final_audit` or
+    `ship_gate` for that round -- `orchestrate.py`'s `_process_unit()` is
+    what actually re-invokes review/scan, see `docs/ARCHITECTURE.md`
+    §3.14.4), or `"blocked"` (a sync/audit/ship step's own bounded dev-fix
     budget ran out while still failing, or `MAX_FINAL_PHASE_ROUNDS` was
     reached without settling). By the time this runs, review/scan already
     passed, so nothing failing this deep is treated as an ordinary
@@ -522,20 +583,25 @@ def run_final_phase(
     """
     dispatches: list[RoleRunResult] = []
     for round_ in range(1, MAX_FINAL_PHASE_ROUNDS + 1):
-        sync_status, sync_reason, sync_dispatches, sync_changed = run_sync_cycle(
+        sync_status, sync_reason, sync_dispatches, sync_changed, sync_substantive = run_sync_cycle(
             workdir=workdir, pr_title=pr_title, resolved=resolved, rundir=rundir,
-            budget=budget, base=base, run_role_fn=run_role_fn,
+            budget=budget, base=base, port=port, run_role_fn=run_role_fn,
         )
         dispatches.extend(sync_dispatches)
         if sync_status != "ok":
             return None, "blocked", dispatches, sync_reason
+        if sync_substantive:
+            return None, "needs_review", dispatches, (
+                "sync resolved a substantive merge conflict -- review/scan must re-run "
+                "before this unit may proceed (worker.md's mechanical/substantive rule)"
+            )
 
         audit_changed = False
         if should_run_final_audit(budget):
             passed, audit_reason, audit_dispatches = run_final_audit(
                 workdir=workdir, stage_name=stage_name, pr_title=pr_title,
                 profile=profile, resolved=resolved, rundir=rundir, budget=budget,
-                recurrence=recurrence, run_role_fn=run_role_fn,
+                recurrence=recurrence, port=port, run_role_fn=run_role_fn,
             )
             dispatches.extend(audit_dispatches)
             if not passed:
@@ -545,7 +611,7 @@ def run_final_phase(
         decision, ship_changed, ship_dispatches = run_ship_cycle(
             workdir=workdir, stage_name=stage_name, pr_title=pr_title, resolved=resolved,
             rundir=rundir, budget=budget, cycle_verdict=cycle_verdict, ship_gate_fn=ship_gate_fn,
-            run_role_fn=run_role_fn,
+            port=port, run_role_fn=run_role_fn,
         )
         dispatches.extend(ship_dispatches)
         if not decision.passed:
@@ -579,6 +645,7 @@ def run_final_stage(
     merge: bool = False,
     plan_name: str | None = None,
     gh_review_max_wait_seconds: int = gh_review_mod.DEFAULT_MAX_WAIT_SECONDS,
+    port: int = 8052,
     run_role_fn=run_role,
 ) -> TailResult:
     """gh -> final phase (sync -> final_audit -> ship_gate) -> gh-pr ->
@@ -630,9 +697,25 @@ def run_final_stage(
         workdir=workdir, stage_name=stage_name, pr_title=pr_title, profile=profile,
         resolved=resolved, rundir=rundir, budget=budget, recurrence=recurrence,
         cycle_verdict=cycle_verdict, ship_gate_fn=ship_gate_fn, base=base,
-        run_role_fn=run_role_fn,
+        port=port, run_role_fn=run_role_fn,
     )
     audit = next((d for d in dispatches if d.role == "compliance"), None)
+    if status == "needs_review":
+        # Stop here -- gh-pr/gh-review/squash-merge must not run against a
+        # substantive conflict resolution review/scan never saw. Distinct
+        # from `_blocked()`: this is not a stall, it is a signal for the
+        # CALLER (`orchestrate.py`'s `_process_unit()`) to re-run
+        # `pr_cycle.run_pr_cycle()` and retry this stage, not something an
+        # operator needs to intervene on.
+        result = TailResult(
+            stage_name=stage_name, status=NEEDS_REVIEW, reason=reason,
+            final_audit=audit, role_results=dispatches, ship_decision=decision,
+        )
+        cycles_log.record_ship(
+            workdir=workdir, stage_name=stage_name, passed=False,
+            gates={"final_stage": False}, reason=reason,
+        )
+        return result
     if status != "passed":
         return _blocked(reason, final_audit=audit, role_results=dispatches, ship_decision=decision)
 
@@ -651,6 +734,7 @@ def run_final_stage(
     review_result = gh_review_mod.run_gh_review(
         workdir=workdir, pr_url=url, pr_num=gh_pr_result.pr_num, pr_title=pr_title,
         resolved=resolved, rundir=rundir, budget=budget, max_wait_seconds=gh_review_max_wait_seconds,
+        port=port,
     )
     dispatches = dispatches + review_result.dispatches
     if not review_result.passed:

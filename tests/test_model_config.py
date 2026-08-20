@@ -1,4 +1,4 @@
-from reasona_dev.model_config import resolve, resolve_all
+from reasona_dev.model_config import resolve, resolve_all, resolve_review_list
 
 
 def test_default_when_nothing_set():
@@ -27,11 +27,17 @@ def test_env_var_composite_overrides_adapter_and_effort_too():
     assert r.effort == "max"
 
 
-def test_composite_with_trailing_ocr_marker_strips_it():
+def test_composite_with_trailing_ocr_marker_is_captured_on_ocr_field():
     r = resolve("review", env={"REASONA_DEV_REVIEW_MODEL": "claude:opus:high,ocr"})
     assert r.model == "opus"
     assert r.adapter == "claude"
     assert r.effort == "high"
+    assert r.ocr is True
+
+
+def test_composite_without_ocr_marker_leaves_ocr_false():
+    r = resolve("review", env={"REASONA_DEV_REVIEW_MODEL": "claude:opus:high"})
+    assert r.ocr is False
 
 
 def test_flag_overrides_env_var():
@@ -134,3 +140,45 @@ def test_resolve_all_flags_take_priority_everywhere():
     assert resolved["dev"].model == "haiku"
     assert resolved["bugbot"].model == "custom"
     assert resolved["dev"].source == "flag"
+
+
+def test_resolve_all_without_review_flags_has_one_reviewer():
+    resolved = resolve_all(load_config_files=False, env={})
+    assert len(resolved["review_all"]) == 1
+    assert resolved["review_all"][0] is resolved["review"]
+    assert resolved["review_ocr_requested"] is False
+
+
+def test_resolve_all_multiple_review_flags_are_all_resolved_in_order():
+    resolved = resolve_all(
+        load_config_files=False, env={},
+        review_flags=["claude:opus:high", "codex:o1:max"],
+    )
+    assert [r.model for r in resolved["review_all"]] == ["opus", "o1"]
+    assert [r.adapter for r in resolved["review_all"]] == ["claude", "codex"]
+    assert resolved["review"] is resolved["review_all"][0]  # first stays the single-value representative
+
+
+def test_resolve_all_ocr_requested_true_if_any_review_flag_carries_the_marker():
+    resolved = resolve_all(
+        load_config_files=False, env={},
+        review_flags=["claude:opus:high", "codex:o1:max,ocr"],
+    )
+    assert resolved["review_ocr_requested"] is True
+
+
+def test_resolve_review_list_no_flags_falls_back_to_single_chain():
+    reviewers = resolve_review_list(None, env={"REASONA_DEV_REVIEW_MODEL": "opus"})
+    assert len(reviewers) == 1
+    assert reviewers[0].model == "opus"
+    assert reviewers[0].source == "env:REASONA_DEV_REVIEW_MODEL"
+
+
+def test_resolve_review_list_multiple_flags_each_resolve_independently():
+    reviewers = resolve_review_list(["opus", "codex:o1:max,ocr"], env={})
+    assert reviewers[0].model == "opus"
+    assert reviewers[0].adapter == "claude"  # bare flag keeps review's default adapter
+    assert reviewers[0].ocr is False
+    assert reviewers[1].model == "o1"
+    assert reviewers[1].adapter == "codex"
+    assert reviewers[1].ocr is True

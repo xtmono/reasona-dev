@@ -106,7 +106,7 @@ reasona_dev/
   squash.py                        squash message builder + guard
   ledger.py                         per-plan, per-unit resume state
   plugin.py                         pluggy hookimpl
-tests/                      pytest, 293 cases
+tests/                      pytest, 469 cases
 ```
 
 ## CLI
@@ -121,6 +121,13 @@ and scan run through `pr_cycle`'s runtime driver, not a second subcommand —
 and it also keeps `role_model_policy` in `bernstein.yaml` synced to
 `model_config`'s resolved models. Chain: `flag > env var > project config >
 global config > default`.
+
+`--review` is repeatable (`--review claude:opus:high --review codex:o1:max`)
+to run multiple independent reviewers, merged via `finding_adapter.merge()`;
+appending `,ocr` to any one of them (e.g. `--review claude:opus:high,ocr`)
+also dispatches the OCR co-reviewer once alongside them. `run-plan --job K`
+(default 1) runs up to `K` independent PR units concurrently, each on its
+own port — see `docs/ARCHITECTURE.md` §3.14.
 
 ## `bernstein.yaml`
 

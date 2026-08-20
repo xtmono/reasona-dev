@@ -1789,6 +1789,155 @@ re-derivable local judgment) or an external stall, matching the same reasoning
 matching `/gh-review`'s own default) — the cycle-count budget stays a fixed pipeline constant, like
 every other stage's cap, not something exposed per invocation.
 
+## 3.14 Multi-reviewer, the OCR co-reviewer, and K-concurrent unit dispatch
+
+Three remaining dev-ralf parity gaps, closed together because the first two share one mechanism
+and the third is independent but reuses the same per-unit worktree isolation §3.11 already built.
+
+### 3.14.1 Multiple independent reviewers and the OCR co-reviewer
+
+`finding_adapter.merge(*results: ReviewResult)` was already variadic, and the scan cycle already
+dispatches bugbot and compliance sequentially and merges their two results — the same shape
+applies to review directly. `--review` (only this role flag, matching dev-ralf's own convention)
+now accepts `action="append"`; `model_config.resolve_review_list()` resolves each occurrence
+independently and `resolve_all()` returns them as `resolved["review_all"]` (always ≥ 1 element,
+`resolved["review"]` stays the first as the single-value representative every pre-existing call
+site already reads). `pr_cycle.py`'s FULL-route review cycle dispatches every model in
+`review_all` sequentially (role `"reviewer"` for all of them — Bernstein's task-server role
+whitelist is per-ROLE, not per-model, so this needs no new whitelist entry) and merges their
+`ReviewResult`s via `merge()` before evaluating, exactly like the scan cycle. The BOUNDED recheck
+route never fans out — it exists specifically to re-confirm a small, already-identified finding
+set cheaply, not to re-open full independent review.
+
+`,ocr` (dev-ralf's suffix marking "also run the OCR reviewer beside the primary one", §3.4) used to
+be parsed off and discarded (`model_config._split_composite()`). It is now captured on
+`ResolvedModel.ocr`; `resolve_all()["review_ocr_requested"]` is True when ANY resolved reviewer
+carries it. The review cycle dispatches the OCR co-reviewer (role `"ocr_reviewer"`, adapter
+`"ocr"`) once per cycle when set — never once per marked reviewer — and folds its result into the
+same `merge()` call, exactly matching `adapters/ocr.py`'s own docstring
+("run OCR as an ADDITIONAL reviewer beside the primary one, merging both verdicts through
+`finding_adapter.merge()`"). `ocr_reviewer` is a NEW entry in `role_model_policy` (both
+`.bernstein/bernstein.yaml` and `.reasona/bernstein-template.yaml`, `provider: ocr`) — added by
+hand, matching `sync_role_model_policy()`'s own rule that it never invents a role entry, only
+rewrites an existing one's provider. It is deliberately NOT in
+`model_config.BERNSTEIN_ROLE_TO_PRIMARY_CONFIG_ROLE` (same reason `final_audit` isn't: OCR has no
+model slot to track — it is a stateless diff scanner, not an LLM role — so
+`tests/test_bernstein_yaml_consistency.py` never checks its provider against a resolved adapter).
+
+Two reviewer dispatches made under the same role (`"reviewer"`) at the same cycle would otherwise
+collide on `run_role()`'s output filename (`<role>-c<cycle>.raw.txt`) — `run_role()` gained a
+`label` parameter that distinguishes the FILENAME and `RoleRunResult.role` (so `cycles_log` records
+each reviewer separately) without changing what goes out on the wire.
+
+### 3.14.2 A pre-existing bug found while wiring `--job`: `port` was accepted and silently dropped
+
+`orchestrate.run_plan(port=...)` only ever reached `dispatch_unit_cycle0()`. `run_pr_cycle_fn` and
+`final_stage_fn` were called with no `port=` at all — and inside `pr_cycle.run_pr_cycle()` itself,
+`port` was already a parameter, accepted, and never once passed to any of its own `run_role_fn()`
+calls (review, scan, dev-fix). `final_phase.py`'s `run_sync_cycle`/`run_final_audit`/
+`run_ship_cycle`/`run_final_phase`/`run_final_stage` had no `port` parameter at all, and neither did
+`gh_review.run_gh_review()`. Every dispatch downstream of cycle-0 silently used `run_role`'s own
+hardcoded default (8052) regardless of what `--port` was given. This worked by pure coincidence —
+sequential execution, one unit at a time, always the same port — and would have caused a genuine
+TCP bind collision the moment two units needed to run at once. Fixed by threading `port` as an
+explicit parameter through every one of these functions down to their `run_role_fn()` calls,
+verified by tests that assert the actual port VALUE reaching the dispatch, not just that the
+keyword is accepted (`test_port_reaches_every_run_role_fn_dispatch`,
+`test_port_reaches_run_pr_cycle_fn`, `test_port_reaches_final_stage_fn`,
+`test_port_reaches_the_ship_fix_dispatch`, `test_port_reaches_the_fix_dispatch`).
+
+### 3.14.3 K-concurrent unit dispatch — `orchestrate.run_plan(job=...)`
+
+`run_plan`'s per-unit loop body (worktree → cycle-0 → review/scan → final stage) was extracted
+into `_process_unit()`, unchanged in content, called by BOTH the sequential path (`job=1`, the
+default — literally the same code as before this existed) and a new
+`_run_units_concurrently()` used when `job > 1`: a bounded-concurrency topological scheduler
+(`concurrent.futures.ThreadPoolExecutor(max_workers=job)`) that dispatches a unit the moment its
+dependencies have actually finished shipping — not in synchronized rounds — each on its own port
+(`port` through `port + job - 1`, round-robin as units complete).
+
+**A unit's dependency being merely absent from the in-flight results dict is NOT the same as "not
+blocking".** `_blocking_dependency()` (used as-is by the sequential loop, where topological order
+already guarantees every earlier unit finished before a later one is even considered) treats a
+dependency missing from `outcomes` as clear — correct there, wrong under concurrency, where a known
+dependency may simply still be running. The concurrent scheduler adds `_deps_resolved()`, which
+requires every known dependency to actually be present in the shared results dict before a unit is
+even considered ready — found and fixed via a `threading.Barrier`-based test
+(`test_job_greater_than_one_still_respects_dependency_order`) that failed before this guard existed
+(dependents were dispatched before their dependency's own cycle had returned).
+
+**No file lock needed for `cycles.jsonl`/`ledger.json`/`.reasona/memory/`.** Every one of these
+already lives under either the UNIT'S OWN worktree (`cycles_log.py`, `memory.py` — both called with
+`workdir=unit_workdir`) or a path namespaced by `stage_name` under the shared log dir
+(`ledger.unit_dir()`) — two concurrently running units never write the same path, so this is a
+consequence of the per-unit worktree isolation §3.11 already built, not new locking. The only state
+genuinely shared between threads is the scheduler's own in-memory `by_index`/port pool, guarded by
+a plain `threading.Lock`.
+
+**Port-collision safety at the Bernstein layer was NOT live-verified.** Tracing the installed
+Bernstein 3.15.1 source (`core/server/server_launch.py`'s `_start_server()`) shows `--port` IS
+threaded to the actual server subprocess's bind — contradicting `bernstein_dispatch.py`'s own
+`stop_leftovers()` docstring, which may be stale for this version — but this was not exercised with
+a real concurrent `bernstein run` dispatch (a live agent spawn was out of scope for this change; see
+the test suite's own "never let a test trigger a real `bernstein run`" rule, §3.8.7's leftover-
+process incident). Run the smallest real case (`--job 2` against a two-independent-unit plan) once
+before relying on `--job` for anything larger.
+
+`--job K` (default 1) is the new `run-plan` flag; `result.outcomes`' order always matches the
+plan's topological order regardless of which unit's `bernstein run` actually finishes first.
+
+### 3.14.4 Mechanical vs. substantive sync-conflict resolution
+
+The remaining dev-ralf parity gap: worker.md distinguishes a MECHANICAL conflict resolution
+(import order, formatting, a line moved -- no semantic change; re-verified with `$CI_FAST` only)
+from a SUBSTANTIVE one (overlapping logic, the same function edited on both sides; re-enters the
+full review+scan loop, since the resolution is a real code change review/scan never saw).
+`run_sync_cycle()` used to treat every conflict resolution identically -- no distinction existed at
+all.
+
+**The distinction is a runtime fact about how a git merge was resolved, not something a plan
+document can declare.** A plan unit's own content (what it changes, its `files:`, its
+acceptance criteria) says nothing about whether ITS branch will conflict with `base` when synced,
+let alone whether that conflict's resolution turns out to touch overlapping logic. This is why item
+5 could not be closed the way item 1 was (an acceptance-criteria authoring requirement) -- it has
+to be decided at the moment the conflict is actually resolved.
+
+**Self-report, not a second judgment pass.** `_build_conflict_fix_prompt()` now asks the SAME dev
+role already resolving the conflict to append one line, `CONFLICT_KIND: mechanical` or
+`CONFLICT_KIND: substantive`, once it is done -- no second dispatch, no separate classifier role.
+`final_phase.parse_conflict_kind()` reads it back from the dispatch's own raw output file and
+defaults to `"substantive"` when the marker is missing or unparseable -- the same "an unanswerable
+routing question never narrows scope" rule `_safe_recheck_route()` already follows (§3.9.2):
+guessing MECHANICAL on missing evidence could let a real conflicting change skip re-review
+entirely, the one direction this decision must never guess in. `run_sync_cycle()` now returns a
+5th value, `substantive: bool` -- True if ANY conflict resolution made during that call was
+self-reported as substantive (multiple conflict-fix cycles can happen in one `run_sync_cycle()`
+call; one substantive resolution among them taints the whole call).
+
+**Propagation stops the tail cold, rather than letting it run ahead on unreviewed code.**
+`run_final_phase()` checks `substantive` immediately after `run_sync_cycle()` returns -- BEFORE
+dispatching `final_audit` or `ship_gate` for that round -- and returns a new status,
+`"needs_review"`, if set. `run_final_stage()` propagates this as `TailResult(status=NEEDS_REVIEW)`
+and returns immediately, without calling `gh_pr.run_gh_pr()`, `gh_review.run_gh_review()`, or
+`squash_merge()`. This ordering matters: by the time `final_phase.py` could otherwise detect a
+substantive resolution, `run_final_stage()` may already be past `final_audit`/`ship_gate` for that
+round -- stopping at `run_final_phase()`'s own boundary, before either runs, is what keeps
+`NEEDS_REVIEW` a decision `orchestrate.py` can still act on before anything externally visible
+(a PR, a push, a merge) happens.
+
+**`orchestrate.py`'s `_process_unit()` is what actually re-enters review+scan** -- `final_phase.py`
+cannot call back into `pr_cycle.run_pr_cycle()` itself without inverting this project's import
+direction (`final_phase.py` already depends on `pr_cycle.py`, never the reverse). Seeing
+`tail.status == NEEDS_REVIEW`, `_process_unit()` clears the unit's ledger checkpoint
+(`ledger.clear_progress()` -- without this, a resumed `run_pr_cycle_fn` could see the OLD run's
+"review already passed" checkpoint and skip the very re-review this exists to force), dispatches a
+completely fresh `run_pr_cycle_fn()`, and on a fresh PASS retries `final_stage_fn()` -- this time
+against code that HAS been reviewed. Bounded by `cycle_gate.MAX_SUBSTANTIVE_RESYNC_ROUNDS` (2, same
+reasoning as `MAX_FINAL_PHASE_ROUNDS`: a target repo whose base keeps moving faster than this
+pipeline can settle is not something retrying indefinitely would fix) -- exhausting it reports
+`blocked` (an anomaly to investigate, not an ordinary review-found defect), while a genuine defect
+the forced re-review actually finds reports `failed`, same as any other review-found failure.
+
 ## 4. Directory structure
 
 ```

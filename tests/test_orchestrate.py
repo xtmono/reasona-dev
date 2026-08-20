@@ -367,6 +367,132 @@ def test_ship_runs_the_tail_for_every_passing_unit(tmp_path):
     assert result.passed
 
 
+# --- item 5: mechanical/substantive sync-conflict resync ---------------------
+
+def test_a_substantive_sync_conflict_re_runs_review_before_the_final_stage_retries(tmp_path):
+    """`final_stage_fn` reporting `NEEDS_REVIEW` (sync resolved a
+    substantive merge conflict) must trigger a fresh `run_pr_cycle_fn`
+    dispatch before the final stage is retried -- worker.md's mechanical/
+    substantive rule for conflict resolution."""
+    from reasona_dev.final_phase import NEEDS_REVIEW, TailResult
+
+    cycle_calls = []
+    tail_calls = []
+
+    def cycle_fn(**kw):
+        cycle_calls.append(kw["stage_name"])
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    def tail_fn(**kw):
+        stage = kw["stage_name"]
+        tail_calls.append(stage)
+        if stage == "pr-1" and tail_calls.count("pr-1") == 1:
+            return TailResult(stage_name=stage, status=NEEDS_REVIEW,
+                              reason="sync resolved a substantive merge conflict")
+        return _tail_ok(stage)
+
+    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn)
+    assert result.passed
+    assert cycle_calls.count("pr-1") == 2  # re-reviewed once after the substantive resync
+    assert tail_calls.count("pr-1") == 2  # final stage retried once
+
+
+def test_a_persistently_substantive_sync_conflict_is_blocked_after_the_resync_cap(tmp_path):
+    from reasona_dev.cycle_gate import MAX_SUBSTANTIVE_RESYNC_ROUNDS
+    from reasona_dev.final_phase import NEEDS_REVIEW, TailResult
+
+    cycle_calls = []
+    tail_calls = []
+
+    def cycle_fn(**kw):
+        cycle_calls.append(kw["stage_name"])
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    def tail_fn(**kw):
+        stage = kw["stage_name"]
+        tail_calls.append(stage)
+        if stage == "pr-1":
+            return TailResult(stage_name=stage, status=NEEDS_REVIEW,
+                              reason="sync resolved a substantive merge conflict")
+        return _tail_ok(stage)
+
+    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn)
+    statuses = {o.stage_name: o.status for o in result.outcomes}
+    assert statuses["pr-1"] == "blocked"
+    pr1_outcome = next(o for o in result.outcomes if o.stage_name == "pr-1")
+    assert "exhausted" in pr1_outcome.reason
+    assert cycle_calls.count("pr-1") == MAX_SUBSTANTIVE_RESYNC_ROUNDS + 1
+    assert tail_calls.count("pr-1") == MAX_SUBSTANTIVE_RESYNC_ROUNDS + 1
+    # a unit blocked this way never shipped -- its dependents must not run
+    assert statuses["pr-2"] == "skipped" and statuses["pr-3"] == "skipped"
+
+
+def test_a_failed_re_review_after_a_substantive_sync_conflict_reports_failed_not_blocked(tmp_path):
+    """If the forced re-review actually finds a real defect, that is an
+    ordinary review-found failure, not a stall -- `failed`, not
+    `blocked`, and the final stage must not be retried a second time."""
+    from reasona_dev.final_phase import NEEDS_REVIEW, TailResult
+
+    pr1_cycles = {"n": 0}
+    tail_calls = []
+
+    def cycle_fn(**kw):
+        if kw["stage_name"] != "pr-1":
+            return _pass_cycle()
+        pr1_cycles["n"] += 1
+        return _pass_cycle() if pr1_cycles["n"] == 1 else _fail_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    def tail_fn(**kw):
+        stage = kw["stage_name"]
+        tail_calls.append(stage)
+        if stage == "pr-1":
+            return TailResult(stage_name=stage, status=NEEDS_REVIEW,
+                              reason="sync resolved a substantive merge conflict")
+        return _tail_ok(stage)
+
+    result = _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn)
+    statuses = {o.stage_name: o.status for o in result.outcomes}
+    assert statuses["pr-1"] == "failed"
+    assert pr1_cycles["n"] == 2
+    assert tail_calls.count("pr-1") == 1  # the final stage is never retried once review itself fails
+
+
+def test_a_substantive_resync_clears_the_stale_ledger_progress(tmp_path, monkeypatch):
+    """Without clearing the checkpoint, a resumed `run_pr_cycle_fn` could
+    see the OLD run's "review already passed" progress and skip the very
+    re-review this mechanism exists to force."""
+    from reasona_dev import ledger
+    from reasona_dev.final_phase import NEEDS_REVIEW, TailResult
+
+    cleared = []
+    monkeypatch.setattr(ledger, "clear_progress", lambda workdir, plan_name, stage_name: cleared.append(stage_name))
+
+    def cycle_fn(**kw):
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    def tail_fn(**kw):
+        stage = kw["stage_name"]
+        if stage == "pr-1" and "pr-1" not in cleared:
+            return TailResult(stage_name=stage, status=NEEDS_REVIEW,
+                              reason="sync resolved a substantive merge conflict")
+        return _tail_ok(stage)
+
+    _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn)
+    assert cleared == ["pr-1"]
+
+
 def test_a_blocked_tail_blocks_the_unit_and_skips_its_dependents(tmp_path):
     """A unit whose merge was refused did not ship, so anything depending on
     its contract is reviewing against something that is not on main. The
@@ -406,6 +532,171 @@ def test_gh_review_max_wait_seconds_reaches_the_final_stage(tmp_path):
 
     _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn, gh_review_max_wait_seconds=120)
     assert seen["pr-1"] == 120
+
+
+def test_port_reaches_run_pr_cycle_fn(tmp_path):
+    """`run_plan(port=...)` used to reach only `dispatch_cycle0_fn` --
+    `run_pr_cycle_fn` silently kept the default 8052 regardless. Needed for
+    concurrent unit dispatch (`job=...`), where each in-flight unit must
+    carry its own distinct port."""
+    cycle_fn, ship_fn = _recorder()
+    _run(tmp_path, cycle_fn, ship_fn, port=19999)
+    assert [c["port"] for c in cycle_fn.calls] == [19999, 19999, 19999]
+
+
+def test_port_reaches_final_stage_fn(tmp_path):
+    cycle_fn, ship_fn = _recorder()
+    seen = []
+
+    def tail_fn(**kw):
+        seen.append(kw["port"])
+        return _tail_ok(kw["stage_name"])
+
+    _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn, port=19999)
+    assert seen == [19999, 19999, 19999]
+
+
+# --- job > 1: concurrent unit dispatch ---------------------------------------
+
+def test_job_greater_than_one_runs_independent_units_concurrently(tmp_path):
+    """pr-2 and pr-3 both depend only on pr-1 -- independent of each other --
+    so with `job=2` both should be in flight at once. A `threading.Barrier`
+    both must reach proves it: if they ran sequentially, the first one
+    would block on the barrier forever (nothing else would ever call
+    `cycle_fn` to reach it), and the barrier times out with an exception --
+    this is not a timing-based flake, it is a real deadlock unless both
+    threads are actually alive at once.
+    """
+    import threading
+
+    barrier = threading.Barrier(2, timeout=5)
+    order = []
+    lock = threading.Lock()
+
+    def cycle_fn(**kw):
+        with lock:
+            order.append(kw["stage_name"])
+        if kw["stage_name"] in ("pr-2", "pr-3"):
+            barrier.wait()
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    result = _run(tmp_path, cycle_fn, ship_fn, job=2)
+    assert result.passed
+    assert order[0] == "pr-1"  # the dependency still ran first
+    assert set(order[1:]) == {"pr-2", "pr-3"}
+
+
+def test_job_one_keeps_units_strictly_sequential(tmp_path):
+    """Sanity check for the test above: with the default `job=1`, pr-2 and
+    pr-3 do NOT run concurrently -- proving the barrier test actually
+    distinguishes the two cases rather than passing regardless."""
+    import threading
+
+    barrier = threading.Barrier(2, timeout=0.3)
+    broke = []
+
+    def cycle_fn(**kw):
+        if kw["stage_name"] in ("pr-2", "pr-3"):
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                broke.append(kw["stage_name"])
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    _run(tmp_path, cycle_fn, ship_fn, job=1)
+    assert broke  # at least one of them timed out waiting for a peer that never came
+
+
+def test_job_greater_than_one_gives_each_concurrent_unit_a_distinct_port(tmp_path):
+    seen_ports = {}
+    lock = __import__("threading").Lock()
+
+    def cycle_fn(**kw):
+        with lock:
+            seen_ports[kw["stage_name"]] = kw["port"]
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    _run(tmp_path, cycle_fn, ship_fn, job=2, port=20000)
+    assert seen_ports["pr-2"] != seen_ports["pr-3"]
+    assert all(20000 <= p < 20002 for p in seen_ports.values())
+
+
+def test_job_greater_than_one_result_order_matches_topological_order(tmp_path):
+    """`result.outcomes` stays in the plan's own topological order
+    regardless of which concurrently-dispatched unit actually finishes
+    first -- callers (e.g. `PlanRunResult.render()`) read this list
+    positionally and must not see it reordered by completion timing."""
+    import time
+
+    def cycle_fn(**kw):
+        if kw["stage_name"] == "pr-3":
+            time.sleep(0.05)  # finishes AFTER pr-2 despite starting around the same time
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    result = _run(tmp_path, cycle_fn, ship_fn, job=2)
+    assert [o.stage_name for o in result.outcomes] == ["pr-1", "pr-2", "pr-3"]
+
+
+def test_job_greater_than_one_still_respects_dependency_order(tmp_path):
+    """A unit's dependency must actually have shipped before it is
+    dispatched, even when there is a free concurrency slot -- job>1 must
+    not turn `depends_on` into a hint."""
+    import threading
+
+    started = []
+    lock = threading.Lock()
+
+    def cycle_fn(**kw):
+        with lock:
+            started.append(kw["stage_name"])
+        if kw["stage_name"] == "pr-1":
+            return _fail_cycle()  # pr-1 fails to ship
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    result = _run(tmp_path, cycle_fn, ship_fn, job=3)
+    assert started == ["pr-1"]  # pr-2/pr-3 never dispatched -- both skip on pr-1's failure
+    statuses = {o.stage_name: o.status for o in result.outcomes}
+    assert statuses == {"pr-1": "failed", "pr-2": "skipped", "pr-3": "skipped"}
+
+
+def test_run_plan_job_flag_reaches_orchestrate(tmp_path, monkeypatch):
+    from reasona_dev.cli import main
+
+    plan, workdir = _cli_plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["job"] = kw["job"]
+        from reasona_dev.orchestrate import PlanRunResult, UnitOutcome
+        return PlanRunResult(outcomes=[UnitOutcome(stage_name="pr-1", profile="generic", status="shipped", reason="ok")])
+
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--job", "3"])
+    assert rc == 0
+    assert seen["job"] == 3
+
+
+def _cli_plan(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text("## PR 1: bootstrap\ntype: feat\ndepends_on: none\n\n- [ ] x\n")
+    workdir = tmp_path / "target-repo"
+    workdir.mkdir()
+    return plan, workdir
 
 
 # --- resuming with from_pr ---------------------------------------------------

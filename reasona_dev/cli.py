@@ -59,6 +59,21 @@ _ROLE_FLAGS = ("dev", "review", "recheck", "bugbot", "compliance", "final_audit"
 def _add_role_flags(parser: argparse.ArgumentParser, roles: tuple[str, ...]) -> None:
     for role in roles:
         flag_name = "--final-audit" if role == "final_audit" else f"--{role}"
+        if role == "review":
+            # Repeatable -- dev-ralf's own convention: `--review` is the
+            # only role flag it allows more than once, to run independent
+            # reviewers in parallel and merge their findings (worker.md's
+            # "parallel reviewers"; see reasona_dev.finding_adapter.merge).
+            parser.add_argument(
+                flag_name,
+                dest=role,
+                action="append",
+                default=None,
+                metavar="MODEL",
+                help="Force the review role's model (repeatable for multiple independent "
+                     "reviewers; highest priority -- overrides env var and config file).",
+            )
+            continue
         parser.add_argument(
             flag_name,
             dest=role,
@@ -69,7 +84,22 @@ def _add_role_flags(parser: argparse.ArgumentParser, roles: tuple[str, ...]) -> 
 
 
 def _collect_flags(args: argparse.Namespace, roles: tuple[str, ...]) -> dict[str, str]:
-    return {role: val for role in roles if (val := getattr(args, role, None))}
+    """Single value per role -- `review`'s repeatable flag collapses to its
+    FIRST value here, for callers (`compile-plan`'s role_model_policy sync)
+    that only need one representative reviewer. `run-plan` reads the full
+    list separately via `_collect_review_flags`.
+    """
+    out: dict[str, str] = {}
+    for role in roles:
+        val = getattr(args, role, None)
+        if not val:
+            continue
+        out[role] = val[0] if role == "review" else val
+    return out
+
+
+def _collect_review_flags(args: argparse.Namespace) -> list[str]:
+    return list(getattr(args, "review", None) or [])
 
 
 def _workdir(args: argparse.Namespace) -> Path:
@@ -149,7 +179,8 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
     workdir = _workdir(args)
     plan_text = Path(args.plan_file).read_text(encoding="utf-8")
     flags = _collect_flags(args, _ROLE_FLAGS)
-    resolved = resolve_all(workdir=workdir, flags=flags)
+    review_flags = _collect_review_flags(args)
+    resolved = resolve_all(workdir=workdir, flags=flags, review_flags=review_flags)
     plan_name = Path(args.plan_file).stem
 
     if args.restart:
@@ -168,6 +199,7 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
             resolved=resolved,
             rundir=Path(args.rundir).resolve() if args.rundir else None,
             port=args.port,
+            job=args.job,
             base=args.base,
             head=args.head,
             ship=args.ship or args.merge,
@@ -242,7 +274,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("plan_file", help="Path to the plan document (manifest form)")
     p_run.add_argument("--workdir", default=None, help="Target repository root, resolved to an absolute path (default: cwd)")
     p_run.add_argument("--rundir", default=None, help="Where role outputs and the ledger land (default: <workdir>/.reasona/log/<plan>)")
-    p_run.add_argument("--port", type=int, default=8052, help="Port each `bernstein run` dispatch binds (reused sequentially)")
+    p_run.add_argument("--port", type=int, default=8052, help="Port each `bernstein run` dispatch binds (reused sequentially, or the first of `--job` consecutive ports when running concurrently)")
+    p_run.add_argument(
+        "--job", type=int, default=1,
+        help="Max PR units to run at once (default: 1, sequential -- unchanged from before this flag existed). "
+             "job>1 runs independent units concurrently, each on its own port (--port through --port+job-1).",
+    )
     p_run.add_argument("--base", default="origin/main")
     p_run.add_argument("--head", default="HEAD")
     p_run.add_argument(

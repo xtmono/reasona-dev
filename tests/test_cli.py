@@ -218,6 +218,47 @@ def test_run_plan_gh_review_max_wait_flag_reaches_orchestrate(tmp_path, monkeypa
     assert seen == {"gh_review_max_wait_seconds": 120}
 
 
+def test_run_plan_review_flag_given_once_is_a_single_reviewer(tmp_path, monkeypatch):
+    from reasona_dev import orchestrate
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["resolved"] = kw["resolved"]
+        return _shipped_result()
+
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--review", "opus"])
+    assert rc == 0
+    assert [r.model for r in seen["resolved"]["review_all"]] == ["opus"]
+
+
+def test_run_plan_review_flag_repeated_resolves_multiple_reviewers(tmp_path, monkeypatch):
+    from reasona_dev import orchestrate
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["resolved"] = kw["resolved"]
+        return _shipped_result()
+
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main([
+        "run-plan", str(plan), "--workdir", str(workdir),
+        "--review", "claude:opus:high", "--review", "codex:o1:max,ocr",
+    ])
+    assert rc == 0
+    reviewers = seen["resolved"]["review_all"]
+    assert [r.model for r in reviewers] == ["opus", "o1"]
+    assert [r.adapter for r in reviewers] == ["claude", "codex"]
+    assert seen["resolved"]["review"].model == "opus"  # first stays the single-value representative
+    assert seen["resolved"]["review_ocr_requested"] is True
+
+
 def test_run_plan_skip_dev_reaches_orchestrate(tmp_path, monkeypatch):
     """Cycle-0 dispatch (per unit, ledger-checked) now lives entirely in
     `orchestrate.run_plan()` -- `cli.py` only threads `--skip-dev` through

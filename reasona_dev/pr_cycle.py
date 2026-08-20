@@ -125,6 +125,7 @@ def run_role(
     cycle: int,
     port: int = 8052,
     scope: str = DEFAULT_ROLE_SCOPE,
+    label: str | None = None,
 ) -> RoleRunResult:
     """Dispatch one role once via `bernstein run` on a one-step plan.
 
@@ -140,6 +141,16 @@ def run_role(
     and a misconfigured adapter are distinguishable; `cycle_gate` collapses
     both into the same abort, which is the right gate decision and a useless
     diagnostic on its own.
+
+    `label`, when given, distinguishes this dispatch's raw-output/plan
+    filenames and its `RoleRunResult.role` (so `cycles_log` records each
+    reviewer separately) from another dispatch made under the SAME `role`
+    at the SAME `cycle` -- needed when the review stage runs multiple
+    independent reviewers (`role="reviewer"` for all of them) in one cycle.
+    `role` itself is unchanged and still goes out on the wire -- it is what
+    Bernstein's task server checks against its role whitelist
+    (`bernstein_config.py`'s `role_model_policy`), and every reviewer, no
+    matter how many, is legitimately the `"reviewer"` role.
     """
     # ABSOLUTE, always. The agent runs inside a per-task git worktree, so a
     # relative path in its instructions resolves against THAT tree, not the
@@ -148,8 +159,9 @@ def run_role(
     # turns hunting for the file the driver was asking about, and died on
     # `error_max_turns` while the driver reported ERROR.
     rundir = rundir.resolve()
-    raw_output_path = rundir / f"{role}-c{cycle}.raw.txt"
-    plan_path = rundir / f"{role}-c{cycle}.plan.yaml"
+    file_key = label or role
+    raw_output_path = rundir / f"{file_key}-c{cycle}.raw.txt"
+    plan_path = rundir / f"{file_key}-c{cycle}.plan.yaml"
     rundir.mkdir(parents=True, exist_ok=True)
     if raw_output_path.exists():
         raw_output_path.unlink()
@@ -164,7 +176,7 @@ def run_role(
 
     if not raw_output_path.is_file():
         return RoleRunResult(
-            role=role, cycle=cycle,
+            role=file_key, cycle=cycle,
             review_result=ReviewResult(role_status=RoleStatus.ERROR),
             raw_output_path=raw_output_path,
             error_detail=(
@@ -176,7 +188,7 @@ def run_role(
 
     text = raw_output_path.read_text(encoding="utf-8")
     return RoleRunResult(
-        role=role, cycle=cycle,
+        role=file_key, cycle=cycle,
         review_result=parse_role_output(text), raw_output_path=raw_output_path,
     )
 
@@ -310,6 +322,7 @@ def _run_dev_fix(
     rundir: Path,
     cycle: int,
     run_role_fn,
+    port: int = 8052,
 ) -> RoleRunResult:
     """Dispatch one dev fix-cycle. `escalated_model` (from
     `GateDecision.escalated_model`) overrides `dev_model.model` for exactly
@@ -323,6 +336,7 @@ def _run_dev_fix(
     return run_role_fn(
         workdir=workdir, role="backend", title=f"{pr_title} -- fix c{cycle}",
         prompt=_build_fix_prompt(pr_title, findings), model=model, rundir=rundir, cycle=cycle,
+        port=port,
     )
 
 
@@ -491,18 +505,63 @@ def run_pr_cycle(
         while not resuming_into_scan:
             cycle += 1
             bounded = route == "BOUNDED" and recheck_profile_prompt is not None
-            model = resolved["recheck"] if bounded else resolved["review"]
-            prompt = (
-                _build_recheck_prompt(recheck_profile_prompt, pending_confirm)
-                if bounded else review_profile_prompt
-            )
-            result = run_role_fn(
-                workdir=workdir, role="reviewer",
-                title=f"{pr_title} -- {'recheck' if bounded else 'review'} c{cycle}",
-                prompt=prompt, model=model, rundir=rundir, cycle=cycle,
-            )
-            role_results.append(result)
-            _log("review", cycle, result, model)
+            if bounded:
+                # The cheap bounded re-check never fans out to multiple
+                # reviewers or the OCR co-reviewer -- it exists specifically
+                # to re-confirm a small, already-identified set of findings
+                # cheaply, not to re-open full independent review.
+                model = resolved["recheck"]
+                result = run_role_fn(
+                    workdir=workdir, role="reviewer",
+                    title=f"{pr_title} -- recheck c{cycle}",
+                    prompt=_build_recheck_prompt(recheck_profile_prompt, pending_confirm),
+                    model=model, rundir=rundir, cycle=cycle, port=port,
+                )
+                role_results.append(result)
+                _log("review", cycle, result, model)
+            else:
+                # FULL route: every reviewer in `resolved["review_all"]`
+                # (>=1, `--review` is dev-ralf's one repeatable role flag)
+                # dispatches against the SAME prompt, sequentially -- the
+                # same "several roles, one merged verdict" shape the scan
+                # cycle already uses for bugbot+compliance, just applied to
+                # independent reviewers instead of distinct roles. The OCR
+                # co-reviewer (`,ocr` marker on any dispatched reviewer,
+                # see model_config.ResolvedModel.ocr) joins the same fan-out
+                # as one more dispatch, per adapters/ocr.py's own design
+                # ("run OCR as an ADDITIONAL reviewer beside the primary
+                # one, merging both verdicts through finding_adapter.merge").
+                reviewers = resolved.get("review_all") or [resolved["review"]]
+                dispatched: list[tuple[RoleRunResult, ResolvedModel]] = []
+                for idx, reviewer_model in enumerate(reviewers):
+                    label = "reviewer" if idx == 0 else f"reviewer_{idx + 1}"
+                    r = run_role_fn(
+                        workdir=workdir, role="reviewer", label=label,
+                        title=f"{pr_title} -- review c{cycle}" + (f" [{label}]" if idx else ""),
+                        prompt=review_profile_prompt, model=reviewer_model, rundir=rundir, cycle=cycle,
+                        port=port,
+                    )
+                    dispatched.append((r, reviewer_model))
+                if resolved.get("review_ocr_requested"):
+                    ocr_model = ResolvedModel(
+                        role="ocr_reviewer", model="default", adapter="ocr",
+                        effort="high", source="review:,ocr",
+                    )
+                    r = run_role_fn(
+                        workdir=workdir, role="ocr_reviewer", label="ocr_reviewer",
+                        title=f"{pr_title} -- review c{cycle} [ocr_reviewer]",
+                        prompt=review_profile_prompt, model=ocr_model, rundir=rundir, cycle=cycle,
+                        port=port,
+                    )
+                    dispatched.append((r, ocr_model))
+                for r, m in dispatched:
+                    role_results.append(r)
+                    _log("review", cycle, r, m)
+                merged_result = merge(*(r.review_result for r, _ in dispatched))
+                result = RoleRunResult(
+                    role="review", cycle=cycle, review_result=merged_result,
+                    raw_output_path=dispatched[0][0].raw_output_path,
+                )
             if cycle > 1:
                 # This review followed a dev fix -- whatever MUST_FIX is still
                 # here just SURVIVED that fix. Record it BEFORE evaluate() so
@@ -547,8 +606,8 @@ def run_pr_cycle(
             fix_result = _run_dev_fix(
                 workdir=workdir, pr_title=pr_title, findings=pending_confirm,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
-                rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
-                    )
+                rundir=rundir, cycle=cycle, run_role_fn=run_role_fn, port=port,
+            )
             role_results.append(fix_result)
             _log("review", cycle, fix_result, resolved["dev"])
             route = _safe_recheck_route(workdir, pre_fix_head, finding_files)
@@ -584,10 +643,12 @@ def run_pr_cycle(
             bugbot_result = run_role_fn(
                 workdir=workdir, role="bugbot", title=f"{pr_title} -- bugbot c{cycle}",
                 prompt=bugbot_prompt + scope_suffix, model=resolved["bugbot"], rundir=rundir, cycle=cycle,
+                port=port,
             )
             compliance_result = run_role_fn(
                 workdir=workdir, role="compliance", title=f"{pr_title} -- compliance c{cycle}",
                 prompt=compliance_prompt + scope_suffix, model=resolved["compliance"], rundir=rundir, cycle=cycle,
+                port=port,
             )
             role_results.extend((bugbot_result, compliance_result))
             _log("scan", cycle, bugbot_result, resolved["bugbot"])
@@ -625,8 +686,8 @@ def run_pr_cycle(
             fix_result = _run_dev_fix(
                 workdir=workdir, pr_title=pr_title, findings=merged.must_fix,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
-                rundir=rundir, cycle=cycle, run_role_fn=run_role_fn,
-                    )
+                rundir=rundir, cycle=cycle, run_role_fn=run_role_fn, port=port,
+            )
             role_results.append(fix_result)
             _log("scan", cycle, fix_result, resolved["dev"])
             if _safe_recheck_route(workdir, pre_fix_head, finding_files) == "BOUNDED":

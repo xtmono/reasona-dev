@@ -117,6 +117,17 @@ role_model_policy:
   # final_audit dispatch would fail on arrival without this entry.
   final_audit:
     provider: claude
+  # The OCR co-reviewer (`,ocr` marker on `review:`, reasona_dev/adapters/
+  # ocr.py) -- provider is always "ocr" here, never resolved from
+  # reasona_dev.model_config (OCR has no model slot; it's a stateless diff
+  # scanner, not an LLM role). NOT in
+  # model_config.BERNSTEIN_ROLE_TO_PRIMARY_CONFIG_ROLE on purpose, so
+  # tests/test_bernstein_yaml_consistency.py does not expect this provider
+  # to track any resolved adapter -- same reasoning as final_audit not being
+  # in that map, just for a different reason (fixed provider, not "not
+  # wired to a flag yet").
+  ocr_reviewer:
+    provider: ocr
 
 # NOTE: there is no seed-level merge-approval key. `approval:` was
 # silently ignored here ("Ignoring unknown top-level key 'approval'"),

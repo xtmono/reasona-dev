@@ -29,7 +29,7 @@ PASS_TEXT = "VERDICT: PASS\n"
 def _recording_role_fn():
     calls = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         calls.append({"role": role, "prompt": prompt})
         return RoleRunResult(
             role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
@@ -124,7 +124,7 @@ def test_memory_is_regenerated_after_the_cycle(tmp_path, generic_prompts):
     )
     assert memory.derive(tmp_path) == []  # one unit only, below threshold
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         result = (
             ReviewResult(
                 role_status=RoleStatus.COMPLETE,

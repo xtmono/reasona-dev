@@ -98,28 +98,34 @@ class ResolvedModel:
     adapter: str
     effort: str
     source: str  # "flag" | "env:<VAR>" | "config:project:<role>" | "config:global:<role>" | "fallback:<role>" | "default"
+    # dev-ralf's `,ocr` co-reviewer marker (see `_split_composite`), carried
+    # on whichever spec actually won resolution. Only meaningful for
+    # `role == "review"` -- `pr_cycle.py`'s review cycle checks this to
+    # decide whether to also dispatch the OCR reviewer alongside this one.
+    ocr: bool = False
 
 
-def _split_composite(raw: str) -> tuple[str | None, str, str | None]:
+def _split_composite(raw: str) -> tuple[str | None, str, str | None, bool]:
     """Parse dev-ralf's own `tool:model:effort[,extra]` shape.
 
-    `"opus"` (no colon)        -> (None, "opus", None) -- caller fills adapter/effort from role defaults.
-    `"claude:opus"`            -> ("claude", "opus", None) -- effort from role defaults.
-    `"claude:opus:high"`       -> ("claude", "opus", "high")
-    `"claude:sonnet:high,ocr"` -> ("claude", "sonnet", "high") -- the `,ocr` suffix is dev-ralf's
-        "also run the OCR reviewer" marker. Nothing in this project currently dispatches a
-        separate OCR reviewer (`reasona_dev/adapters/ocr.py` exists and is registered, but
-        `pr_cycle.py`'s review stage doesn't invoke it yet -- see docs/ARCHITECTURE.md §3.5.4's
-        "not yet built" list), so the marker is parsed off and discarded here rather than stored
-        as if it were data this module owns or a promise that it's actually wired in.
+    `"opus"` (no colon)        -> (None, "opus", None, False) -- caller fills adapter/effort from role defaults.
+    `"claude:opus"`            -> ("claude", "opus", None, False) -- effort from role defaults.
+    `"claude:opus:high"`       -> ("claude", "opus", "high", False)
+    `"claude:sonnet:high,ocr"` -> ("claude", "sonnet", "high", True) -- the `,ocr` suffix is dev-ralf's
+        "also run the OCR reviewer" marker. `pr_cycle.py`'s review cycle dispatches the OCR
+        reviewer (`reasona_dev/adapters/ocr.py`) alongside the primary one when this is set --
+        see `ResolvedModel.ocr`.
     """
     parts = [p.strip() for p in raw.split(":")]
     if len(parts) == 1:
-        return None, parts[0], None
+        model, ocr = parts[0].split(",", 1)[0], "," in parts[0]
+        return None, model, None, ocr
     if len(parts) == 2:
-        return parts[0], parts[1], None
-    effort = parts[2].split(",", 1)[0].strip()
-    return parts[0], parts[1], effort
+        model, ocr = parts[1].split(",", 1)[0], "," in parts[1]
+        return parts[0], model, None, ocr
+    effort_field = parts[2]
+    effort, ocr = effort_field.split(",", 1)[0].strip(), "," in effort_field
+    return parts[0], parts[1], effort, ocr
 
 
 def _role_defaults(role: str) -> tuple[str | None, str, str]:
@@ -186,13 +192,14 @@ def resolve(
     global_cfg = global_cfg if global_cfg is not None else {}
 
     def _spec_from(raw: str, source: str, fb_adapter: str, fb_effort: str) -> ResolvedModel:
-        adapter, model, effort = _split_composite(raw)
+        adapter, model, effort, ocr = _split_composite(raw)
         return ResolvedModel(
             role=role,
             model=model,
             adapter=adapter or fb_adapter,
             effort=effort or fb_effort,
             source=source,
+            ocr=ocr,
         )
 
     if flag:
@@ -254,13 +261,42 @@ def resolve(
     return ResolvedModel(role=role, model=fb_model, adapter=fb_adapter, effort=fb_effort, source="default")
 
 
+def resolve_review_list(
+    flags: list[str] | None,
+    *,
+    env: dict[str, str] | None = None,
+    project_cfg: dict | None = None,
+    global_cfg: dict | None = None,
+) -> list[ResolvedModel]:
+    """One `ResolvedModel` per `--review` flag given (repeatable, dev-ralf's
+    own multi-reviewer convention -- `--review` is the only role flag
+    dev-ralf itself allows more than once).
+
+    `flags` empty/None falls through to the normal single-reviewer chain
+    (`resolve("review", ...)`: env var -> project cfg -> global cfg ->
+    default), returned as a one-element list -- so a plain `--review`
+    invocation (or none at all) still dispatches exactly one reviewer,
+    unchanged from before this function existed.
+    """
+    env = env if env is not None else dict(os.environ)
+    project_cfg = project_cfg if project_cfg is not None else {}
+    global_cfg = global_cfg if global_cfg is not None else {}
+    if not flags:
+        return [resolve("review", env=env, project_cfg=project_cfg, global_cfg=global_cfg)]
+    return [
+        resolve("review", flag=f, env=env, project_cfg=project_cfg, global_cfg=global_cfg)
+        for f in flags
+    ]
+
+
 def resolve_all(
     *,
     flags: dict[str, str] | None = None,
+    review_flags: list[str] | None = None,
     env: dict[str, str] | None = None,
     workdir: str | Path | None = None,
     load_config_files: bool = True,
-) -> dict[str, ResolvedModel]:
+) -> dict:
     """Resolve every role in the correct dependency order (review first).
 
     When `load_config_files` is True (default), actually reads
@@ -270,6 +306,19 @@ def resolve_all(
     docs/ARCHITECTURE.md §0.1). Pass `load_config_files=False` (or explicit
     empty dicts via `resolve()` directly) to keep resolution
     filesystem-free, e.g. in tests.
+
+    `review_flags` is the full repeatable `--review` list (see
+    `resolve_review_list`); `flags["review"]` (if present) is still used as
+    a single-value fallback when `review_flags` is empty, so a caller that
+    only has the single-value `flags` dict (e.g. `compile-plan`, which never
+    dispatches multiple reviewers) keeps working unchanged. The result's
+    `"review"` key is always the FIRST resolved reviewer -- the one every
+    other call site in this project already reads (`pr_cycle.py`'s
+    non-review roles, `bernstein_config.py`'s role_model_policy sync) -- and
+    `"review_all"` is the full ordered list (always >= 1 element).
+    `"review_ocr_requested"` is True when ANY resolved reviewer carried the
+    `,ocr` marker (see `ResolvedModel.ocr`) -- the OCR co-reviewer is
+    dispatched once per review cycle, not once per marked reviewer.
     """
     flags = flags or {}
     env = env if env is not None else dict(os.environ)
@@ -280,11 +329,19 @@ def resolve_all(
     else:
         project_cfg, global_cfg = {}, {}
 
-    review = resolve("review", flag=flags.get("review"), env=env, project_cfg=project_cfg, global_cfg=global_cfg)
+    if review_flags:
+        reviewers = resolve_review_list(review_flags, env=env, project_cfg=project_cfg, global_cfg=global_cfg)
+    elif flags.get("review"):
+        reviewers = [resolve("review", flag=flags["review"], env=env, project_cfg=project_cfg, global_cfg=global_cfg)]
+    else:
+        reviewers = resolve_review_list(None, env=env, project_cfg=project_cfg, global_cfg=global_cfg)
+    review = reviewers[0]
 
     return {
         "dev": resolve("dev", flag=flags.get("dev"), env=env, project_cfg=project_cfg, global_cfg=global_cfg),
         "review": review,
+        "review_all": reviewers,
+        "review_ocr_requested": any(r.ocr for r in reviewers),
         "recheck": resolve(
             "recheck", flag=flags.get("recheck"), env=env,
             project_cfg=project_cfg, global_cfg=global_cfg, review_resolved=review,

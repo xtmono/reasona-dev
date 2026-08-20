@@ -145,6 +145,7 @@ def run_gh_review(
     budget: FixBudget,
     max_wait_seconds: int = DEFAULT_MAX_WAIT_SECONDS,
     poll_interval_seconds: int = POLL_INTERVAL_SECONDS,
+    port: int = 8052,
     run_role_fn=run_role,
 ) -> GhReviewResult:
     workdir = Path(workdir)
@@ -219,6 +220,7 @@ def run_gh_review(
         result = run_role_fn(
             workdir=workdir, role="backend", title=f"{pr_title} -- gh-review fix c{cycle}",
             prompt="\n\n---\n\n".join(prompts), model=resolved["dev"], rundir=rundir, cycle=cycle,
+            port=port,
         )
         dispatches.append(result)
 

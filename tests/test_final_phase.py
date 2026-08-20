@@ -113,7 +113,7 @@ def test_audit_is_skipped_when_the_profile_defines_no_prompt(tmp_path):
 def test_audit_runs_on_the_final_audit_model(tmp_path, generic_prompts):
     seen = {}
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         seen["model"] = model.model
         seen["role"] = role
         return RoleRunResult(role=role, cycle=cycle,
@@ -134,7 +134,7 @@ def test_audit_findings_spend_the_final_stage_budget(tmp_path, generic_prompts):
     the audit's own fix loop."""
     budget = FixBudget()
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         result = (
             parse_text_contract(MUST_FIX_TEXT) if role == "compliance"
             else ReviewResult(role_status=RoleStatus.COMPLETE)
@@ -202,7 +202,7 @@ def test_a_failing_ship_gate_dispatches_a_bounded_fix_before_blocking(tmp_path, 
     _stub(monkeypatch)
     dispatched = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         dispatched.append(cycle)
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
@@ -213,6 +213,29 @@ def test_a_failing_ship_gate_dispatches_a_bounded_fix_before_blocking(tmp_path, 
     )
     assert r.status == BLOCKED and "ship gate did not pass" in r.reason
     assert dispatched == list(range(1, MAX_SHIP_CYCLES + 1))
+
+
+def test_port_reaches_the_ship_fix_dispatch(tmp_path, monkeypatch):
+    """`run_final_stage(port=...)` used to be accepted nowhere in this
+    module at all -- every dispatch inside sync/final_audit/ship_gate's fix
+    loops silently used `run_role`'s own default (8052). Needed for
+    concurrent unit dispatch, where each in-flight unit needs a distinct
+    port."""
+    _stub(monkeypatch)
+    seen_ports = []
+
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        seen_ports.append(port)
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
+                             raw_output_path=Path("/dev/null"))
+
+    _tail(
+        tmp_path, ship_gate_fn=_ship_fn(passed=False, reason="AC-1 failed"),
+        run_role_fn=_fn, port=19999,
+    )
+    assert seen_ports
+    assert all(p == 19999 for p in seen_ports)
 
 
 def test_run_ship_cycle_stops_dispatching_once_ship_gate_passes(tmp_path):
@@ -229,7 +252,7 @@ def test_run_ship_cycle_stops_dispatching_once_ship_gate_passes(tmp_path):
 
     budget = FixBudget()
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
                              raw_output_path=Path("/dev/null"))
@@ -241,6 +264,25 @@ def test_run_ship_cycle_stops_dispatching_once_ship_gate_passes(tmp_path):
     )
     assert decision.passed and changed is True
     assert len(dispatches) == 1 and budget.ship_cycles == 1
+
+
+def test_needs_review_status_stops_before_gh_pr_or_gh_review_run(tmp_path, monkeypatch):
+    """`run_final_phase()` returning `"needs_review"` (a substantive sync
+    conflict resolution) must stop `run_final_stage()` right there --
+    gh-pr/gh-review/squash-merge must never run against code review/scan
+    never saw."""
+    monkeypatch.setattr(final_phase, "gh_available", lambda w: None)
+    monkeypatch.setattr(
+        final_phase, "run_final_phase",
+        lambda **kw: (None, "needs_review", [], "sync resolved a substantive merge conflict"),
+    )
+    monkeypatch.setattr(gh_pr, "run_gh_pr", lambda **kw: pytest.fail("must not create a PR"))
+    monkeypatch.setattr(gh_review, "run_gh_review", lambda **kw: pytest.fail("must not watch gh-review"))
+
+    r = _tail(tmp_path)
+    assert r.status == final_phase.NEEDS_REVIEW
+    assert "substantive" in r.reason
+    assert r.blocked is False  # distinct status -- not the generic BLOCKED
 
 
 def test_missing_gh_blocks_before_an_audit_is_spent(tmp_path, monkeypatch):
@@ -311,7 +353,7 @@ def test_a_failing_audit_blocks_before_a_pr_is_created(tmp_path, monkeypatch, ge
     budget = FixBudget()
     budget.spend("review")  # earns an audit
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.ERROR),
                              raw_output_path=Path("/dev/null"))
@@ -327,6 +369,36 @@ def test_a_failing_audit_blocks_before_a_pr_is_created(tmp_path, monkeypatch, ge
 
 # --- run_final_phase: the sync -> final_audit -> ship_gate round loop -------
 
+def test_final_phase_stops_immediately_on_a_substantive_sync_resolution(tmp_path, monkeypatch):
+    """A SUBSTANTIVE conflict resolution must not let final_audit or
+    ship_gate run against code review/scan never saw -- `run_final_phase()`
+    returns `"needs_review"` the moment sync reports it, before dispatching
+    either."""
+    audit_calls = []
+    ship_calls = []
+
+    monkeypatch.setattr(final_phase, "run_sync_cycle", lambda **kw: ("ok", "ok", [], True, True))
+    monkeypatch.setattr(final_phase, "should_run_final_audit", lambda budget: True)
+    monkeypatch.setattr(
+        final_phase, "run_final_audit",
+        lambda **kw: (audit_calls.append(1), (True, "ok", []))[1],
+    )
+
+    def ship_fn(workdir, stage_name, *, cycle_verdict):
+        ship_calls.append(1)
+        return _ship_fn()(workdir, stage_name, cycle_verdict=cycle_verdict)
+
+    decision, status, dispatches, reason = final_phase.run_final_phase(
+        workdir=tmp_path, stage_name="pr-1", pr_title="t", profile="generic",
+        resolved=_RESOLVED, rundir=tmp_path / "r", budget=FixBudget(),
+        recurrence=RecurrenceTracker(), cycle_verdict="PASS", ship_gate_fn=ship_fn,
+    )
+    assert status == "needs_review"
+    assert decision is None
+    assert audit_calls == [] and ship_calls == []
+    assert "substantive" in reason
+
+
 def test_final_phase_reruns_from_sync_when_a_round_changed_something(tmp_path, monkeypatch):
     """A round in which sync had to resolve a conflict means that round's
     ship_gate verdict already covers code final_audit never saw -- the
@@ -335,7 +407,7 @@ def test_final_phase_reruns_from_sync_when_a_round_changed_something(tmp_path, m
 
     def fake_sync(**kw):
         calls["sync"] += 1
-        return "ok", "ok", [], calls["sync"] == 1  # only round 1 "changes" anything
+        return "ok", "ok", [], calls["sync"] == 1, False  # only round 1 "changes" anything, never substantive
 
     def ship_fn(workdir, stage_name, *, cycle_verdict):
         calls["ship"] += 1
@@ -354,7 +426,7 @@ def test_final_phase_reruns_from_sync_when_a_round_changed_something(tmp_path, m
 
 
 def test_final_phase_gives_up_if_it_never_settles(tmp_path, monkeypatch):
-    monkeypatch.setattr(final_phase, "run_sync_cycle", lambda **kw: ("ok", "ok", [], True))
+    monkeypatch.setattr(final_phase, "run_sync_cycle", lambda **kw: ("ok", "ok", [], True, False))
     monkeypatch.setattr(final_phase, "should_run_final_audit", lambda budget: False)
     ship_calls = []
 
@@ -419,7 +491,7 @@ def _repo_with_conflicting_origin(tmp_path):
 def test_sync_cycle_ok_without_dispatch_when_already_in_sync(tmp_path, monkeypatch):
     monkeypatch.setattr(final_phase, "sync_main", lambda w, *, base: (True, "up to date with base"))
     budget = FixBudget()
-    status, reason, dispatches, changed = final_phase.run_sync_cycle(
+    status, reason, dispatches, changed, substantive = final_phase.run_sync_cycle(
         workdir=tmp_path, pr_title="t", resolved=_RESOLVED, rundir=tmp_path / "r",
         budget=budget, run_role_fn=lambda **kw: pytest.fail("must not dispatch dev"),
     )
@@ -430,7 +502,7 @@ def test_sync_cycle_resolves_a_real_conflict_via_dev(tmp_path):
     work = _repo_with_conflicting_origin(tmp_path)
     budget = FixBudget()
 
-    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         (workdir / "a.txt").write_text("resolved\n")
         _git(["add", "a.txt"], workdir)
         _git(["commit", "-q", "--no-edit"], workdir)
@@ -438,7 +510,7 @@ def test_sync_cycle_resolves_a_real_conflict_via_dev(tmp_path):
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
                              raw_output_path=Path("/dev/null"))
 
-    status, reason, dispatches, changed = final_phase.run_sync_cycle(
+    status, reason, dispatches, changed, substantive = final_phase.run_sync_cycle(
         workdir=work, pr_title="t", resolved=_RESOLVED, rundir=tmp_path / "r",
         budget=budget, run_role_fn=_resolve,
     )
@@ -448,16 +520,80 @@ def test_sync_cycle_resolves_a_real_conflict_via_dev(tmp_path):
     assert (work / "a.txt").read_text() == "resolved\n"
 
 
+def test_parse_conflict_kind_mechanical():
+    assert final_phase.parse_conflict_kind("did stuff\nCONFLICT_KIND: mechanical\n") == "mechanical"
+
+
+def test_parse_conflict_kind_substantive():
+    assert final_phase.parse_conflict_kind("did stuff\nCONFLICT_KIND: substantive\n") == "substantive"
+
+
+def test_parse_conflict_kind_is_case_insensitive():
+    assert final_phase.parse_conflict_kind("CONFLICT_KIND: Mechanical\n") == "mechanical"
+
+
+def test_parse_conflict_kind_defaults_to_substantive_when_missing():
+    """Fail-safe default -- an unanswerable question about whether a
+    conflict resolution was semantic must never silently skip re-review,
+    the same "never narrow on missing evidence" rule `_safe_recheck_route()`
+    already follows."""
+    assert final_phase.parse_conflict_kind("no marker here at all\n") == "substantive"
+
+
+def test_sync_cycle_captures_a_mechanical_self_report(tmp_path):
+    work = _repo_with_conflicting_origin(tmp_path)
+    budget = FixBudget()
+    raw = tmp_path / "raw.txt"
+    raw.write_text("resolved via import reorder\nCONFLICT_KIND: mechanical\n")
+
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        (workdir / "a.txt").write_text("resolved\n")
+        _git(["add", "a.txt"], workdir)
+        _git(["commit", "-q", "--no-edit"], workdir)
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
+                             raw_output_path=raw)
+
+    status, reason, dispatches, changed, substantive = final_phase.run_sync_cycle(
+        workdir=work, pr_title="t", resolved=_RESOLVED, rundir=tmp_path / "r",
+        budget=budget, run_role_fn=_resolve,
+    )
+    assert status == "ok" and changed is True
+    assert substantive is False
+
+
+def test_sync_cycle_captures_a_substantive_self_report(tmp_path):
+    work = _repo_with_conflicting_origin(tmp_path)
+    budget = FixBudget()
+    raw = tmp_path / "raw.txt"
+    raw.write_text("combined both sides' logic\nCONFLICT_KIND: substantive\n")
+
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        (workdir / "a.txt").write_text("resolved\n")
+        _git(["add", "a.txt"], workdir)
+        _git(["commit", "-q", "--no-edit"], workdir)
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
+                             raw_output_path=raw)
+
+    status, reason, dispatches, changed, substantive = final_phase.run_sync_cycle(
+        workdir=work, pr_title="t", resolved=_RESOLVED, rundir=tmp_path / "r",
+        budget=budget, run_role_fn=_resolve,
+    )
+    assert status == "ok" and changed is True
+    assert substantive is True
+
+
 def test_sync_cycle_gives_up_after_its_budget_is_exhausted(tmp_path):
     work = _repo_with_conflicting_origin(tmp_path)
     budget = FixBudget()
 
-    def _never_resolve(*, workdir, role, title, prompt, model, rundir, cycle):
+    def _never_resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
                              raw_output_path=Path("/dev/null"))
 
-    status, reason, dispatches, changed = final_phase.run_sync_cycle(
+    status, reason, dispatches, changed, substantive = final_phase.run_sync_cycle(
         workdir=work, pr_title="t", resolved=_RESOLVED, rundir=tmp_path / "r",
         budget=budget, run_role_fn=_never_resolve,
     )

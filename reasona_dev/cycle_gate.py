@@ -58,6 +58,19 @@ MAX_FINAL_PHASE_ROUNDS = 3
 # is `blocked`, not `failed` -- same reasoning as `MAX_SHIP_CYCLES` above.
 MAX_GH_REVIEW_CYCLES = 3
 
+# A sync conflict `run_sync_cycle()` classifies as SUBSTANTIVE (the dev
+# role's own self-report -- see `final_phase.parse_conflict_kind()`) means
+# the resolution changed code review/scan never saw, so `orchestrate.py`
+# re-enters `pr_cycle.run_pr_cycle()` from scratch before the final stage
+# is allowed to proceed to gh-pr/gh-review/squash-merge (worker.md's own
+# mechanical/substantive distinction for conflict resolution -- a
+# MECHANICAL resolution, e.g. import order or formatting, does not earn
+# this; see `final_phase.NEEDS_REVIEW`). Bounded, same reasoning as
+# `MAX_FINAL_PHASE_ROUNDS`: a target repo whose base keeps moving faster
+# than this pipeline can settle is not something retrying indefinitely
+# would fix.
+MAX_SUBSTANTIVE_RESYNC_ROUNDS = 2
+
 # New rule agreed in this design track: a MUST_FIX key surviving one
 # completed fix earns exactly one bounded escalation of the dev role to a
 # stronger model before the PR is declared FAIL. This is NOT the same

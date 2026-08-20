@@ -17,7 +17,7 @@ def _snap(ci="passing", compliance="pass", bugbot="clean", comp_body="", bug_bod
     }
 
 
-def _fn(*, workdir, role, title, prompt, model, rundir, cycle):
+def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
     return RoleRunResult(role=role, cycle=cycle,
                          review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
                          raw_output_path=Path("/dev/null"))
@@ -84,6 +84,31 @@ def test_run_gh_review_dispatches_a_fix_on_ci_failure_then_passes(tmp_path, monk
     assert result.watcher_calls == 2
     assert len(result.fix_commits) == 1
     assert result.dispatches[0].role == "backend"
+
+
+def test_port_reaches_the_fix_dispatch(tmp_path, monkeypatch):
+    seen_ports = []
+
+    def _recording_fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        seen_ports.append(port)
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
+                             raw_output_path=Path("/dev/null"))
+
+    it = iter([_snap(ci="failing"), _snap()])
+
+    def _fake_snapshot(owner, name, pr, work_dir):
+        return next(it)
+
+    monkeypatch.setattr(watch, "take_snapshot", _fake_snapshot)
+    monkeypatch.setattr(gh_review._shell, "run", lambda cmd, workdir, **kw2: (0, "abc1234", ""))
+
+    gh_review.run_gh_review(
+        workdir=tmp_path, pr_url="https://github.com/o/r/pull/7", pr_num=7, pr_title="t",
+        resolved=_RESOLVED, rundir=tmp_path / "r", budget=FixBudget(),
+        poll_interval_seconds=0, run_role_fn=_recording_fn, port=19999,
+    )
+    assert seen_ports == [19999]
 
 
 def test_run_gh_review_dispatches_one_fix_covering_both_actionable_signals(tmp_path, monkeypatch):
