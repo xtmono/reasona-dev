@@ -56,9 +56,11 @@ from reasona_dev.cycle_gate import (
     recheck_route,
 )
 from reasona_dev.finding_adapter import (
+    Disposition,
     Finding,
     ReviewResult,
     RoleStatus,
+    convergent_keys,
     merge,
     parse_role_output,
 )
@@ -250,6 +252,97 @@ def _build_recheck_prompt(recheck_profile_prompt: str, findings) -> str:
     )
 
 
+def _build_evidence_correction_prompt(finding: Finding) -> str:
+    """worker.md -> *Incomplete evidence*: a MUST_FIX missing contract/
+    scenario/fix is never silently downgraded to ADVISORY -- instead the
+    reviewer gets ONE chance to restate it complete, or say explicitly it
+    cannot supply a concrete failure scenario. Restating does not change
+    the finding's disposition either way; `_correct_incomplete_evidence()`
+    below enforces that regardless of what this reply says.
+    """
+    loc = finding.path + (f":{finding.line}" if finding.line else "") + (f" {finding.symbol}" if finding.symbol else "")
+    severity = finding.severity.value if finding.severity else "HIGH"
+    return "\n".join(
+        [
+            "Your prior review reported this MUST_FIX finding without a complete "
+            "contract/scenario/fix:",
+            "",
+            f"- [{severity}] {loc}",
+            f"  || contract: {finding.contract or '(missing)'}",
+            f"  || scenario: {finding.scenario or '(missing)'}",
+            f"  || fix: {finding.fix or '(missing)'}",
+            "",
+            "Restate this ONE finding with a complete contract/scenario/fix if you "
+            "can supply one, or state explicitly that you cannot supply a concrete "
+            "failure scenario. This does not change the finding's disposition -- it "
+            "stays MUST_FIX either way.",
+            "",
+            "Reply with EXACTLY one MUST_FIX bullet in this shape, nothing else:",
+            "",
+            "MUST_FIX:",
+            f"- [{severity}] {loc}",
+            "  || contract: <the requirement or invariant this violates>",
+            "  || scenario: <a concrete input/state that reproduces the failure>",
+            "  || fix: <the minimal correct change>",
+        ]
+    )
+
+
+def _correct_incomplete_evidence(
+    *,
+    workdir: Path,
+    pr_title: str,
+    role: str,
+    findings: list[Finding],
+    model: ResolvedModel,
+    rundir: Path,
+    cycle: int,
+    port: int,
+    run_role_fn,
+) -> list[RoleRunResult]:
+    """worker.md -> *Incomplete evidence*: once per MUST_FIX finding missing
+    contract/scenario/fix, re-query before this cycle's findings ever reach
+    a dev-fix or recheck prompt. Mutates `findings` in place; NEVER changes
+    a disposition -- a MUST_FIX stays MUST_FIX even when the reply says it
+    cannot supply evidence, only `contract`/`scenario`/`fix`/
+    `contract_incomplete` are updated. Not a re-review: does not consume a
+    review/scan cycle or an INCONCLUSIVE retry -- the caller never routes
+    this through `evaluate()`.
+
+    dev-ralf re-queries the SAME reviewer SESSION (a narrow follow-up on
+    the same conversation). This project's dispatch layer has no
+    session-continuation concept at all (`bernstein_dispatch.py` -- every
+    `run_role()` call is an independent one-shot `bernstein run`), so this
+    is a FRESH dispatch on the same model instead -- the closest available
+    approximation, not a literal session resume.
+    """
+    dispatches: list[RoleRunResult] = []
+    idx = 0
+    for finding in findings:
+        if finding.disposition is not Disposition.MUST_FIX or not finding.contract_incomplete:
+            continue
+        idx += 1
+        result = run_role_fn(
+            workdir=workdir, role=role, label=f"{role}-evidence-correction-{idx}",
+            title=f"{pr_title} -- evidence correction c{cycle} [{idx}]",
+            prompt=_build_evidence_correction_prompt(finding),
+            model=model, rundir=rundir, cycle=cycle, port=port,
+        )
+        dispatches.append(result)
+        corrected = next(
+            (f for f in result.review_result.findings if f.disposition is Disposition.MUST_FIX),
+            None,
+        )
+        if corrected is not None and corrected.contract and corrected.scenario and corrected.fix:
+            finding.contract = corrected.contract
+            finding.scenario = corrected.scenario
+            finding.fix = corrected.fix
+            finding.contract_incomplete = False
+        # else: leave the original finding exactly as it was -- still
+        # MUST_FIX, still contract_incomplete -- dispatched to dev as-is.
+    return dispatches
+
+
 def _bounded_scope_suffix(fix_files: set[str]) -> str:
     """Scope restriction for scan roles on a BOUNDED cycle.
 
@@ -310,6 +403,25 @@ def _safe_recheck_route(workdir: Path, pre_fix_head: str | None, finding_files: 
 
 def _finding_files(findings) -> set[str]:
     return {f.path for f in findings if f.path}
+
+
+# worker.md's Bug + compliance scan: "no source path in pr_files
+# (docs/config-only: .md/.toml/.yaml/.json)" -- the exact set it names,
+# not a broader "anything non-source" guess.
+_DOCS_ONLY_EXTENSIONS = frozenset({".md", ".toml", ".yaml", ".json"})
+
+
+def _is_docs_only(files: list[str] | None) -> bool:
+    """True only when EVERY one of the unit's own declared `files:` has a
+    docs/config extension. No declared files at all is NOT docs-only --
+    that just means the plan omitted the metadata, not that the unit is
+    known to touch nothing but docs, so bugbot still runs (the safe
+    default: dispatching an unnecessary scan costs a cycle, skipping a
+    needed one costs a missed defect).
+    """
+    if not files:
+        return False
+    return all(Path(f).suffix.lower() in _DOCS_ONLY_EXTENSIONS for f in files)
 
 
 def _run_dev_fix(
@@ -505,6 +617,7 @@ def run_pr_cycle(
         while not resuming_into_scan:
             cycle += 1
             bounded = route == "BOUNDED" and recheck_profile_prompt is not None
+            converged_keys: set[str] = set()  # BOUNDED never fans out -- no cross-reviewer signal possible
             if bounded:
                 # The cheap bounded re-check never fans out to multiple
                 # reviewers or the OCR co-reviewer -- it exists specifically
@@ -519,6 +632,11 @@ def run_pr_cycle(
                 )
                 role_results.append(result)
                 _log("review", cycle, result, model)
+                role_results.extend(_correct_incomplete_evidence(
+                    workdir=workdir, pr_title=pr_title, role="reviewer",
+                    findings=result.review_result.must_fix, model=model,
+                    rundir=rundir, cycle=cycle, port=port, run_role_fn=run_role_fn,
+                ))
             else:
                 # FULL route: every reviewer in `resolved["review_all"]`
                 # (>=1, `--review` is dev-ralf's one repeatable role flag)
@@ -542,6 +660,11 @@ def run_pr_cycle(
                         port=port,
                     )
                     dispatched.append((r, reviewer_model))
+                    role_results.extend(_correct_incomplete_evidence(
+                        workdir=workdir, pr_title=pr_title, role="reviewer",
+                        findings=r.review_result.must_fix, model=reviewer_model,
+                        rundir=rundir, cycle=cycle, port=port, run_role_fn=run_role_fn,
+                    ))
                 if resolved.get("review_ocr_requested"):
                     ocr_model = ResolvedModel(
                         role="ocr_reviewer", model="default", adapter="ocr",
@@ -562,6 +685,21 @@ def run_pr_cycle(
                     role="review", cycle=cycle, review_result=merged_result,
                     raw_output_path=dispatched[0][0].raw_output_path,
                 )
+                # worker.md's other two escalation triggers (the third,
+                # `observed_recurrence`, is `recurrence`'s own `survived`
+                # count below): `cross_reviewer_convergence` (>=2
+                # independently dispatched reviewers named the SAME key
+                # THIS cycle -- empty with a single reviewer, correctly)
+                # and `scope_exceeded` (this cycle dispatched the FULL
+                # reviewer set because the LAST fix's diff spilled outside
+                # the files its findings named -- `route == "FULL"` on any
+                # cycle after the first IS that condition, since `bounded`
+                # above is only true when `route == "BOUNDED"`).
+                convergent = convergent_keys(*(r.review_result for r, _ in dispatched))
+                scope_exceeded = cycle > 1
+                converged_keys = convergent | (
+                    {f.key() for f in merged_result.must_fix} if scope_exceeded else set()
+                )
             if cycle > 1:
                 # This review followed a dev fix -- whatever MUST_FIX is still
                 # here just SURVIVED that fix. Record it BEFORE evaluate() so
@@ -574,6 +712,8 @@ def run_pr_cycle(
                 inconclusive_attempts=review_inconclusive,
                 escalation_model=resolved["dev_escalation"].model,
                 convergence=review_convergence,
+                converged_keys=converged_keys,
+                dev_model=resolved["dev"].model,
             )
             _log_decision("review", cycle, decision)
             if decision.action in ("pass",):
@@ -624,35 +764,73 @@ def run_pr_cycle(
                       pending_confirm=[], scan_cycle=0, scope_suffix="")
 
         # --- Bug + compliance scan, parallel, max 8 -- worker.md -> *Pipeline* ---
-        bugbot_prompt = resolve_prompt("bugbot", profile=profile, workdir=workdir)
+        # "tas-bugbot only when the PR changes code -- no source path in
+        # pr_files (docs/config-only) -> skip it, bug_verdict = SKIPPED."
+        # compliance ALWAYS runs regardless.
+        docs_only = _is_docs_only(files)
+        bugbot_prompt = None if docs_only else resolve_prompt("bugbot", profile=profile, workdir=workdir)
         compliance_prompt = resolve_prompt("compliance", profile=profile, workdir=workdir)
-        if bugbot_prompt is None or compliance_prompt is None:
-            missing = "bugbot" if bugbot_prompt is None else "compliance"
+        if compliance_prompt is None or (not docs_only and bugbot_prompt is None):
+            missing = "compliance" if compliance_prompt is None else "bugbot"
             return CycleResult(
                 verdict="ABORT", stage="scan",
                 reason=_missing_prompt_reason(missing, profile, workdir),
                 review_cycles=review_cycles_used, role_results=role_results,
             )
-        bugbot_prompt += memory_block
+        if bugbot_prompt is not None:
+            bugbot_prompt += memory_block
         compliance_prompt += memory_block
 
         cycle = progress["scan_cycle"] if resuming_into_scan else 0
         scope_suffix = progress["scope_suffix"] if resuming_into_scan else ""
         while True:
             cycle += 1
-            bugbot_result = run_role_fn(
-                workdir=workdir, role="bugbot", title=f"{pr_title} -- bugbot c{cycle}",
-                prompt=bugbot_prompt + scope_suffix, model=resolved["bugbot"], rundir=rundir, cycle=cycle,
-                port=port,
-            )
+            if docs_only:
+                # SKIPPED, not dispatched -- a clean pass with zero findings
+                # is the correct input to `merge()` below (never blocks,
+                # never counts as INCONCLUSIVE).
+                bugbot_result = RoleRunResult(
+                    role="bugbot", cycle=cycle,
+                    review_result=ReviewResult(role_status=RoleStatus.COMPLETE, findings=[]),
+                    raw_output_path=Path("/dev/null"),
+                )
+            else:
+                bugbot_result = run_role_fn(
+                    workdir=workdir, role="bugbot", title=f"{pr_title} -- bugbot c{cycle}",
+                    prompt=bugbot_prompt + scope_suffix, model=resolved["bugbot"], rundir=rundir, cycle=cycle,
+                    port=port,
+                )
             compliance_result = run_role_fn(
                 workdir=workdir, role="compliance", title=f"{pr_title} -- compliance c{cycle}",
                 prompt=compliance_prompt + scope_suffix, model=resolved["compliance"], rundir=rundir, cycle=cycle,
                 port=port,
             )
             role_results.extend((bugbot_result, compliance_result))
-            _log("scan", cycle, bugbot_result, resolved["bugbot"])
+            if not docs_only:
+                _log("scan", cycle, bugbot_result, resolved["bugbot"])
             _log("scan", cycle, compliance_result, resolved["compliance"])
+            # worker.md scopes the *Incomplete evidence* re-query to review
+            # only -- its own bugbot/compliance are external skills with a
+            # KV wire shape that never carries contract/scenario/fix at all
+            # ("not a bug to work around here"). This project's packaged
+            # `generic` profile asks bugbot/compliance for the SAME `||`
+            # text contract as review (parse_role_output()'s own docstring:
+            # "the wire shape is a property of the PROMPT, not the role"),
+            # so unlike dev-ralf's scan stage, this one CAN produce an
+            # incomplete MUST_FIX -- applying the same correction round
+            # here is the faithful adaptation, not an extension beyond
+            # worker.md's intent.
+            if not docs_only:
+                role_results.extend(_correct_incomplete_evidence(
+                    workdir=workdir, pr_title=pr_title, role="bugbot",
+                    findings=bugbot_result.review_result.must_fix, model=resolved["bugbot"],
+                    rundir=rundir, cycle=cycle, port=port, run_role_fn=run_role_fn,
+                ))
+            role_results.extend(_correct_incomplete_evidence(
+                workdir=workdir, pr_title=pr_title, role="compliance",
+                findings=compliance_result.review_result.must_fix, model=resolved["compliance"],
+                rundir=rundir, cycle=cycle, port=port, run_role_fn=run_role_fn,
+            ))
             merged = merge(bugbot_result.review_result, compliance_result.review_result)
             if cycle > 1:
                 recurrence.record_post_fix(merged.must_fix)
@@ -661,6 +839,7 @@ def run_pr_cycle(
                 inconclusive_attempts=scan_inconclusive,
                 escalation_model=resolved["dev_escalation"].model,
                 convergence=scan_convergence,
+                dev_model=resolved["dev"].model,
             )
             _log_decision("scan", cycle, decision)
             if decision.action == "pass":

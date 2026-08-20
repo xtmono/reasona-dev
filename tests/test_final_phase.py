@@ -351,6 +351,84 @@ def test_a_failed_merge_call_blocks_rather_than_reporting_success(tmp_path, monk
     assert r.status == BLOCKED and "not mergeable" in r.reason
 
 
+def test_a_merge_race_that_clears_on_retry_succeeds(tmp_path, monkeypatch):
+    """worker.md's *Squash merge* classification: a not-up-to-date /
+    merge-conflict race re-enters the final phase round loop rather than
+    failing outright -- if the SECOND attempt finds base no longer moving,
+    it merges. `run_final_phase` is called once per retry, proving the
+    WHOLE final phase re-runs, not just a bare merge retry."""
+    _stub(monkeypatch, merged=(False, "gh pr merge failed: not mergeable"))
+    calls = {"phase": 0, "merge": 0}
+
+    real_run_final_phase = final_phase.run_final_phase
+
+    def counting_phase(**kw):
+        calls["phase"] += 1
+        return real_run_final_phase(**kw)
+
+    def flaky_merge(w, m):
+        calls["merge"] += 1
+        return (False, "gh pr merge failed: not mergeable") if calls["merge"] == 1 else (True, "squash-merged")
+
+    monkeypatch.setattr(final_phase, "run_final_phase", counting_phase)
+    monkeypatch.setattr(final_phase, "squash_merge", flaky_merge)
+
+    r = _tail(tmp_path, merge=True)
+    assert r.status == MERGED
+    assert calls["phase"] == 2
+    assert calls["merge"] == 2
+
+
+def test_a_race_that_never_clears_exhausts_the_round_cap(tmp_path, monkeypatch):
+    from reasona_dev.cycle_gate import MAX_FINAL_PHASE_ROUNDS
+
+    _stub(monkeypatch, merged=(False, "gh pr merge failed: not mergeable"))
+    calls = {"phase": 0}
+    real_run_final_phase = final_phase.run_final_phase
+
+    def counting_phase(**kw):
+        calls["phase"] += 1
+        return real_run_final_phase(**kw)
+
+    monkeypatch.setattr(final_phase, "run_final_phase", counting_phase)
+
+    r = _tail(tmp_path, merge=True)
+    assert r.status == BLOCKED and "not mergeable" in r.reason
+    assert calls["phase"] == MAX_FINAL_PHASE_ROUNDS
+
+
+def test_a_non_race_merge_failure_never_retries(tmp_path, monkeypatch):
+    """Auth/permission/PR-state failures are NOT the race class -- they
+    must block on the first attempt, exactly like before this change."""
+    _stub(monkeypatch, merged=(False, "gh pr merge failed: permission denied"))
+    calls = {"phase": 0}
+    real_run_final_phase = final_phase.run_final_phase
+
+    def counting_phase(**kw):
+        calls["phase"] += 1
+        return real_run_final_phase(**kw)
+
+    monkeypatch.setattr(final_phase, "run_final_phase", counting_phase)
+
+    r = _tail(tmp_path, merge=True)
+    assert r.status == BLOCKED and "permission denied" in r.reason
+    assert calls["phase"] == 1
+
+
+def test_an_up_to_date_race_that_clears_on_retry_succeeds(tmp_path, monkeypatch):
+    _stub(monkeypatch)
+    calls = {"up": 0}
+
+    def flaky_up(w, *, base):
+        calls["up"] += 1
+        return (False, "branch is behind origin/main -- re-run sync") if calls["up"] == 1 else (True, "ok")
+
+    monkeypatch.setattr(final_phase, "is_up_to_date", flaky_up)
+    r = _tail(tmp_path, merge=True)
+    assert r.status == MERGED
+    assert calls["up"] == 2
+
+
 def test_a_failing_gh_pr_blocks_before_gh_review_runs(tmp_path, monkeypatch):
     _stub(monkeypatch, gh_pr_passed=False, gh_pr_reason="pr-meta violation: ['P4']")
     monkeypatch.setattr(gh_review, "run_gh_review", lambda **kw: pytest.fail("must not run gh-review"))

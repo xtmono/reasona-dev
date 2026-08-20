@@ -426,6 +426,26 @@ def parse_ocr_result(payload: dict) -> ReviewResult:
     return ReviewResult(role_status=RoleStatus.COMPLETE, findings=findings)
 
 
+def convergent_keys(*results: ReviewResult) -> set[str]:
+    """worker.md's `cross_reviewer_convergence` signal: the set of MUST_FIX
+    keys flagged by >=2 of the given results in the SAME cycle -- >=2
+    INDEPENDENTLY dispatched reviewers agreeing on the same `path::symbol`
+    location, cross-model agreement rather than one model's own
+    self-assessment. Meant for the review stage's `resolved["review_all"]`
+    fan-out (>=2 reviewers); with exactly one reviewer this is always
+    empty, which is correct -- there is no second reviewer to agree with.
+    `cycle_gate.RecurrenceTracker.decide(key, converged=...)` is the
+    consumer: a key found here earns the SAME one-time escalation
+    `observed_recurrence` (surviving a prior fix) earns, just triggered by
+    cross-reviewer agreement instead of cross-cycle recurrence.
+    """
+    counts: dict[str, int] = {}
+    for r in results:
+        for key in {f.key() for f in r.must_fix}:  # a reviewer's own dup findings count once
+            counts[key] = counts.get(key, 0) + 1
+    return {k for k, n in counts.items() if n >= 2}
+
+
 def merge(*results: ReviewResult) -> ReviewResult:
     """Merge across reviewers.
 

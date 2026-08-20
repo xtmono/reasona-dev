@@ -43,6 +43,7 @@ judgment about the code's quality.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,7 @@ class GhPrResult:
     pr_num: int | None = None
     issue_num: int | None = None
     branch: str | None = None
+    duplicate: bool = False
 
 
 def _kebab(text: str) -> str:
@@ -152,6 +154,35 @@ def validate_pr_meta(*, title: str, body: str, issue_num: int) -> list[str]:
     return violations
 
 
+def find_duplicate_pr(workdir: Path, *, title: str) -> tuple[int | None, str | None]:
+    """worker.md's DUP-WORKER guard: before creating anything, search open
+    PRs for this unit's EXACT `<type>: <subject>` title. Returns
+    `(pr_number, pr_url)` on a match, else `(None, None)`.
+
+    Guards against `create_pr()`'s own idempotency check
+    (`existing_pr_url()`, branch-scoped: "does THIS branch already have an
+    open PR") missing a duplicate opened under a DIFFERENT branch for the
+    SAME logical unit -- the case a `--restart` after a lost/cleared ledger
+    can produce, when a prior run's PR still exists on GitHub but this
+    run's ledger no longer remembers it.
+    """
+    code, out, _ = _shell.run(
+        ["gh", "pr", "list", "--state", "open", "--search", f"{title} in:title",
+         "--json", "number,title,url"],
+        workdir, timeout=60,
+    )
+    if code != 0 or not out.strip():
+        return None, None
+    try:
+        items = json.loads(out)
+    except json.JSONDecodeError:
+        return None, None
+    for item in items:
+        if item.get("title") == title:
+            return item.get("number"), item.get("url")
+    return None, None
+
+
 def create_issue(workdir: Path, *, title: str, body: str) -> tuple[int | None, str]:
     code, out, err = _shell.run(
         ["gh", "issue", "create", "--title", title, "--body", body], workdir, timeout=120,
@@ -204,7 +235,8 @@ def run_gh_pr(
     plan_name: str | None,
     base: str = "origin/main",
 ) -> GhPrResult:
-    """`create issue -> rename branch -> push + create PR -> validate/repair`.
+    """`duplicate check -> create issue -> rename branch -> push + create PR
+    -> validate/repair`.
 
     `plan_name`, when given, is the same resume flag `final_phase.py`
     already threads through: a known issue number from an earlier,
@@ -212,10 +244,30 @@ def run_gh_pr(
     for the same unit), and a newly created issue's number is recorded back
     for the next resume, mirroring `ledger.known_pr_url()`/
     `mark_pr_created()`'s existing pattern for the PR itself.
+
+    **Not ported: worker.md's OTHER guard** ("Pre-/gh-pr guard": before
+    creating anything, check whether this unit's OWN temp branch already
+    exists on the remote -- evidence some other role pushed it, an
+    overstep this function alone should own). That guard protects against
+    dev-ralf's independently-scheduled subagents racing each other; it has
+    no analogue here -- `create_pr()` (via `final_phase.py`) is the ONLY
+    code path in this project that ever runs `git push`/`gh pr create` for
+    a unit, called exactly once per unit per run by this single-process
+    orchestrator, so the race that guard exists to catch cannot occur in
+    this architecture.
     """
     workdir = Path(workdir)
     unit_type, subject = resolve_type_subject(unit)
     base_branch = base.split("/", 1)[1] if "/" in base else base
+
+    title = build_pr_title(unit_type, subject)
+    dup_num, dup_url = find_duplicate_pr(workdir, title=title)
+    if dup_num is not None:
+        return GhPrResult(
+            passed=False,
+            reason=f"duplicate: PR #{dup_num} already open for this unit -- not creating a second one",
+            pr_url=dup_url, pr_num=dup_num, duplicate=True,
+        )
 
     known_issue = ledger.known_issue_number(workdir, plan_name, stage_name) if plan_name else None
     if known_issue is not None:
@@ -234,7 +286,6 @@ def run_gh_pr(
     if branch is None:
         return GhPrResult(passed=False, reason=branch_reason, issue_num=issue_num)
 
-    title = build_pr_title(unit_type, subject)
     body = build_pr_body(issue_num=issue_num, plan_name=plan_name or "", unit=unit)
 
     known_pr_url = ledger.known_pr_url(workdir, plan_name, stage_name) if plan_name else None

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from reasona_dev.finding_adapter import ReviewResult, RoleStatus, parse_text_contract
 from reasona_dev.model_config import ResolvedModel
-from reasona_dev.pr_cycle import RoleRunResult, run_pr_cycle
+from reasona_dev.pr_cycle import RoleRunResult, _is_docs_only, run_pr_cycle
 
 _RESOLVED = {
     "dev": ResolvedModel("dev", "sonnet", "claude", "high", "default"),
@@ -126,6 +126,75 @@ def test_scan_stage_runs_bugbot_and_compliance_in_kv_shape(tmp_path, generic_pro
         profile="generic", run_role_fn=_stub_role_fn(script=script),
     )
     assert result.verdict == "PASS"
+
+
+def test_is_docs_only_true_when_every_file_matches():
+    assert _is_docs_only(["docs/a.md", "config.yaml", "pyproject.toml", "data.json"])
+
+
+def test_is_docs_only_false_with_any_source_file():
+    assert not _is_docs_only(["docs/a.md", "src/a.rs"])
+
+
+def test_is_docs_only_false_with_no_declared_files():
+    assert not _is_docs_only(None)
+    assert not _is_docs_only([])
+
+
+def test_is_docs_only_extension_match_is_case_insensitive():
+    assert _is_docs_only(["README.MD"])
+
+
+def test_docs_only_unit_skips_bugbot_but_still_runs_compliance(tmp_path, generic_prompts):
+    """worker.md's Bug + compliance scan: tas-bugbot only runs when the PR
+    changes code -- no source path in the declared files (docs/config-only:
+    .md/.toml/.yaml/.json) skips it. compliance always runs regardless."""
+    calls = []
+
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        calls.append(role)
+        return RoleRunResult(role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
+                             raw_output_path=Path("/dev/null"))
+
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="generic", run_role_fn=fn, files=["docs/readme.md", "config.yaml"],
+    )
+    assert result.verdict == "PASS"
+    assert "bugbot" not in calls
+    assert "compliance" in calls
+
+
+def test_a_unit_with_any_source_file_still_dispatches_bugbot(tmp_path, generic_prompts):
+    calls = []
+
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        calls.append(role)
+        return RoleRunResult(role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
+                             raw_output_path=Path("/dev/null"))
+
+    run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="generic", run_role_fn=fn, files=["docs/readme.md", "src/a.rs"],
+    )
+    assert "bugbot" in calls
+
+
+def test_no_declared_files_is_not_treated_as_docs_only(tmp_path, generic_prompts):
+    """A unit with no `files:` metadata at all is not KNOWN to be
+    docs-only -- bugbot still runs, the safe default."""
+    calls = []
+
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        calls.append(role)
+        return RoleRunResult(role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
+                             raw_output_path=Path("/dev/null"))
+
+    run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="generic", run_role_fn=fn,
+    )
+    assert "bugbot" in calls
 
 
 def test_port_reaches_every_run_role_fn_dispatch(tmp_path, generic_prompts):

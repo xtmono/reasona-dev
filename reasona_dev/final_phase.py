@@ -48,10 +48,20 @@ explicitly rather than discover it happened. Everything up to that point
 
 **What still fails loudly rather than being retried.** `gh` missing, `gh`
 unauthenticated, a non-conflict sync failure (fetch failure, unreadable
-remote), a malformed squash title, a PR behind its base at the final
-pre-merge check: these are genuinely outside dev's ability to fix by
-editing files, so each still returns a `blocked` status immediately rather
-than entering a fix loop that could never converge.
+remote), a malformed squash title: these are genuinely outside dev's
+ability to fix by editing files, so each still returns a `blocked` status
+immediately rather than entering a fix loop that could never converge.
+
+**A PR that has fallen behind base at the final pre-merge check, or a
+squash-merge race, is DIFFERENT -- worker.md classifies these as the SAME
+race class the final phase's own sync already handles** (§ *Squash merge*,
+"gh pr merge non-zero -- classify": "re-enter the Final phase round loop at
+round+1 rather than hand-rolling a one-off retry here"), so
+`run_final_stage()` retries the WHOLE final phase (sync -> conditional
+audit -> ship_gate) from the top, bounded by the SAME
+`MAX_FINAL_PHASE_ROUNDS` -- never a bare one-off retry of just the merge
+call. Any OTHER merge failure (auth/permission, PR state) still blocks
+immediately, matching everything else in this list.
 """
 
 from __future__ import annotations
@@ -388,6 +398,24 @@ def squash_merge(workdir: Path, msg: SquashMessage) -> tuple[bool, str]:
     return True, "squash-merged"
 
 
+# `gh pr merge`'s own text for the two race shapes worker.md names ("not
+# mergeable", "Base branch was modified") plus the generic "conflict" a
+# local auto-merge failure would report -- worker.md's own classification
+# (§ *Squash merge*, "gh pr merge non-zero -- classify") distinguishes this
+# class (re-enter the final phase) from everything else (auth/permission,
+# PR state -- block immediately). Matched case-insensitively against
+# `gh`'s actual stderr/stdout text, so this is inherently a best-effort
+# classifier, not a guarantee -- a misclassified race still blocks
+# immediately rather than silently retrying forever, which is the safe
+# direction for this to be wrong in.
+_MERGE_RACE_MARKERS = ("not mergeable", "base branch was modified", "not up to date", "conflict")
+
+
+def _is_merge_race_failure(reason: str) -> bool:
+    lowered = reason.lower()
+    return any(marker in lowered for marker in _MERGE_RACE_MARKERS)
+
+
 # --- final audit ------------------------------------------------------------
 
 def should_run_final_audit(budget: FixBudget) -> bool:
@@ -453,6 +481,7 @@ def run_final_audit(
         decision = evaluate(
             result.review_result, budget, "final", recurrence,
             inconclusive_attempts=0, escalation_model=resolved["dev_escalation"].model,
+            dev_model=resolved["dev"].model,
         )
         cycles_log.record_decision(
             workdir=workdir, stage_name=stage_name, stage="final", cycle=cycle,
@@ -775,57 +804,79 @@ def run_final_stage(
         return _blocked(review_result.reason, pr_url=url, role_results=dispatches)
 
     # --- Final phase: sync (catches main moving DURING the gh-pr+gh-review
-    # CI window) -> conditional final_audit -> ship_gate, round-bounded.
-    # Runs HERE -- after gh-pr/gh-review, not before -- so it re-verifies
-    # whatever fix commits gh-review just made (`should_run_final_audit()`
-    # already triggers on `budget.total_used > 0`, and gh_review.py spends
-    # the SAME shared `budget` on its own fix dispatches).
-    decision, status, phase_dispatches, reason = run_final_phase(
-        workdir=workdir, stage_name=stage_name, pr_title=pr_title, profile=profile,
-        resolved=resolved, rundir=rundir, budget=budget, recurrence=recurrence,
-        cycle_verdict=cycle_verdict, ship_gate_fn=ship_gate_fn, base=base,
-        port=port, run_role_fn=run_role_fn,
-    )
-    dispatches = dispatches + phase_dispatches
-    audit = next((d for d in phase_dispatches if d.role == "compliance"), None)
-    if status == "needs_review":
-        return _needs_review(reason, dispatches, decision, pr_url=url)
-    if status != "passed":
-        return _blocked(reason, pr_url=url, final_audit=audit, role_results=dispatches, ship_decision=decision)
+    # CI window) -> conditional final_audit -> ship_gate, round-bounded --
+    # then the squash-merge attempt itself, all sharing ONE outer bound
+    # (`MAX_FINAL_PHASE_ROUNDS`). worker.md's own squash-merge failure
+    # classification (§ *Squash merge*, "gh pr merge non-zero -- classify"):
+    # a not-up-to-date / merge-conflict race (main moved again in the tiny
+    # window since the final phase's own sync last checked) is the SAME
+    # class `run_final_phase()`'s sync already handles, so it re-enters
+    # the WHOLE final phase at round+1 -- sync merges the new tip, audit/
+    # ship_gate re-verify whatever that changed, then this merge retries --
+    # rather than a one-off bare retry here. Any OTHER merge failure
+    # (auth/permission, PR state) still blocks immediately, same as ever.
+    decision: ShipDecision | None = None
+    audit: RoleRunResult | None = None
+    msg: SquashMessage | None = None
+    for outer_round in range(1, MAX_FINAL_PHASE_ROUNDS + 1):
+        # Runs HERE -- after gh-pr/gh-review, not before -- so it
+        # re-verifies whatever fix commits gh-review just made
+        # (`should_run_final_audit()` already triggers on
+        # `budget.total_used > 0`, and gh_review.py spends the SAME shared
+        # `budget` on its own fix dispatches).
+        decision, status, phase_dispatches, reason = run_final_phase(
+            workdir=workdir, stage_name=stage_name, pr_title=pr_title, profile=profile,
+            resolved=resolved, rundir=rundir, budget=budget, recurrence=recurrence,
+            cycle_verdict=cycle_verdict, ship_gate_fn=ship_gate_fn, base=base,
+            port=port, run_role_fn=run_role_fn,
+        )
+        dispatches = dispatches + phase_dispatches
+        audit = next((d for d in phase_dispatches if d.role == "compliance"), audit)
+        if status == "needs_review":
+            return _needs_review(reason, dispatches, decision, pr_url=url)
+        if status != "passed":
+            return _blocked(reason, pr_url=url, final_audit=audit, role_results=dispatches, ship_decision=decision)
 
-    msg, msg_reason = build_squash_message(unit_type=unit_type, title=pr_title)
-    if msg is None:
-        return _blocked(msg_reason, pr_url=url, final_audit=audit,
-                        role_results=dispatches, ship_decision=decision)
+        msg, msg_reason = build_squash_message(unit_type=unit_type, title=pr_title)
+        if msg is None:
+            return _blocked(msg_reason, pr_url=url, final_audit=audit,
+                            role_results=dispatches, ship_decision=decision)
 
-    if not merge:
+        if not merge:
+            return TailResult(
+                stage_name=stage_name, status=PR_OPEN,
+                reason=f"{gh_pr_result.reason}; merge not requested (pass merge=True to squash-merge)",
+                pr_url=url, squash_message=msg, final_audit=audit, role_results=dispatches,
+                ship_decision=decision,
+            )
+
+        # Re-checked here, not only inside the final phase: gh-pr/gh-review's
+        # own round trips take more time for base to move in.
+        fresh, gate_reason = is_up_to_date(workdir, base=base)
+        if not fresh:
+            if outer_round < MAX_FINAL_PHASE_ROUNDS:
+                continue  # re-enter the final phase round loop at round+1
+            return _blocked(gate_reason, pr_url=url, squash_message=msg,
+                            final_audit=audit, role_results=dispatches, ship_decision=decision)
+
+        merged, merge_reason = squash_merge(workdir, msg)
+        if not merged:
+            if _is_merge_race_failure(merge_reason) and outer_round < MAX_FINAL_PHASE_ROUNDS:
+                continue  # re-enter the final phase round loop at round+1
+            return _blocked(merge_reason, pr_url=url, squash_message=msg,
+                            final_audit=audit, role_results=dispatches, ship_decision=decision)
+
+        cycles_log.record_ship(
+            workdir=workdir, stage_name=stage_name, passed=True,
+            gates={"final_stage": True}, reason=merge_reason,
+        )
         return TailResult(
-            stage_name=stage_name, status=PR_OPEN,
-            reason=f"{gh_pr_result.reason}; merge not requested (pass merge=True to squash-merge)",
-            pr_url=url, squash_message=msg, final_audit=audit, role_results=dispatches,
+            stage_name=stage_name, status=MERGED, reason=merge_reason, pr_url=url,
+            squash_message=msg, final_audit=audit, role_results=dispatches,
             ship_decision=decision,
         )
-
-    # Re-checked here, not only inside the final phase: gh-pr/gh-review's own
-    # round trips take more time for base to move in. Not looped back into
-    # the final phase on failure -- see the module docstring's "what still
-    # fails loudly rather than being retried".
-    fresh, gate_reason = is_up_to_date(workdir, base=base)
-    if not fresh:
-        return _blocked(gate_reason, pr_url=url, squash_message=msg,
-                        final_audit=audit, role_results=dispatches, ship_decision=decision)
-
-    merged, merge_reason = squash_merge(workdir, msg)
-    if not merged:
-        return _blocked(merge_reason, pr_url=url, squash_message=msg,
-                        final_audit=audit, role_results=dispatches, ship_decision=decision)
-
-    cycles_log.record_ship(
-        workdir=workdir, stage_name=stage_name, passed=True,
-        gates={"final_stage": True}, reason=merge_reason,
-    )
-    return TailResult(
-        stage_name=stage_name, status=MERGED, reason=merge_reason, pr_url=url,
-        squash_message=msg, final_audit=audit, role_results=dispatches,
-        ship_decision=decision,
-    )
+    # Unreachable: every iteration above either `continue`s (only when
+    # `outer_round < MAX_FINAL_PHASE_ROUNDS`, guaranteeing a next
+    # iteration) or `return`s -- so the LAST iteration always returns,
+    # carrying the specific `is_up_to_date`/`squash_merge` failure reason
+    # rather than a generic "did not converge" message.

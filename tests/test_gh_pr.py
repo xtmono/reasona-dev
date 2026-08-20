@@ -148,10 +148,64 @@ def test_repair_pr_reports_a_gh_edit_failure_immediately(tmp_path, monkeypatch):
     assert not ok and "not authenticated" in reason
 
 
+# --- find_duplicate_pr (DUP-WORKER guard) ----------------------------------------
+
+def test_find_duplicate_pr_finds_an_exact_title_match(tmp_path, monkeypatch):
+    def _fake_run(cmd, workdir, **kw):
+        assert cmd[:3] == ["gh", "pr", "list"]
+        return 0, '[{"number": 9, "title": "feat: add subtract()", "url": "https://gh/pr/9"}]', ""
+
+    monkeypatch.setattr(gh_pr._shell, "run", _fake_run)
+    num, url = gh_pr.find_duplicate_pr(tmp_path, title="feat: add subtract()")
+    assert num == 9 and url == "https://gh/pr/9"
+
+
+def test_find_duplicate_pr_ignores_a_non_matching_title(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        gh_pr._shell, "run",
+        lambda cmd, workdir, **kw: (0, '[{"number": 9, "title": "fix: something else", "url": "https://gh/pr/9"}]', ""),
+    )
+    num, url = gh_pr.find_duplicate_pr(tmp_path, title="feat: add subtract()")
+    assert num is None and url is None
+
+
+def test_find_duplicate_pr_no_open_prs(tmp_path, monkeypatch):
+    monkeypatch.setattr(gh_pr._shell, "run", lambda cmd, workdir, **kw: (0, "[]", ""))
+    num, url = gh_pr.find_duplicate_pr(tmp_path, title="feat: add subtract()")
+    assert num is None and url is None
+
+
+def test_find_duplicate_pr_returns_none_on_gh_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(gh_pr._shell, "run", lambda cmd, workdir, **kw: (1, "", "not authenticated"))
+    num, url = gh_pr.find_duplicate_pr(tmp_path, title="feat: add subtract()")
+    assert num is None and url is None
+
+
 # --- run_gh_pr composition -------------------------------------------------------
+
+def test_run_gh_pr_refuses_to_create_a_duplicate(tmp_path, monkeypatch):
+    """worker.md's DUP-WORKER guard: a sibling already has this unit's
+    exact title open -- do not create a second issue or PR."""
+    def _fake_run(cmd, workdir, **kw):
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return 0, '[{"number": 9, "title": "feat: add subtract()", "url": "https://gh/pr/9"}]', ""
+        pytest.fail(f"must not go any further -- duplicate found (call: {cmd})")
+
+    monkeypatch.setattr(gh_pr._shell, "run", _fake_run)
+    result = gh_pr.run_gh_pr(workdir=tmp_path, stage_name="pr-1", unit=UNIT, plan_name=None)
+    assert result.passed is False
+    assert result.duplicate is True
+    assert result.pr_num == 9
+    assert result.pr_url == "https://gh/pr/9"
+    assert "duplicate" in result.reason
+
+
+
 
 def _stub_shell(monkeypatch, *, issue_out="https://github.com/o/r/issues/42\n"):
     def _fake_run(cmd, workdir, **kw):
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return 0, "[]", ""
         if cmd[:3] == ["gh", "issue", "create"]:
             return 0, issue_out, ""
         if cmd[:3] == ["git", "branch", "-m"]:
@@ -189,6 +243,8 @@ def test_run_gh_pr_reuses_a_known_issue_on_resume(tmp_path, monkeypatch):
     ledger.mark_issue_created(tmp_path, "plan", "pr-1", 99)
 
     def _fake_run(cmd, workdir, **kw):
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return 0, "[]", ""
         if cmd[:3] == ["gh", "issue", "create"]:
             pytest.fail("must not create a second issue -- one is already known")
         if cmd[:3] == ["git", "branch", "-m"]:
@@ -232,6 +288,8 @@ def test_run_gh_pr_repairs_a_violation_and_still_passes(tmp_path, monkeypatch):
     monkeypatch.setattr(gh_pr, "validate_pr_meta", _fake_validate)
 
     def _fake_run_with_edit(cmd, workdir, **kw):
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return 0, "[]", ""
         if cmd[:3] == ["gh", "issue", "create"]:
             return 0, "https://github.com/o/r/issues/42\n", ""
         if cmd[:3] == ["git", "branch", "-m"]:

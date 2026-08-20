@@ -4,6 +4,7 @@ from reasona_dev.finding_adapter import (
     Disposition,
     RoleStatus,
     Severity,
+    convergent_keys,
     merge,
     parse_kv_contract,
     parse_ocr_result,
@@ -96,6 +97,33 @@ def test_merge_any_must_fix_blocks_all():
     failing = parse_text_contract(SAMPLE)
     merged = merge(passing, failing)
     assert merged.gate() == "FIX_REQUIRED"
+
+
+def test_convergent_keys_empty_with_a_single_reviewer():
+    r = parse_text_contract(SAMPLE)
+    assert convergent_keys(r) == set()
+
+
+def test_convergent_keys_finds_a_key_flagged_by_two_reviewers():
+    r1 = parse_text_contract(SAMPLE)
+    r2 = parse_text_contract(SAMPLE)  # same finding, independently reported
+    key = r1.must_fix[0].key()
+    assert convergent_keys(r1, r2) == {key}
+
+
+def test_convergent_keys_excludes_a_key_only_one_reviewer_flagged():
+    r1 = parse_text_contract(SAMPLE)
+    r2 = parse_text_contract("VERDICT: PASS\n")
+    assert convergent_keys(r1, r2) == set()
+
+
+def test_convergent_keys_a_reviewers_own_duplicate_finding_counts_once():
+    """A single reviewer reporting the SAME key twice in one report must
+    not, by itself, look like cross-reviewer agreement."""
+    dup_text = SAMPLE + SAMPLE.replace("VERDICT: FAIL\n", "")
+    r1 = parse_text_contract(dup_text)
+    r2 = parse_text_contract("VERDICT: PASS\n")
+    assert convergent_keys(r1, r2) == set()
 
 
 def test_merge_inconclusive_dominates():

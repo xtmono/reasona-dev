@@ -2021,6 +2021,92 @@ stub that spends the `"gh_review"` budget stage (simulating a real `FIX_COMMITS 
 causes `final_audit` to actually dispatch before the squash-merge — under the old ordering this
 never happened.
 
+## 3.14.6 Source-level parity re-check — seven confirmed gaps closed
+
+After §3.14.5's fix, `~/repository/tas-dev-plugins/plugins/dev/skills/dev-ralf/reference/
+worker.md` was re-read in full (401 lines) and compared against reasona-dev's current source,
+module by module, to confirm the pipeline now behaves identically. Most of it already matched
+(finding contract v2, INCONCLUSIVE handling, recheck routing, all budget caps but one, gh-review's
+budget pooling, PR title sanitization, both mechanical/substantive sync points). Seven real,
+previously-undiscovered gaps were found and closed:
+
+**1. `MAX_FINAL_CYCLES` was 3, worker.md says `max_final_cycles=2`.** A plain numeric drift —
+fixed in `cycle_gate.py`, pinned against worker.md's own numbers by
+`test_every_stage_cap_matches_worker_md`.
+
+**2. Incomplete-evidence re-query was missing entirely.** worker.md: a MUST_FIX reported without a
+complete contract/scenario/fix earns ONE re-query before ever reaching a dev-fix or recheck prompt
+— never a silent downgrade to ADVISORY. reasona-dev only recorded `contract_incomplete=True` and
+sent the finding to dev as-is. `pr_cycle._correct_incomplete_evidence()` now dispatches a narrow
+follow-up prompt per incomplete MUST_FIX, mutating `contract`/`scenario`/`fix` in place if the
+reply supplies them — the disposition never changes either way, matching worker.md exactly.
+worker.md scopes this to the review stage only (its own bugbot/compliance are external skills with
+a KV shape that never carries evidence fields at all); reasona-dev's packaged `generic` profile
+asks bugbot/compliance for the SAME `||` text contract as review, so it CAN produce an incomplete
+MUST_FIX there too — the correction round applies to the scan stage as well, the faithful
+adaptation rather than an extension beyond worker.md's intent. Since this project's dispatch layer
+has no session-continuation concept at all (`bernstein_dispatch.py` — every `run_role()` call is an
+independent one-shot `bernstein run`), the re-query is a FRESH dispatch on the same model, not a
+literal same-session resume dev-ralf's own wording implies.
+
+**3. Two of the three escalation triggers were missing.** worker.md's `RecurrenceTracker`-equivalent
+decides escalation from THREE independent signals: `observed_recurrence` (a key survived a prior
+completed fix — the only one reasona-dev had), `cross_reviewer_convergence` (≥2 independently
+dispatched reviewers flagged the SAME key in the SAME cycle — impossible to observe before item 2's
+multi-reviewer support existed this session), and `scope_exceeded` (this cycle's `recheck_route()`
+came back `FULL` because the prior fix's diff spilled outside the files its findings named).
+`finding_adapter.convergent_keys()` computes the first; `RecurrenceTracker.decide()` gained a
+`converged: bool` parameter that folds BOTH new triggers into the same one-time-per-key escalation
+mechanic `observed_recurrence` already used — `evaluate()`'s new `converged_keys` parameter is the
+union the caller builds. `pr_cycle.py`'s FULL-route review loop computes it every cycle from the
+dispatched reviewers' own results plus `cycle > 1 and route == "FULL"`.
+
+**4. A squash-merge race did not re-enter the final phase.** worker.md's own classification (§
+*Squash merge*, "gh pr merge non-zero — classify"): a not-up-to-date / merge-conflict race is the
+SAME class the final phase's own sync already handles, so it "re-enters the Final phase round loop
+at round+1 rather than hand-rolling a one-off retry here." reasona-dev's `is_up_to_date()`/
+`squash_merge()` failures used to block immediately, with a comment explicitly declaring the
+opposite of worker.md's rule. `run_final_stage()` now wraps `run_final_phase()` through the
+squash-merge attempt in one outer loop bounded by the SAME `MAX_FINAL_PHASE_ROUNDS`, classifying a
+race by matching `gh`'s own failure text (`_is_merge_race_failure()`) — any OTHER merge failure
+(auth/permission, PR state) still blocks on the first attempt, unchanged.
+
+**5. bugbot always ran, even on docs-only units.** worker.md: "`tas-bugbot` only when the PR
+changes code — no source path in `pr_files` (docs/config-only: `.md`/`.toml`/`.yaml`/`.json`) →
+skip it, `bug_verdict = SKIPPED`." `pr_cycle._is_docs_only()` checks the unit's OWN declared
+`files:` (never the actual diff — matching worker.md's use of `pr_files`, not `changed_files`) —
+every file must match the exact four extensions worker.md names; no declared files at all is NOT
+treated as docs-only (the safe default). `compliance` always runs regardless, unchanged.
+
+**6. Two gh-pr duplicate-prevention guards.** worker.md names two: a pre-`/gh-pr` guard (this
+unit's temp branch already exists on the remote — evidence some other role overstepped) and the
+DUP-WORKER guard (an open PR with this unit's exact title already exists — a sibling shipped it,
+do not create a second one). Only the second was ported (`gh_pr.find_duplicate_pr()`, searched
+before issue creation) — the first protects against dev-ralf's independently-scheduled subagents
+racing each other, a race that cannot occur in this project's single-process architecture, where
+`final_phase.create_pr()` is the ONLY code path that ever runs `git push`/`gh pr create` for a
+unit, called exactly once per unit per run. worker.md's own resolution for a duplicate ("the
+scheduler reconciles it as `SHIPPED`") was deliberately NOT replicated as-is: reasona-dev has no
+separate scheduler process tracking a sibling PR's eventual real outcome, so reporting the unit
+`shipped` here would be an unverified claim this project's own completion contract exists to
+prevent. `GhPrResult.duplicate=True` instead reports `blocked` with the sibling's `pr_url`, leaving
+reconciliation to the operator.
+
+**7. The `escalation_from == escalation_to` optimization was missing.** worker.md: when `--dev`
+and `--dev-escalation` resolve to the SAME `tool:model:effort` string (an operator misconfiguration
+— under defaults `dev_escalation` is always a genuine tier jump), an "escalated" dispatch would be
+an identical re-run at the same tier — no capability increase, one wasted fix-budget cycle to prove
+what the comparison already showed. `evaluate()`'s new `dev_model` parameter, compared against
+`escalation_model` at the `ESCALATE_ONCE` branch, skips the dispatch entirely and returns `fail`
+directly (the outcome a non-escalated fix reaching this key again would produce) without spending
+the stage budget — `RecurrenceTracker.decide()` still records the key as escalated (a side effect
+of returning `ESCALATE_ONCE` in the first place), matching worker.md's "still record `escalated:
+true`... but skip the redundant dispatch."
+
+38 new tests across `tests/test_cycle_gate.py`, `tests/test_finding_adapter.py`,
+`tests/test_pr_cycle.py`, `tests/test_final_phase.py`, `tests/test_gh_pr.py`, and two new files
+(`tests/test_evidence_correction.py`, `tests/test_escalation_triggers.py`) — 509 total.
+
 ## 4. Directory structure
 
 ```

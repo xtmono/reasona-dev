@@ -18,9 +18,15 @@ from dataclasses import dataclass, field
 from reasona_dev.finding_adapter import Finding, ReviewResult
 
 # dev-ralf-renewal-claude.md §3.9 -- stage caps + one binding total.
+# Matched against `~/repository/tas-dev-plugins/plugins/dev/skills/dev-ralf/
+# reference/worker.md` directly (`max_review_cycles=8`, `max_scan_cycles=8`,
+# `max_final_cycles=2`, `MAX_SYNC_CYCLES=3`, `MAX_SHIP_CYCLES=3`,
+# `fix_cycles_max=16`) -- MAX_FINAL_CYCLES was 3 here, a numeric drift from
+# worker.md's `max_final_cycles=2` found during a source-level parity
+# re-check (docs/ARCHITECTURE.md §3.14.6).
 MAX_REVIEW_CYCLES = 8
 MAX_SCAN_CYCLES = 8
-MAX_FINAL_CYCLES = 3
+MAX_FINAL_CYCLES = 2
 MAX_SYNC_CYCLES = 3
 MAX_TOTAL_FIX_CYCLES = 16
 
@@ -177,15 +183,28 @@ class RecurrenceTracker:
         self.survived.pop(key, None)
         self.escalated.discard(key)
 
-    def decide(self, key: str) -> str:
-        """PROCEED | ESCALATE_ONCE | FAIL -- dev-ralf-renewal-claude.md §3.5 + new escalation rule."""
+    def decide(self, key: str, *, converged: bool = False) -> str:
+        """PROCEED | ESCALATE_ONCE | FAIL -- dev-ralf-renewal-claude.md §3.5 + new escalation rule.
+
+        Two independent signals feed the SAME per-key escalation, matching
+        worker.md's own two deterministic triggers for it: `converged`
+        (this cycle's `cross_reviewer_convergence` -- see
+        `finding_adapter.convergent_keys()` -- >=2 independently dispatched
+        reviewers flagged this key in the SAME cycle) or the `survived`
+        count already tracked here (`observed_recurrence` -- this key
+        survived a PRIOR completed fix). Either alone earns ONE bounded
+        escalation before a further sighting of the same key is FAIL --
+        worker.md's third trigger, `scope_exceeded` (a fix's diff spilled
+        outside the files its findings named), is decided by the CALLER
+        from `recheck_route()`'s own BOUNDED/FULL result, not here.
+        """
         n = self.survived.get(key, 0)
-        if n == 0:
-            return "PROCEED"
-        if n == 1 and key not in self.escalated:
+        if key in self.escalated:
+            return "FAIL" if (n >= 1 or converged) else "PROCEED"
+        if n >= 1 or converged:
             self.escalated.add(key)
             return "ESCALATE_ONCE"
-        return "FAIL"  # survived escalation too -- stop-the-world, not another retry
+        return "PROCEED"
 
     def to_dict(self) -> dict:
         # `escalated` is a set -- JSON has no set literal, so it round-trips
@@ -285,6 +304,8 @@ def evaluate(
     escalation_model: str = "opus",
     convergence: ConvergenceTracker | None = None,
     convergence_window: int = 3,
+    converged_keys: set[str] | None = None,
+    dev_model: str | None = None,
 ) -> GateDecision:
     """The single entry point `pr_cycle` calls before spawning a fix task.
 
@@ -292,7 +313,33 @@ def evaluate(
     behaviour; when supplied, it adds the non-convergence exit described in
     `ConvergenceTracker` -- a PR that stops improving fails at
     `convergence_window` cycles instead of at the stage cap.
+
+    `converged_keys` is worker.md's OTHER two escalation triggers, folded
+    into one set the caller builds: `cross_reviewer_convergence`
+    (`finding_adapter.convergent_keys()` -- >=2 independently dispatched
+    reviewers flagged this key in the SAME cycle) unioned with
+    `scope_exceeded` (this cycle's `recheck_route()` came back `FULL`
+    after an actual prior fix -- the caller passes every this-cycle
+    MUST_FIX key when that holds, not just one). Either membership is
+    passed through to `RecurrenceTracker.decide(key, converged=...)`,
+    which treats it exactly like `observed_recurrence` -- one bounded
+    escalation, then FAIL on a further sighting of the same key.
+
+    `dev_model`, when given, is compared against `escalation_model`
+    verbatim (worker.md: "compare `escalation_from` and `escalation_to`
+    verbatim"). If they resolve to the SAME `tool:model:effort` string, an
+    "escalated" dispatch would be an identical re-run at the same tier --
+    no capability increase, one wasted fix-budget cycle to prove what the
+    comparison already showed. In that case the escalation is still
+    recorded (`RecurrenceTracker.decide()` already marks the key escalated
+    as a side effect of returning `ESCALATE_ONCE`), but the dispatch itself
+    is skipped -- straight to the outcome a non-escalated fix reaching this
+    key again would produce: `fail`, without spending the stage budget on
+    the skipped cycle. Omitting `dev_model` (existing callers) keeps the
+    escalated dispatch unconditional, exactly as before this parameter
+    existed.
     """
+    converged_keys = converged_keys or set()
     gate = result.gate()
 
     if gate == "INCONCLUSIVE":
@@ -331,7 +378,7 @@ def evaluate(
     if convergence is not None:
         convergence.record(len(result.must_fix))
 
-    decisions = {recurrence.decide(f.key()) for f in result.must_fix}
+    decisions = {recurrence.decide(f.key(), converged=f.key() in converged_keys) for f in result.must_fix}
     if "FAIL" in decisions:
         return GateDecision("fail", "MUST_FIX key survived escalated fix -- stop-the-world")
 
@@ -346,6 +393,12 @@ def evaluate(
         )
 
     if "ESCALATE_ONCE" in decisions:
+        if dev_model is not None and dev_model == escalation_model:
+            return GateDecision(
+                "fail",
+                f"escalation_from == escalation_to ({escalation_model}) -- no capability "
+                "increase, skipping the redundant dispatch",
+            )
         budget.spend(stage)
         return GateDecision(
             "spawn_fix_escalated",
