@@ -49,18 +49,38 @@ def test_bootstraps_dot_bernstein_and_symlinks_root(tmp_path, monkeypatch):
     assert not (workdir / "bernstein.yaml").readlink().is_absolute()
 
 
-def test_existing_dot_bernstein_content_is_untouched_but_root_link_is_ensured(tmp_path, monkeypatch):
-    """The root link is ensured on EVERY call, not only when bootstrapping.
-
-    It is untracked (committing it breaks agent worktree creation), so a
-    fresh clone has `.bernstein/` and no link -- and without the link the
-    orchestrator re-derives a root-only path, finds nothing, and FATALs.
-    An early return here would leave every cloned repo one FATAL from its
-    first run.
-    """
+def test_existing_dot_bernstein_content_is_regenerated_from_a_resolvable_template(tmp_path, monkeypatch):
+    """`.bernstein/bernstein.yaml` is a DERIVED artifact: whenever a
+    template resolves, the file is (re)written from it on every call, not
+    only when bootstrapping a repo that has neither yet -- otherwise a
+    role added to the template after a repo was first bootstrapped (the
+    real incident this closes: `ocr_reviewer` added to the template long
+    after a target repo's file was seeded) never reaches that repo, and
+    Bernstein's task-create role allowlist silently stays stale."""
     global_yaml = tmp_path / "global-bernstein.yaml"
     global_yaml.write_text("goal: from-global\n")
     monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
+
+    workdir = tmp_path / "target-repo"
+    (workdir / ".bernstein").mkdir(parents=True)
+    (workdir / ".bernstein" / "bernstein.yaml").write_text("goal: stale-content\n")
+
+    result = bernstein_config.ensure_bernstein_yaml(workdir)
+
+    assert result == workdir / ".bernstein" / "bernstein.yaml"
+    # regenerated from the (resolvable) template, not left as the stale content
+    assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: from-global\n"
+    # ...and the link now exists, and is ignored so it is never committed
+    assert (workdir / "bernstein.yaml").is_symlink()
+    assert "bernstein.yaml" in (workdir / ".gitignore").read_text()
+
+
+def test_dot_bernstein_content_is_left_alone_when_no_template_resolves(tmp_path, monkeypatch):
+    """Nothing to regenerate FROM -- the pre-existing "leave it alone"
+    behavior, now scoped to the case a template is genuinely unavailable
+    (e.g. a hand-crafted file with no `bernstein-template.yaml` counterpart
+    anywhere), rather than being the default for every repo."""
+    monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", tmp_path / "nonexistent.yaml")
 
     workdir = tmp_path / "target-repo"
     (workdir / ".bernstein").mkdir(parents=True)
@@ -69,9 +89,7 @@ def test_existing_dot_bernstein_content_is_untouched_but_root_link_is_ensured(tm
     result = bernstein_config.ensure_bernstein_yaml(workdir)
 
     assert result == workdir / ".bernstein" / "bernstein.yaml"
-    # content never rewritten
     assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: repo-owns-this-already\n"
-    # ...but the link now exists, and is ignored so it is never committed
     assert (workdir / "bernstein.yaml").is_symlink()
     assert "bernstein.yaml" in (workdir / ".gitignore").read_text()
 
@@ -106,6 +124,62 @@ def test_project_local_template_beats_global_template(tmp_path, monkeypatch):
     assert result == workdir / ".bernstein" / "bernstein.yaml"
     assert (workdir / ".bernstein" / "bernstein.yaml").read_text() == "goal: from-project-local\n"
     assert (workdir / "bernstein.yaml").is_symlink()
+
+
+def test_a_role_added_to_the_template_after_bootstrap_reaches_an_already_materialized_repo(tmp_path, monkeypatch):
+    """The exact incident this change closes: a target repo's
+    `.bernstein/bernstein.yaml` was materialized before the template
+    gained a new role, and never caught up on its own -- silently freezing
+    Bernstein's task-create role allowlist at whatever existed the moment
+    the repo was first bootstrapped."""
+    global_yaml = tmp_path / "global-bernstein.yaml"
+    global_yaml.write_text(
+        "role_model_policy:\n"
+        "  backend:\n"
+        "    provider: claude\n"
+    )
+    monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
+
+    workdir = tmp_path / "target-repo"
+    (workdir / ".bernstein").mkdir(parents=True)
+    (workdir / ".bernstein" / "bernstein.yaml").write_text(
+        "role_model_policy:\n"
+        "  backend:\n"
+        "    provider: claude\n"
+    )
+
+    # the template later gains a role the already-materialized repo never saw
+    global_yaml.write_text(
+        "role_model_policy:\n"
+        "  backend:\n"
+        "    provider: claude\n"
+        "  ocr_reviewer:\n"
+        "    provider: ocr\n"
+    )
+
+    bernstein_config.ensure_bernstein_yaml(workdir)
+
+    assert "ocr_reviewer" in (workdir / ".bernstein" / "bernstein.yaml").read_text()
+
+
+def test_a_real_legacy_root_file_is_never_superseded_by_a_resolvable_template(tmp_path, monkeypatch):
+    """`find_seed_file()` checks `.bernstein/` first -- spawning a NEW
+    `.bernstein/bernstein.yaml` next to an operator's own real root file
+    would silently make Bernstein stop reading the file the operator
+    actually maintains."""
+    global_yaml = tmp_path / "global-bernstein.yaml"
+    global_yaml.write_text("goal: from-global\n")
+    monkeypatch.setattr(bernstein_config, "GLOBAL_BERNSTEIN_YAML", global_yaml)
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    (workdir / "bernstein.yaml").write_text("goal: legacy-root\n")
+
+    result = bernstein_config.ensure_bernstein_yaml(workdir)
+
+    assert result == workdir / "bernstein.yaml"
+    assert (workdir / "bernstein.yaml").read_text() == "goal: legacy-root\n"
+    assert not (workdir / ".bernstein").exists()
 
 
 def test_returns_none_when_nothing_exists(tmp_path, monkeypatch):
@@ -219,11 +293,13 @@ def test_wrongly_aimed_link_is_repaired(tmp_path, monkeypatch):
 
     workdir = tmp_path / "repo"
     (workdir / ".bernstein").mkdir(parents=True)
-    (workdir / ".bernstein" / "bernstein.yaml").write_text("goal: real\n")
+    (workdir / ".bernstein" / "bernstein.yaml").write_text("goal: stale\n")
     (workdir / "bernstein.yaml").symlink_to("somewhere/else.yaml")
 
     bernstein_config.ensure_bernstein_yaml(workdir)
 
     from pathlib import Path as _P
     assert (workdir / "bernstein.yaml").readlink() == _P(".bernstein") / "bernstein.yaml"
-    assert (workdir / "bernstein.yaml").read_text() == "goal: real\n"
+    # a template resolves, so the target's content is also regenerated --
+    # not just the link repaired
+    assert (workdir / "bernstein.yaml").read_text() == "goal: test\n"

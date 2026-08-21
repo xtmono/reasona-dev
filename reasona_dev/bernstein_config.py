@@ -1,5 +1,5 @@
-"""Bootstraps a target repo's `bernstein.yaml` from a local or global
-template, and keeps its `role_model_policy` in sync.
+"""Regenerates a target repo's `bernstein.yaml` from a local or global
+template on every run, and keeps its `role_model_policy` in sync.
 
 Bernstein disagrees with itself about where the seed file lives:
 `find_seed_file()` checks `.bernstein/bernstein.yaml` first, while `bernstein
@@ -114,46 +114,99 @@ def _ensure_gitignored(workdir: Path, entry: str) -> None:
         pass
 
 
+def _resolve_template(workdir: Path) -> Path | None:
+    """`<workdir>/.reasona/bernstein-template.yaml` then `GLOBAL_BERNSTEIN_YAML`
+    -- the same local-beats-global order `reasona_dev.config_file` uses."""
+    local_template = workdir / ".reasona" / "bernstein-template.yaml"
+    for source in (local_template, GLOBAL_BERNSTEIN_YAML):
+        if source.is_file():
+            return source
+    return None
+
+
 def ensure_bernstein_yaml(workdir: str | Path) -> Path | None:
     """Ensure a usable seed layout, and return the real file's path.
 
-    Three cases, in order:
+    **`.bernstein/bernstein.yaml` is a DERIVED artifact, regenerated from
+    its template on every call a template resolves for -- not a one-time
+    seed.** An earlier version of this function copied the template only
+    when NEITHER `.bernstein/bernstein.yaml` nor a root file existed yet,
+    then left whatever it (or an operator) had produced there untouched
+    forever. That made `role_model_policy` -- which doubles as Bernstein's
+    task-create ROLE ALLOWLIST, `POST /tasks` returns HTTP 400 for a role
+    absent from it -- silently freeze at whatever roles existed the moment
+    a repo was first bootstrapped. A real incident: a target repo's
+    `bernstein.yaml` was bootstrapped before this project's `,ocr` co-
+    reviewer support existed; the template later gained an `ocr_reviewer`
+    entry, but the already-materialized file never did, so every `review:
+    ...,ocr` run there hard-blocked on "role/model unavailable" -- a
+    template update that should have been a no-op operator experience
+    instead required knowing to hand-diff two files nobody was told to
+    compare. `plan.yaml` is already regenerated fresh on every role
+    dispatch (`bernstein_dispatch.write_role_plan()`); this brings
+    `bernstein.yaml` in line with that same "derived, not hand-maintained"
+    treatment -- `sync_role_model_policy()` (called right after this
+    function, unchanged) then layers the CURRENT run's resolved adapters on
+    top, so a freshly-regenerated file is never one step behind either the
+    template's role list OR `reasona_dev.model_config`'s resolved
+    providers.
 
-    1. `.bernstein/bernstein.yaml` exists -> content untouched; the root
-       symlink and the ignore entry are still ensured, because an untracked
-       link does not survive a clone (see module docstring).
-    2. Only a root `bernstein.yaml` exists (a repo predating this
-       convention) -> left completely alone. It already satisfies the
-       orchestrator, and converting it would rewrite a file this module did
-       not create.
-    3. Neither exists -> copy a template into `.bernstein/bernstein.yaml`
-       and create the root link.
+    **Project-local template wins, so per-repo customization (e.g.
+    `worktree_setup.setup_command`, which this project's own template
+    comments say to "override per repo") lives in `<workdir>/.reasona/
+    bernstein-template.yaml`, not in a hand-edit of the materialized
+    `.bernstein/bernstein.yaml`** -- a hand-edit there is silently
+    discarded on the next call, same as a hand-edit of a compiled
+    `plan.yaml` would be. A repo whose workflow runs more than one
+    reasona-* tool against it (e.g. both reasona-dev and reasona-plan) also
+    needs its OWN project-local template declaring the UNION of every role
+    either tool creates -- each tool's own template only lists its own
+    roles, and regeneration replaces the file's role list outright rather
+    than merging it with whatever the other tool last wrote (a merge would
+    have to guess which of two overlapping-but-different `cli:`/
+    `model_fallback:`/`worktree_setup:` sections is authoritative, which
+    isn't this function's decision to make; a shared repo's own template
+    is the place that decision belongs).
 
-    Source priority when bootstrapping: `<workdir>/.reasona/
-    bernstein-template.yaml` then `GLOBAL_BERNSTEIN_YAML` -- the same
-    local-beats-global order `reasona_dev.config_file` uses.
+    Four cases, in order:
 
-    Returns the real file now in place, or `None` if nothing was available
-    to copy from (the caller proceeds; `bernstein run` surfaces its own
-    error if this is never resolved).
+    1. A real (non-symlink) root `bernstein.yaml` already exists and no
+       `.bernstein/bernstein.yaml` does -> left completely alone,
+       regardless of template availability. A repo predating the
+       `.bernstein/` convention already satisfies the orchestrator; letting
+       a template silently spawn a NEW `.bernstein/bernstein.yaml` next to
+       it would supersede that file without telling anyone --
+       `find_seed_file()` checks `.bernstein/` first, so the operator's own
+       real file would stop being the one Bernstein actually reads.
+    2. Otherwise, if a template resolves (project-local or global) ->
+       `.bernstein/bernstein.yaml` is (re)written from it every call,
+       whether or not a file already sits there; the root symlink and
+       ignore entry are ensured as before.
+    3. Otherwise (no template), `.bernstein/bernstein.yaml` already exists
+       -> left untouched (nothing to regenerate FROM); the root symlink and
+       ignore entry are still ensured.
+    4. None of the above -> `None`; the caller proceeds and `bernstein run`
+       surfaces its own error.
+
+    Returns the real file now in place, or `None`.
     """
     workdir = Path(workdir)
     dot_bernstein_target = workdir / ".bernstein" / "bernstein.yaml"
     root_target = workdir / "bernstein.yaml"
 
+    if root_target.is_file() and not root_target.is_symlink() and not dot_bernstein_target.is_file():
+        return root_target
+
+    template = _resolve_template(workdir)
+    if template is not None:
+        dot_bernstein_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(template, dot_bernstein_target)
+        _ensure_root_link(workdir)
+        return dot_bernstein_target
+
     if dot_bernstein_target.is_file():
         _ensure_root_link(workdir)
         return dot_bernstein_target
-    if root_target.is_file() and not root_target.is_symlink():
-        return root_target
-
-    local_template = workdir / ".reasona" / "bernstein-template.yaml"
-    for source in (local_template, GLOBAL_BERNSTEIN_YAML):
-        if source.is_file():
-            dot_bernstein_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(source, dot_bernstein_target)
-            _ensure_root_link(workdir)
-            return dot_bernstein_target
     return None
 
 

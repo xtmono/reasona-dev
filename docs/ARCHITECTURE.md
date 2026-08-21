@@ -2536,6 +2536,47 @@ CI-fast gate, just via a different mechanism (`ci_gate.run_fast()`, called from
 `orchestrate._process_unit()`, not from this module at all). **Fixed**: reworded to point at the
 actual gate and its actual location.
 
+## 3.15 `bernstein.yaml` became a derived artifact, regenerated from its template every run
+
+A real incident on a target repo (`thaki-agent-security`, plan 49's PR1 pilot) traced back to
+`bernstein_config.ensure_bernstein_yaml()`'s original design: it copied a template into
+`.bernstein/bernstein.yaml` only the FIRST time a repo had neither file, then left whatever existed
+there untouched forever afterward. That repo's file was bootstrapped before this project's `,ocr`
+co-reviewer support existed; the template later gained a `role_model_policy.ocr_reviewer` entry
+(§3.14, the OCR co-reviewer section), but the already-materialized file never did. `role_model_policy`
+doubles as Bernstein's task-create ROLE ALLOWLIST (`POST /tasks` returns HTTP 400 for a role absent
+from it) -- so every `review: ...,ocr` run against that repo hard-blocked with "role/model unavailable
+-- hard blocker, never swap" (`cycle_gate.py:448`), even though the primary reviewer PASSed, because
+`finding_adapter.merge()` makes any one reviewer's ERROR poison the whole merged verdict. Nothing told
+the operator to go hand-diff the repo's `bernstein.yaml` against the current template; the gap was
+invisible until it hard-blocked a real run.
+
+**Fixed**: `ensure_bernstein_yaml()` now treats `.bernstein/bernstein.yaml` as a DERIVED artifact,
+the same way `bernstein_dispatch.write_role_plan()` already regenerates `plan.yaml` fresh on every
+role dispatch -- not a one-time seed. Whenever a template resolves (project-local `<workdir>/.reasona/
+bernstein-template.yaml`, then global), the file is (re)written from it on EVERY call, whether or not
+one already sits there. `sync_role_model_policy()` (unchanged) then layers the current run's resolved
+adapters on top, so a freshly-regenerated file is never a step behind either the template's role list
+or `model_config`'s resolved providers. The one case still left alone on purpose: a real (non-symlink)
+root `bernstein.yaml` with no `.bernstein/bernstein.yaml` yet -- a repo predating the `.bernstein/`
+convention already satisfies the orchestrator, and letting a template silently spawn a NEW
+`.bernstein/bernstein.yaml` next to it would supersede that file without telling anyone
+(`find_seed_file()` checks `.bernstein/` first).
+
+**Per-repo customization now has to live in the template, not in a hand-edit of the materialized
+file.** `worktree_setup.setup_command` (this project's own template comments already say "override
+per repo") would be silently discarded on the next regeneration if hand-edited directly in
+`.bernstein/bernstein.yaml` -- the fix is to give that repo its own `.reasona/bernstein-template.yaml`
+(project-local beats global, same cascade `reasona_dev.config_file` already uses for `reasona.yaml`),
+not to edit the derived file. A repo that runs more than one reasona-* tool against it (e.g. both
+reasona-dev and reasona-plan, as `thaki-agent-security` does) needs ONE project-local template
+declaring the UNION of every role either tool creates -- each tool's own template only lists its own
+roles, and regeneration replaces the role list outright rather than attempting to merge it with
+whatever the other tool last wrote (deciding which of two possibly-different `cli:`/`model_fallback:`
+sections should win isn't this function's call to make; the repo's own combined template is where
+that decision belongs). `reasona_plan.bernstein_config` ports the identical function for reasona-plan's
+own role set (`dev`, `reviewer`) -- see reasona-plan's own `docs/ARCHITECTURE.md`.
+
 ## 4. Directory structure
 
 ```
@@ -2566,7 +2607,7 @@ reasona-dev/
 │   ├── config_file.py        reasona-dev's own two-layer cfg (~/.reasona → <workdir>/.reasona, reasona.yaml)
 │   ├── ci_gate.py             local CI gate (ci.fast after every dev fix, ci.full before /gh-pr) — B-5, §3.14.10
 │   ├── open_decisions.py      the Open Decisions Gate — refuses an undecided plan entry before dispatch — B-1, §3.14.10
-│   ├── bernstein_config.py   automatic placement of the target repo's .bernstein/bernstein.yaml + role_model_policy sync (§3.5.3)
+│   ├── bernstein_config.py   regenerates the target repo's .bernstein/bernstein.yaml from its template every run + role_model_policy sync (§3.5.3, §3.15)
 │   ├── finding_adapter.py    parser for the `||` text contract + the external-skill KV contract (`parse_kv_contract`)
 │   ├── cycle_gate.py         result-invariant verification (inherited from dev-ralf's cycle_gate.py)
 │   ├── gate_check.py         the completion_signals(test_passes) entry point — merge/no-merge decision

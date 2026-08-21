@@ -101,7 +101,7 @@ reasona_dev/
   memory.py                        repo-scoped priors generated from cycles.jsonl
   prompt_profile.py            per-unit profile resolution, two-layer prompt lookup
   model_config.py / config_file.py   per-role model priority chain + 2-layer config cascade
-  bernstein_config.py          bootstraps/syncs a target repo's bernstein.yaml
+  bernstein_config.py          regenerates a target repo's bernstein.yaml from its template every run + syncs role_model_policy
   finding_adapter.py           text + KV contract parsers
   cycle_gate.py                  recheck routing, escalation, budget, convergence
   ci_gate.py                       local CI gate -- ci.fast after every dev fix (revert on failure), ci.full before /gh-pr
