@@ -58,13 +58,13 @@ def _seed_recurrence(workdir, path="crates/flow/src/a.rs"):
     memory.regenerate(workdir)
 
 
-def test_matching_priors_are_injected_into_review_and_scan_prompts(tmp_path, generic_prompts):
+def test_matching_priors_are_injected_into_review_and_scan_prompts(tmp_path, rust_dev_prompts):
     _seed_recurrence(tmp_path)
     fn = _recording_role_fn()
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 3", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", files=["crates/flow/src/b.rs"], run_role_fn=fn,
+        profile="rust-dev", files=["crates/flow/src/b.rs"], run_role_fn=fn,
     )
 
     by_role = {c["role"]: c["prompt"] for c in fn.calls}
@@ -73,19 +73,19 @@ def test_matching_priors_are_injected_into_review_and_scan_prompts(tmp_path, gen
     assert "PRIOR OBSERVATIONS" in by_role["compliance"]
 
 
-def test_unrelated_files_get_an_unchanged_prompt(tmp_path, generic_prompts):
+def test_unrelated_files_get_an_unchanged_prompt(tmp_path, rust_dev_prompts):
     _seed_recurrence(tmp_path)
     fn = _recording_role_fn()
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 3", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", files=["crates/unrelated/src/z.rs"], run_role_fn=fn,
+        profile="rust-dev", files=["crates/unrelated/src/z.rs"], run_role_fn=fn,
     )
 
     assert all("PRIOR OBSERVATIONS" not in c["prompt"] for c in fn.calls)
 
 
-def test_unit_declaring_no_files_gets_an_unchanged_prompt(tmp_path, generic_prompts):
+def test_unit_declaring_no_files_gets_an_unchanged_prompt(tmp_path, rust_dev_prompts):
     """No declared files means no retrieval key, and an unscoped memory
     would become a preamble on every prompt."""
     _seed_recurrence(tmp_path)
@@ -93,22 +93,22 @@ def test_unit_declaring_no_files_gets_an_unchanged_prompt(tmp_path, generic_prom
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 3", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
 
     assert all("PRIOR OBSERVATIONS" not in c["prompt"] for c in fn.calls)
 
 
-def test_fresh_repo_gets_an_unchanged_prompt(tmp_path, generic_prompts):
+def test_fresh_repo_gets_an_unchanged_prompt(tmp_path, rust_dev_prompts):
     fn = _recording_role_fn()
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", files=["crates/flow/src/a.rs"], run_role_fn=fn,
+        profile="rust-dev", files=["crates/flow/src/a.rs"], run_role_fn=fn,
     )
     assert all("PRIOR OBSERVATIONS" not in c["prompt"] for c in fn.calls)
 
 
-def test_memory_is_regenerated_after_the_cycle(tmp_path, generic_prompts):
+def test_memory_is_regenerated_after_the_cycle(tmp_path, rust_dev_prompts):
     """This cycle's findings must be available as the NEXT unit's priors."""
     cycles_log.record_dispatch(
         workdir=tmp_path, stage_name="pr-1", stage="review", cycle=1,
@@ -141,7 +141,7 @@ def test_memory_is_regenerated_after_the_cycle(tmp_path, generic_prompts):
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 2", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", stage_name="pr-2", files=["crates/flow/src/a.rs"], run_role_fn=_fn,
+        profile="rust-dev", stage_name="pr-2", files=["crates/flow/src/a.rs"], run_role_fn=_fn,
     )
 
     # now observed in pr-1 and pr-2 -> a memory file exists on disk
@@ -150,11 +150,11 @@ def test_memory_is_regenerated_after_the_cycle(tmp_path, generic_prompts):
     assert memory.select(tmp_path, ["crates/flow/src/a.rs"])
 
 
-def test_memory_regeneration_failure_never_fails_the_cycle(tmp_path, generic_prompts, monkeypatch):
+def test_memory_regeneration_failure_never_fails_the_cycle(tmp_path, rust_dev_prompts, monkeypatch):
     monkeypatch.setattr(memory, "regenerate", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     fn = _recording_role_fn()
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
     assert result.verdict == "PASS"

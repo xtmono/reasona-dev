@@ -110,7 +110,7 @@ def test_audit_is_skipped_when_the_profile_defines_no_prompt(tmp_path):
     assert "no final_audit prompt" in reason
 
 
-def test_audit_runs_on_the_final_audit_model(tmp_path, generic_prompts):
+def test_audit_runs_on_the_final_audit_model(tmp_path, rust_dev_prompts):
     seen = {}
 
     def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
@@ -122,14 +122,14 @@ def test_audit_runs_on_the_final_audit_model(tmp_path, generic_prompts):
 
     passed, _, _ = final_phase.run_final_audit(
         workdir=tmp_path, stage_name="pr-1", pr_title="t",
-        profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
+        profile="rust-dev", resolved=_RESOLVED, rundir=tmp_path / "r",
         budget=FixBudget(), recurrence=RecurrenceTracker(), run_role_fn=_fn,
     )
     assert passed
     assert seen["model"] == "opus"  # resolved["final_audit"]
 
 
-def test_audit_findings_spend_the_final_stage_budget(tmp_path, generic_prompts):
+def test_audit_findings_spend_the_final_stage_budget(tmp_path, rust_dev_prompts):
     """The `final` stage had no producer until now; MAX_FINAL_CYCLES bounds
     the audit's own fix loop."""
     budget = FixBudget()
@@ -144,7 +144,7 @@ def test_audit_findings_spend_the_final_stage_budget(tmp_path, generic_prompts):
 
     passed, reason, _ = final_phase.run_final_audit(
         workdir=tmp_path, stage_name="pr-1", pr_title="t",
-        profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
+        profile="rust-dev", resolved=_RESOLVED, rundir=tmp_path / "r",
         budget=budget, recurrence=RecurrenceTracker(), run_role_fn=_fn,
     )
     assert passed is False
@@ -186,7 +186,7 @@ def _ship_fn(*, passed=True, reason="ok"):
 def _tail(tmp_path, ship_gate_fn=None, **kw):
     return run_final_stage(
         workdir=tmp_path, stage_name="pr-1", pr_title="add subtract()",
-        unit_type="feat", unit=_UNIT, profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
+        unit_type="feat", unit=_UNIT, profile="rust-dev", resolved=_RESOLVED, rundir=tmp_path / "r",
         cycle_verdict="PASS", ship_gate_fn=ship_gate_fn or _ship_fn(),
         budget=FixBudget(), recurrence=RecurrenceTracker(), **kw,
     )
@@ -444,7 +444,7 @@ def test_a_failing_gh_review_blocks_before_squash_message_is_built(tmp_path, mon
     assert r.pr_url == "https://gh/pr/1"  # the PR itself still exists, just not merge-ready
 
 
-def test_a_gh_review_fix_commit_is_re_verified_by_the_final_audit(tmp_path, monkeypatch, generic_prompts):
+def test_a_gh_review_fix_commit_is_re_verified_by_the_final_audit(tmp_path, monkeypatch, rust_dev_prompts):
     """The actual defect this reorder fixes: gh-review's own fix commit
     (a CI failure / compliance fail / bugbot found repair) used to reach
     squash-merge with NOTHING re-verifying it -- the sync/final_audit/
@@ -471,7 +471,7 @@ def test_a_gh_review_fix_commit_is_re_verified_by_the_final_audit(tmp_path, monk
 
     r = run_final_stage(
         workdir=tmp_path, stage_name="pr-1", pr_title="add subtract()",
-        unit_type="feat", unit=_UNIT, profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
+        unit_type="feat", unit=_UNIT, profile="rust-dev", resolved=_RESOLVED, rundir=tmp_path / "r",
         cycle_verdict="PASS", ship_gate_fn=_ship_fn(), budget=FixBudget(), recurrence=RecurrenceTracker(),
         merge=True, run_role_fn=_fn,
     )
@@ -479,7 +479,7 @@ def test_a_gh_review_fix_commit_is_re_verified_by_the_final_audit(tmp_path, monk
     assert audit_calls  # the audit actually ran -- it used to never be reached after gh-review
 
 
-def test_a_failing_audit_blocks_the_squash_but_the_pr_already_exists(tmp_path, monkeypatch, generic_prompts):
+def test_a_failing_audit_blocks_the_squash_but_the_pr_already_exists(tmp_path, monkeypatch, rust_dev_prompts):
     """`final_audit` now runs AFTER gh-pr/gh-review (worker.md's actual
     *Final phase* position, docs/ARCHITECTURE.md §3.14.5) -- so a failing
     audit blocks the SQUASH-MERGE, not PR creation. The PR itself legitimately
@@ -495,7 +495,7 @@ def test_a_failing_audit_blocks_the_squash_but_the_pr_already_exists(tmp_path, m
 
     r = run_final_stage(
         workdir=tmp_path, stage_name="pr-1", pr_title="add subtract()",
-        unit_type="feat", unit=_UNIT, profile="generic", resolved=_RESOLVED, rundir=tmp_path / "r",
+        unit_type="feat", unit=_UNIT, profile="rust-dev", resolved=_RESOLVED, rundir=tmp_path / "r",
         cycle_verdict="PASS", ship_gate_fn=_ship_fn(), budget=budget, recurrence=RecurrenceTracker(),
         merge=True, run_role_fn=_fn,
     )
@@ -525,7 +525,7 @@ def test_final_phase_stops_immediately_on_a_substantive_sync_resolution(tmp_path
         return _ship_fn()(workdir, stage_name, cycle_verdict=cycle_verdict)
 
     decision, status, dispatches, reason = final_phase.run_final_phase(
-        workdir=tmp_path, stage_name="pr-1", pr_title="t", profile="generic",
+        workdir=tmp_path, stage_name="pr-1", pr_title="t", profile="rust-dev",
         resolved=_RESOLVED, rundir=tmp_path / "r", budget=FixBudget(),
         recurrence=RecurrenceTracker(), cycle_verdict="PASS", ship_gate_fn=ship_fn,
     )
@@ -553,7 +553,7 @@ def test_final_phase_reruns_from_sync_when_a_round_changed_something(tmp_path, m
     monkeypatch.setattr(final_phase, "should_run_final_audit", lambda budget: False)
 
     decision, status, dispatches, reason = final_phase.run_final_phase(
-        workdir=tmp_path, stage_name="pr-1", pr_title="t", profile="generic",
+        workdir=tmp_path, stage_name="pr-1", pr_title="t", profile="rust-dev",
         resolved=_RESOLVED, rundir=tmp_path / "r", budget=FixBudget(),
         recurrence=RecurrenceTracker(), cycle_verdict="PASS", ship_gate_fn=ship_fn,
     )
@@ -571,7 +571,7 @@ def test_final_phase_gives_up_if_it_never_settles(tmp_path, monkeypatch):
         return _ship_fn()(workdir, stage_name, cycle_verdict=cycle_verdict)
 
     decision, status, dispatches, reason = final_phase.run_final_phase(
-        workdir=tmp_path, stage_name="pr-1", pr_title="t", profile="generic",
+        workdir=tmp_path, stage_name="pr-1", pr_title="t", profile="rust-dev",
         resolved=_RESOLVED, rundir=tmp_path / "r", budget=FixBudget(),
         recurrence=RecurrenceTracker(), cycle_verdict="PASS", ship_gate_fn=ship_fn,
     )

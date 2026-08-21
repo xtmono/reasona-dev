@@ -486,12 +486,12 @@ def parse_role_output(text: str) -> ReviewResult:
     else -> text), which encodes an assumption that is false the moment a
     profile changes: the wire shape is a property of the PROMPT, not the
     role. dev-ralf's Rust-monorepo profile delegates bugbot to an external
-    skill that emits the KV block; this project's packaged `generic` profile
+    skill that emits the KV block; this project's own `rust-dev` profile
     asks for the same `||` text contract as review. Both are legitimate, and
     the role is `bugbot` either way.
 
-    Live consequence of getting this wrong: the generic bugbot and
-    compliance prompts produced perfectly well-formed text contracts, the
+    Live consequence of getting this wrong: the `rust-dev` profile's bugbot
+    and compliance prompts produced perfectly well-formed text contracts, the
     KV parser found no `BLOCKING_JSON=`, correctly reported that as
     `role_status=ERROR` ("missing block -> cycle FAIL"), and the whole scan
     stage aborted on output that had nothing wrong with it.

@@ -51,7 +51,7 @@ def _recording_role_fn(script_by_role_key):
     return _fn, calls
 
 
-def test_single_reviewer_default_dispatches_once(tmp_path, generic_prompts):
+def test_single_reviewer_default_dispatches_once(tmp_path, rust_dev_prompts):
     """No `review_all` key at all (old-shape `resolved` dict, as every
     pre-existing caller still passes) -- exactly one reviewer dispatch,
     unchanged from before this feature existed.
@@ -63,14 +63,14 @@ def test_single_reviewer_default_dispatches_once(tmp_path, generic_prompts):
     })
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED_BASE, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
     assert result.verdict == "PASS"
     review_calls = [c for c in calls if c[0] == "reviewer"]
     assert len(review_calls) == 1
 
 
-def test_multiple_reviewers_all_pass_merges_to_pass(tmp_path, generic_prompts):
+def test_multiple_reviewers_all_pass_merges_to_pass(tmp_path, rust_dev_prompts):
     resolved = dict(_RESOLVED_BASE)
     resolved["review_all"] = [
         ResolvedModel("review", "opus", "claude", "high", "flag"),
@@ -85,7 +85,7 @@ def test_multiple_reviewers_all_pass_merges_to_pass(tmp_path, generic_prompts):
     })
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
     assert result.verdict == "PASS"
     review_calls = [c for c in calls if c[1] in ("reviewer", "reviewer_2")]
@@ -93,7 +93,7 @@ def test_multiple_reviewers_all_pass_merges_to_pass(tmp_path, generic_prompts):
     assert [c[2] for c in review_calls] == ["claude", "codex"]
 
 
-def test_any_reviewer_must_fix_blocks_the_merged_verdict(tmp_path, generic_prompts):
+def test_any_reviewer_must_fix_blocks_the_merged_verdict(tmp_path, rust_dev_prompts):
     """`finding_adapter.merge()`'s own contract: ANY reviewer's MUST_FIX
     survives into the merged result, even when the other reviewer(s) came
     back clean -- this test only confirms the multi-reviewer dispatch
@@ -113,7 +113,7 @@ def test_any_reviewer_must_fix_blocks_the_merged_verdict(tmp_path, generic_promp
     })
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     # A fix cycle was dispatched (the merged review carried a MUST_FIX),
     # never a bare unconditional PASS despite reviewer #1 alone passing.
@@ -121,7 +121,7 @@ def test_any_reviewer_must_fix_blocks_the_merged_verdict(tmp_path, generic_promp
     assert len(fix_calls) >= 1
 
 
-def test_ocr_marker_dispatches_the_ocr_reviewer_once(tmp_path, generic_prompts):
+def test_ocr_marker_dispatches_the_ocr_reviewer_once(tmp_path, rust_dev_prompts):
     resolved = dict(_RESOLVED_BASE)
     resolved["review_all"] = [ResolvedModel("review", "sonnet", "claude", "high", "flag", ocr=True)]
     resolved["review_ocr_requested"] = True
@@ -133,7 +133,7 @@ def test_ocr_marker_dispatches_the_ocr_reviewer_once(tmp_path, generic_prompts):
     })
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
     assert result.verdict == "PASS"
     ocr_calls = [c for c in calls if c[0] == "ocr_reviewer"]
@@ -141,7 +141,7 @@ def test_ocr_marker_dispatches_the_ocr_reviewer_once(tmp_path, generic_prompts):
     assert ocr_calls[0][2] == "ocr"
 
 
-def test_no_ocr_marker_does_not_dispatch_ocr(tmp_path, generic_prompts):
+def test_no_ocr_marker_does_not_dispatch_ocr(tmp_path, rust_dev_prompts):
     resolved = dict(_RESOLVED_BASE)
     resolved["review_all"] = [ResolvedModel("review", "sonnet", "claude", "high", "flag", ocr=False)]
     resolved["review_ocr_requested"] = False
@@ -152,12 +152,12 @@ def test_no_ocr_marker_does_not_dispatch_ocr(tmp_path, generic_prompts):
     })
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
     assert not any(c[0] == "ocr_reviewer" for c in calls)
 
 
-def test_bounded_route_never_fans_out_to_multiple_reviewers_or_ocr(tmp_path, generic_prompts, monkeypatch):
+def test_bounded_route_never_fans_out_to_multiple_reviewers_or_ocr(tmp_path, rust_dev_prompts, monkeypatch):
     """The cheap bounded re-check exists to re-confirm a small,
     already-identified finding set, not to re-open full independent
     review -- so it stays single-reviewer even when `review_all` carries
@@ -188,7 +188,7 @@ def test_bounded_route_never_fans_out_to_multiple_reviewers_or_ocr(tmp_path, gen
 
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert result.verdict == "PASS"
     cycle2_reviewer_calls = [c for c in calls if c[0] == 2 and c[1] == "reviewer"]

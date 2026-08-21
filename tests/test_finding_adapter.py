@@ -334,7 +334,7 @@ def test_prompts_no_longer_teach_the_bracketed_notation():
     defect in the prompt, not just in the parser."""
     from pathlib import Path
 
-    for md in sorted((Path(__file__).resolve().parent.parent / ".reasona" / "prompts" / "generic").glob("*.md")):
+    for md in sorted((Path(__file__).resolve().parent.parent / ".reasona" / "prompts" / "rust-dev").glob("*.md")):
         text = md.read_text()
         if "MUST_FIX:" not in text:
             continue

@@ -71,7 +71,7 @@ from reasona_dev.prompt_profile import available_profiles, resolve_prompt
 # `finding_adapter.parse_role_output()`. This module used to keep a
 # role -> parser table (`bugbot`/`compliance` -> KV), which was correct only
 # for a profile that delegates those roles to dev-ralf's external skills.
-# The packaged `generic` profile asks all of them for the `||` text
+# This project's own `rust-dev` profile asks all of them for the `||` text
 # contract, and the table turned that valid output into a hard scan abort.
 
 
@@ -458,7 +458,7 @@ def _missing_prompt_reason(role: str, profile: str, workdir: Path) -> str:
     Prompts resolve through exactly two layers with nothing packaged
     underneath, so "not configured anywhere" is now a real and reachable
     state rather than an impossible one -- and the bare form of this message
-    ("no review prompt for profile 'generic'") cannot be told apart from a
+    ("no review prompt for profile 'rust-dev'") cannot be told apart from a
     typo'd profile name. Naming both searched paths and what IS present
     separates those two cases at the point of failure.
     """
@@ -826,8 +826,8 @@ def run_pr_cycle(
             # worker.md scopes the *Incomplete evidence* re-query to review
             # only -- its own bugbot/compliance are external skills with a
             # KV wire shape that never carries contract/scenario/fix at all
-            # ("not a bug to work around here"). This project's packaged
-            # `generic` profile asks bugbot/compliance for the SAME `||`
+            # ("not a bug to work around here"). This project's own
+            # `rust-dev` profile asks bugbot/compliance for the SAME `||`
             # text contract as review (parse_role_output()'s own docstring:
             # "the wire shape is a property of the PROMPT, not the role"),
             # so unlike dev-ralf's scan stage, this one CAN produce an

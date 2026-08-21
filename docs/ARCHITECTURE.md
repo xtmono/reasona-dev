@@ -508,11 +508,11 @@ and replaced with two modules:
 - **`reasona_dev/prompt_profile.py`** — makes review/recheck/bugbot/compliance/final_audit prompts
   swappable per language/project. The profile name is decided through the chain
   `flag > REASONA_DEV_PROFILE env var > the project reasona.yaml's dev-profile: > global >
-  "generic"`, and the actual `.md` files are looked up across exactly **two layers**:
+  "rust-dev"`, and the actual `.md` files are looked up across exactly **two layers**:
   `<workdir>/.reasona/prompts/<profile>/` → `~/.reasona/prompts/<profile>/` (the package layer was
   removed in §3.7.10). A profile that does not exist does not silently fall through to another
   profile — it returns `None` (reapplying the CONDUCTOR-COLLAPSE principle).
-  This repository commits `.reasona/prompts/generic/{review,recheck,bugbot,compliance,
+  This repository commits `.reasona/prompts/rust-dev/{review,recheck,bugbot,compliance,
   final_audit}.md` — review/final_audit port `worker.md`'s actual prompts verbatim (they were
   already language-neutral to begin with), while bugbot/compliance were written as self-contained
   defaults with no dependency on any external skill. The target repository itself can put an
@@ -1045,9 +1045,9 @@ profile name that does not exist.
 Priority is resolved **per file.** If a project overrides only `review.md`, `bugbot.md` still uses
 the global one. It is not a wholesale swap of the entire profile directory.
 
-This repository commits its own `.reasona/prompts/generic/`. It is the file this repository
+This repository commits its own `.reasona/prompts/rust-dev/`. It is the file this repository
 actually uses, while also serving as a checked-in example of what an operator would copy to
-`~/.reasona/prompts/generic/` to build the global layer — the same structure as
+`~/.reasona/prompts/rust-dev/` to build the global layer — the same structure as
 `.reasona/bernstein-template.yaml`.
 
 **Per-unit profiles.** Once a single repository mixes language modules, a single repo-wide
@@ -1063,11 +1063,11 @@ manifest (the same key `memory.select()` uses, so there is no added cost).
 | 1 | the pr_unit's own `profile:` — the author's explicit statement |
 | 2 | a `dev-profile-map:` glob match — declared once per repo |
 | 3 | `dev-profile:` — the repo's default |
-| 4 | `"generic"` |
+| 4 | `"rust-dev"` |
 
 A file that matches nothing in the mapping is **ignored**, not counted toward the default profile.
 A PR that touches both `crates/x/lib.rs` and `README.md` is a Rust PR; counting the README toward
-generic would cause a conflict on every documentation change.
+rust-dev would cause a conflict on every documentation change.
 
 **If a unit's files map to two profiles, it is rejected rather than resolved.** Picking the most
 specific glob, or a majority vote, would also be deterministic, but it would **silently** paper
@@ -1224,7 +1224,7 @@ affect the gate (PASS vs PASS_WITH_NOTES), nothing failed loudly — it simply n
 
 **bugbot/compliance's wire shape.** `pr_cycle` selected its parser by role name
 (`_KV_ROLES = {bugbot, compliance}` → KV parser). This assumed dev-ralf's Rust-monorepo profile,
-which delegates those roles to an external skill, but this project's packaged `generic` profile
+which delegates those roles to an external skill, but this project's own `rust-dev` profile
 requires all three roles to use the same `||` text contract. As a result, perfectly well-formed
 text output was judged "no BLOCKING_JSON → ERROR," and **the entire scan stage aborted.**
 
@@ -2043,7 +2043,7 @@ sent the finding to dev as-is. `pr_cycle._correct_incomplete_evidence()` now dis
 follow-up prompt per incomplete MUST_FIX, mutating `contract`/`scenario`/`fix` in place if the
 reply supplies them — the disposition never changes either way, matching worker.md exactly.
 worker.md scopes this to the review stage only (its own bugbot/compliance are external skills with
-a KV shape that never carries evidence fields at all); reasona-dev's packaged `generic` profile
+a KV shape that never carries evidence fields at all); reasona-dev's own `rust-dev` profile
 asks bugbot/compliance for the SAME `||` text contract as review, so it CAN produce an incomplete
 MUST_FIX there too — the correction round applies to the scan stage as well, the faithful
 adaptation rather than an extension beyond worker.md's intent. Since this project's dispatch layer
@@ -2158,7 +2158,7 @@ profile that ships no `recheck.md` (a supported configuration — "absent `reche
 it only means every cycle stays FULL") takes the FULL branch even on a genuinely BOUNDED route.
 Every such profile reported `scope_exceeded` from cycle 2 on, spending the PR's one escalation on a
 signal that never fired — and, because the allowance is one-shot, turning the NEXT genuine
-recurrence into a FAIL. The packaged `generic` profile does ship `recheck.md`, so the default
+recurrence into a FAIL. The `rust-dev` profile does ship `recheck.md`, so the default
 configuration was unaffected, which is why no test caught it.
 
 **5. gh-review had a budget stage dev-ralf does not have.** `budget.py`'s `STAGE_CAPS` is exactly

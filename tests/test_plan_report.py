@@ -91,7 +91,7 @@ def test_prose_and_short_tokens_are_not_treated_as_promised_names(tmp_path):
 
 def _outcome(stage_name, declared, changed):
     return UnitOutcome(
-        stage_name=stage_name, profile="generic", status="shipped", reason="ok",
+        stage_name=stage_name, profile="rust-dev", status="shipped", reason="ok",
         unit=_unit(index=stage_name, files=declared),
         tail=TailResult(stage_name=stage_name, status=MERGED, reason="ok", changed_files=changed),
     )
@@ -120,7 +120,7 @@ def test_an_undeclared_NON_source_file_is_not_reported():
 def test_a_unit_with_no_recorded_changed_files_is_counted_out_not_clean():
     """A unit that never reached the merge step has nothing to compare --
     counting it as clean would overstate the coverage of this report."""
-    out = UnitOutcome(stage_name="pr-1", profile="generic", status="failed", reason="x",
+    out = UnitOutcome(stage_name="pr-1", profile="rust-dev", status="failed", reason="x",
                       unit=_unit(files=["src/a.py"]))
     r = plan_report.scope_divergence([out])
     assert r.measured_units == 0

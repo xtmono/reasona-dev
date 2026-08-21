@@ -57,7 +57,7 @@ def _repo(tmp_path):
     repo = tmp_path / "repo"
     (repo / ".reasona").mkdir(parents=True)
     (repo / ".reasona" / "reasona.yaml").write_text(
-        "dev-profile: generic\n"
+        "dev-profile: rust-dev\n"
         "dev-profile-map:\n"
         '  "crates/**": rust\n'
         '  "services/**/*.py": python\n'
@@ -125,7 +125,7 @@ def test_conflicts_surface_before_anything_runs(tmp_path):
 def _up(index, depends_on=()):
     return UnitPlan(
         unit=PRUnit(index=index, title=index, depends_on=list(depends_on)),
-        stage_name=f"pr-{index}", profile="generic",
+        stage_name=f"pr-{index}", profile="rust-dev",
     )
 
 
@@ -683,7 +683,7 @@ def test_run_plan_job_flag_reaches_orchestrate(tmp_path, monkeypatch):
     def _fake_run_plan(**kw):
         seen["job"] = kw["job"]
         from reasona_dev.orchestrate import PlanRunResult, UnitOutcome
-        return PlanRunResult(outcomes=[UnitOutcome(stage_name="pr-1", profile="generic", status="shipped", reason="ok")])
+        return PlanRunResult(outcomes=[UnitOutcome(stage_name="pr-1", profile="rust-dev", status="shipped", reason="ok")])
 
     monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
     rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--job", "3"])

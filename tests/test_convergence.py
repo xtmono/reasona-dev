@@ -130,7 +130,7 @@ def test_inconclusive_aborts_at_the_cap_instead_of_retrying_forever():
     assert actions[-1] == "abort"
 
 
-def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, generic_prompts):
+def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, rust_dev_prompts):
     """The counter has to live in the driver: `evaluate` is stateless, so a
     caller that recomputes 0 every cycle can never reach the cap."""
     from pathlib import Path
@@ -158,7 +158,7 @@ def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, generic
 
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=_fn,
+        profile="rust-dev", run_role_fn=_fn,
     )
 
     # bounded, not infinite: 3 retries then abort -- ABORT, not FAIL, since

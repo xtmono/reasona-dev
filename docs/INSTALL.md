@@ -81,7 +81,7 @@ truncated one. **Keep `review` and `final_audit` at `high` or above.**
 ### 2.2 `prompts/<profile>/*.md` — role prompts
 
 No prompt is bundled in the package — missing at both layers means
-`resolve_prompt` returns `None` and the cycle aborts. The `generic`
+`resolve_prompt` returns `None` and the cycle aborts. The `rust-dev`
 profile needs 5 files: `review.md`, `recheck.md`, `bugbot.md`,
 `compliance.md`, `final_audit.md`.
 
@@ -127,7 +127,7 @@ Overrides the global layer **per file**.
 
 ```yaml
 # <repo>/.reasona/reasona.yaml
-dev-profile: generic
+dev-profile: rust-dev
 dev-profile-map:
   "crates/**": rust
   "services/**/*.py": python

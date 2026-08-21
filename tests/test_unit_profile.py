@@ -3,7 +3,7 @@ import pytest
 from reasona_dev.prompt_profile import ProfileConflict, resolve_unit_profile
 
 _CFG = {
-    "dev-profile": "generic",
+    "dev-profile": "rust-dev",
     "dev-profile-map": {
         "crates/**": "rust",
         "services/**/*.py": "python",
@@ -37,7 +37,7 @@ def test_map_matches_a_top_level_file_under_a_double_star_glob():
 
 def test_unmatched_files_are_ignored_not_treated_as_the_default():
     """A Rust PR that also edits README.md is a Rust PR -- counting the
-    README as 'generic' would manufacture a conflict from every doc change."""
+    README as 'rust-dev' would manufacture a conflict from every doc change."""
     got = resolve_unit_profile(
         files=["crates/flow/src/x.rs", "README.md", "docs/design.md"],
         unit_index="3", project_cfg=_CFG,
@@ -46,12 +46,12 @@ def test_unmatched_files_are_ignored_not_treated_as_the_default():
 
 
 def test_no_match_at_all_falls_back_to_the_repo_default():
-    got = resolve_unit_profile(files=["README.md"], unit_index="1", project_cfg=_CFG, fallback="generic")
-    assert got == "generic"
+    got = resolve_unit_profile(files=["README.md"], unit_index="1", project_cfg=_CFG, fallback="rust-dev")
+    assert got == "rust-dev"
 
 
 def test_no_files_declared_falls_back():
-    assert resolve_unit_profile(files=[], unit_index="1", project_cfg=_CFG) == "generic"
+    assert resolve_unit_profile(files=[], unit_index="1", project_cfg=_CFG) == "rust-dev"
 
 
 def test_project_map_beats_global_map_wholesale():
@@ -131,7 +131,7 @@ def _repo_with_map(tmp_path):
     repo = tmp_path / "repo"
     (repo / ".reasona").mkdir(parents=True)
     (repo / ".reasona" / "reasona.yaml").write_text(
-        "dev-profile: generic\n"
+        "dev-profile: rust-dev\n"
         "dev-profile-map:\n"
         '  "crates/**": rust\n'
         '  "services/**/*.py": python\n'

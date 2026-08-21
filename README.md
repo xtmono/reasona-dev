@@ -83,7 +83,7 @@ docs/ARCHITECTURE.md       design rationale and the full Bernstein source trace
 docs/INSTALL.md             setup, configuration, running
 bernstein.yaml              this repo's own seed config (see "bernstein.yaml" below)
 .reasona/reasona.yaml        this repo's own model_config layer, under `dev-models:`
-.reasona/prompts/generic/     this repo's own prompt profile
+.reasona/prompts/rust-dev/     this repo's own prompt profile
 reasona_dev/
   plan_compile.py           plan document -> bernstein plan.yaml (dev's cycle-0 step, `only_index` for one unit)
   orchestrate.py              runs a whole plan: per-unit worktree + cycle-0 dispatch, dependency order, per-unit profile
@@ -160,21 +160,21 @@ exactly two layers:
 Precedence is per file, not per profile directory. A repo with neither
 layer for a role gets `None` and the cycle aborts rather than silently
 falling back to a packaged default. This repo commits its own
-`.reasona/prompts/generic/` as the checked-in example to copy from.
+`.reasona/prompts/rust-dev/` as the checked-in example to copy from.
 
 **Mixed-language repos** resolve the profile per PR unit, from the `files:`
 it declares:
 
 ```yaml
 # <repo>/.reasona/reasona.yaml
-dev-profile: generic
+dev-profile: rust-dev
 dev-profile-map:
   "crates/**": rust
   "services/**/*.py": python
 ```
 
 Resolution order: unit's own `profile:` > `dev-profile-map:` glob match >
-`dev-profile:` > `"generic"`. A unit whose files match two profiles is
+`dev-profile:` > `"rust-dev"`. A unit whose files match two profiles is
 refused at compile time — split it or set `profile:` explicitly.
 
 ## Running a plan

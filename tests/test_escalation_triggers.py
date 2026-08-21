@@ -32,7 +32,7 @@ MUST_FIX_TEXT = (
 )
 
 
-def test_two_independent_reviewers_agreeing_escalates_on_the_first_cycle(tmp_path, generic_prompts):
+def test_two_independent_reviewers_agreeing_escalates_on_the_first_cycle(tmp_path, rust_dev_prompts):
     """worker.md's `cross_reviewer_convergence`: this is the ONLY trigger
     that can fire on cycle 1 -- `observed_recurrence` needs a prior
     completed fix to have already happened."""
@@ -62,13 +62,13 @@ def test_two_independent_reviewers_agreeing_escalates_on_the_first_cycle(tmp_pat
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert fix_models
     assert fix_models[0] == "opus"  # dev_escalation model, on the VERY FIRST fix dispatch
 
 
-def test_a_single_reviewer_finding_never_escalates_on_the_first_cycle(tmp_path, generic_prompts):
+def test_a_single_reviewer_finding_never_escalates_on_the_first_cycle(tmp_path, rust_dev_prompts):
     """Control: the SAME finding from only ONE reviewer must not trigger
     cross_reviewer_convergence -- proving the test above is measuring
     agreement, not merely "a MUST_FIX exists"."""
@@ -89,13 +89,13 @@ def test_a_single_reviewer_finding_never_escalates_on_the_first_cycle(tmp_path, 
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert fix_models
     assert fix_models[0] == "sonnet"  # the ordinary dev model, not escalated
 
 
-def test_scope_exceeded_escalates_when_the_full_route_follows_a_fix(tmp_path, generic_prompts, monkeypatch):
+def test_scope_exceeded_escalates_when_the_full_route_follows_a_fix(tmp_path, rust_dev_prompts, monkeypatch):
     """worker.md's `scope_exceeded`: the recheck route came back FULL
     (the previous fix's diff spilled outside the files its findings
     named) -- this cycle's fix earns the same one-time escalation."""
@@ -130,14 +130,14 @@ def test_scope_exceeded_escalates_when_the_full_route_follows_a_fix(tmp_path, ge
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert len(fix_models) >= 2
     assert fix_models[0] == "sonnet"  # cycle 1: no prior fix yet, not scope_exceeded
     assert fix_models[1] == "opus"    # cycle 2: FULL route after a fix -- scope_exceeded escalates
 
 
-def test_escalation_from_equals_escalation_to_reports_failed_without_a_wasted_dispatch(tmp_path, generic_prompts):
+def test_escalation_from_equals_escalation_to_reports_failed_without_a_wasted_dispatch(tmp_path, rust_dev_prompts):
     """worker.md: when `--dev-escalation` is configured down to match
     `--dev` (the exception path this guard exists for), a would-be
     escalated dispatch is skipped entirely -- the unit goes FAIL on the
@@ -168,7 +168,7 @@ def test_escalation_from_equals_escalation_to_reports_failed_without_a_wasted_di
 
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=resolved, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert result.verdict == "FAIL"
     assert fix_calls == []  # no dev dispatch at all -- the tier comparison alone decided it

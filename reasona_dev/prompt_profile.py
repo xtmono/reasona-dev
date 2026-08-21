@@ -37,11 +37,11 @@ The trade is explicit: a repo with neither layer present gets `None` and
 project chose. That is the same refusal `resolve_prompt` already makes for
 an unknown profile name, applied consistently.
 
-This repo commits its own `.reasona/prompts/generic/` -- both because it is
-what this repo actually runs on, and because it doubles as the checked-in
-example an operator copies to `~/.reasona/prompts/generic/` to set up their
-global layer, exactly as `.reasona/bernstein-template.yaml` does for the
-Bernstein seed.
+This repo commits its own `.reasona/prompts/rust-dev/` -- both because it
+is what this repo actually runs on, and because it doubles as the
+checked-in example an operator copies to `~/.reasona/prompts/rust-dev/` to
+set up their global layer, exactly as `.reasona/bernstein-template.yaml`
+does for the Bernstein seed.
 
 `<role>` is one of `review`/`recheck`/`bugbot`/`compliance`/`final_audit`
 in practice -- `dev` has no fixed prompt file of its own (dev-ralf-faithful:
@@ -59,10 +59,10 @@ it costs nothing new):
     pr_unit's own `profile:`     explicit, wins outright
     dev-profile-map: glob match  declared once per repo
     dev-profile:                 repo-wide default
-    "generic"                    built-in default name
+    "rust-dev"                   built-in default name
 
     # <repo>/.reasona/reasona.yaml
-    dev-profile: generic
+    dev-profile: rust-dev
     dev-profile-map:
       "crates/**": rust
       "services/**/*.py": python
@@ -84,7 +84,7 @@ import fnmatch
 import os
 from pathlib import Path
 
-DEFAULT_PROFILE = "generic"
+DEFAULT_PROFILE = "rust-dev"
 
 
 class ProfileConflict(ValueError):
@@ -148,7 +148,7 @@ def resolve_unit_profile(
     Otherwise every declared file is matched against `dev-profile-map`
     (project layer beats global, whole-block). Files matching nothing are ignored rather than treated as the
     default profile: a PR that edits `crates/x/lib.rs` and `README.md` is a
-    Rust PR, and counting the README as "generic" would manufacture a
+    Rust PR, and counting the README as "rust-dev" would manufacture a
     conflict out of every doc change.
 
     Raises `ProfileConflict` when the matched files disagree.
@@ -179,7 +179,7 @@ def resolve_profile_name(
     project_cfg: dict | None = None,
     global_cfg: dict | None = None,
 ) -> str:
-    """flag > REASONA_DEV_PROFILE env var > project `dev-profile:` > global > "generic".
+    """flag > REASONA_DEV_PROFILE env var > project `dev-profile:` > global > "rust-dev".
 
     `project_cfg`/`global_cfg` are the same loaded `reasona.yaml` dicts
     `reasona_dev.model_config.resolve()` takes -- callers that already
@@ -215,7 +215,7 @@ def resolve_prompt(role: str, *, profile: str, workdir: str | Path | None = None
     prompt override (caller decides the fallback, if any). This function
     never falls back to a DIFFERENT profile's files -- an operator who
     names a profile that doesn't exist gets None for every role, not a
-    silent slide back to "generic" (that would be exactly the kind of
+    silent slide back to "rust-dev" (that would be exactly the kind of
     silent substitution CONDUCTOR-COLLAPSE guards against elsewhere in
     this project). Since the packaged layer is gone (see module docstring),
     a repo with neither layer present gets None for every role too, for the
@@ -237,7 +237,7 @@ def available_profiles(workdir: str | Path | None = None) -> dict[str, list[str]
     """profile name -> sorted role names, merged across both layers.
 
     A diagnostic for the failure this layering makes possible: `pr_cycle`
-    aborting with "no review prompt for profile 'generic'" says what is
+    aborting with "no review prompt for profile 'rust-dev'" says what is
     missing but not what IS present, and an operator whose global layer was
     never set up has no way to tell that apart from a typo'd profile name.
     Project entries shadow global ones per (profile, role), matching

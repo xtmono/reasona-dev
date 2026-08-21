@@ -90,7 +90,7 @@ def _plan(tmp_path):
 def _shipped_result():
     from reasona_dev.orchestrate import PlanRunResult, UnitOutcome
 
-    return PlanRunResult(outcomes=[UnitOutcome(stage_name="pr-1", profile="generic", status="shipped", reason="ok")])
+    return PlanRunResult(outcomes=[UnitOutcome(stage_name="pr-1", profile="rust-dev", status="shipped", reason="ok")])
 
 
 def test_run_plan_defaults_to_no_ship_and_no_merge(tmp_path, monkeypatch):

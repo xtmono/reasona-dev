@@ -60,7 +60,7 @@ def _fn(script_by_key):
     return fn, calls
 
 
-def test_an_incomplete_finding_triggers_one_correction_dispatch(tmp_path, generic_prompts):
+def test_an_incomplete_finding_triggers_one_correction_dispatch(tmp_path, rust_dev_prompts):
     fn, calls = _fn({
         "reviewer": parse_text_contract(INCOMPLETE_MUST_FIX_TEXT),
         "reviewer-evidence-correction-1": parse_text_contract(CORRECTION_REPLY_TEXT),
@@ -70,12 +70,12 @@ def test_an_incomplete_finding_triggers_one_correction_dispatch(tmp_path, generi
     })
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert "reviewer-evidence-correction-1" in calls
 
 
-def test_a_complete_finding_never_triggers_a_correction_dispatch(tmp_path, generic_prompts):
+def test_a_complete_finding_never_triggers_a_correction_dispatch(tmp_path, rust_dev_prompts):
     fn, calls = _fn({
         "reviewer": parse_text_contract(COMPLETE_MUST_FIX_TEXT),
         "bugbot": parse_text_contract(PASS_TEXT),
@@ -84,12 +84,12 @@ def test_a_complete_finding_never_triggers_a_correction_dispatch(tmp_path, gener
     })
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert not any(c.startswith("reviewer-evidence-correction") for c in calls)
 
 
-def test_a_successful_correction_fills_in_the_evidence_fields_sent_to_dev(tmp_path, generic_prompts):
+def test_a_successful_correction_fills_in_the_evidence_fields_sent_to_dev(tmp_path, rust_dev_prompts):
     """The corrected contract/scenario/fix must be what actually reaches
     the dev-fix prompt -- proving the correction round's output is not
     merely dispatched and discarded."""
@@ -110,7 +110,7 @@ def test_a_successful_correction_fills_in_the_evidence_fields_sent_to_dev(tmp_pa
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=recording_fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=recording_fn, files=["src/a.rs"],
     )
     assert fix_prompts
     assert "filled-in contract" in fix_prompts[0]
@@ -118,7 +118,7 @@ def test_a_successful_correction_fills_in_the_evidence_fields_sent_to_dev(tmp_pa
     assert "filled-in fix" in fix_prompts[0]
 
 
-def test_the_finding_stays_must_fix_even_when_the_correction_cannot_supply_evidence(tmp_path, generic_prompts):
+def test_the_finding_stays_must_fix_even_when_the_correction_cannot_supply_evidence(tmp_path, rust_dev_prompts):
     """worker.md: 'regardless of the response, the ORIGINAL finding stays
     in must_fix' -- a correction reply that supplies no evidence must
     never downgrade the finding to ADVISORY or drop it."""
@@ -139,16 +139,16 @@ def test_the_finding_stays_must_fix_even_when_the_correction_cannot_supply_evide
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=recording_fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=recording_fn, files=["src/a.rs"],
     )
     # A dev-fix dispatch happened -- the finding was NOT silently dropped.
     assert fix_calls
     assert "src/a.rs" in fix_calls[0]
 
 
-def test_the_scan_stage_also_corrects_incomplete_bugbot_findings(tmp_path, generic_prompts):
+def test_the_scan_stage_also_corrects_incomplete_bugbot_findings(tmp_path, rust_dev_prompts):
     """Unlike dev-ralf's external tas-bugbot (a KV shape with no evidence
-    fields at all), this project's packaged `generic` profile asks bugbot
+    fields at all), this project's own `rust-dev` profile asks bugbot
     for the same evidence contract as review -- so the correction round
     applies here too (see the code comment at the scan-cycle call site)."""
     fn, calls = _fn({
@@ -160,12 +160,12 @@ def test_the_scan_stage_also_corrects_incomplete_bugbot_findings(tmp_path, gener
     })
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert "bugbot-evidence-correction-1" in calls
 
 
-def test_the_bounded_recheck_route_also_corrects_incomplete_findings(tmp_path, generic_prompts, monkeypatch):
+def test_the_bounded_recheck_route_also_corrects_incomplete_findings(tmp_path, rust_dev_prompts, monkeypatch):
     from reasona_dev import pr_cycle
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "BOUNDED")
 
@@ -192,6 +192,6 @@ def test_the_bounded_recheck_route_also_corrects_incomplete_findings(tmp_path, g
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn, files=["src/a.rs"],
+        profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert any(label == "reviewer-evidence-correction-1" for _, _, label in calls)

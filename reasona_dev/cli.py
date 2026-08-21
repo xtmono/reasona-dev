@@ -162,7 +162,7 @@ def _cmd_prompts(args: argparse.Namespace) -> int:
         print(
             f"no prompt profiles found.\nsearched: {workdir}/.reasona/prompts/ "
             "then ~/.reasona/prompts/\n"
-            "copy this repo's .reasona/prompts/generic/ into either location to start.",
+            "copy this repo's .reasona/prompts/rust-dev/ into either location to start.",
             file=sys.stderr,
         )
         return 1

@@ -53,13 +53,13 @@ _FIX_THEN_PASS = [
 ]
 
 
-def test_bounded_route_uses_the_recheck_model_and_prompt(tmp_path, generic_prompts, monkeypatch):
+def test_bounded_route_uses_the_recheck_model_and_prompt(tmp_path, rust_dev_prompts, monkeypatch):
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "BOUNDED")
     fn = _recording_role_fn(_FIX_THEN_PASS)
 
     result = run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
 
     assert result.verdict == "PASS"
@@ -73,13 +73,13 @@ def test_bounded_route_uses_the_recheck_model_and_prompt(tmp_path, generic_promp
     assert "|| contract: c" in reviewer_calls[1]["prompt"]
 
 
-def test_full_route_keeps_the_expensive_review_model(tmp_path, generic_prompts, monkeypatch):
+def test_full_route_keeps_the_expensive_review_model(tmp_path, rust_dev_prompts, monkeypatch):
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "FULL")
     fn = _recording_role_fn(_FIX_THEN_PASS)
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
 
     reviewer_calls = [c for c in fn.calls if c["role"] == "reviewer"]
@@ -102,7 +102,7 @@ def test_route_defaults_to_full_when_no_finding_files(tmp_path):
     assert pr_cycle._safe_recheck_route(tmp_path, "deadbeef", set()) == "FULL"
 
 
-def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, generic_prompts, monkeypatch):
+def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, rust_dev_prompts, monkeypatch):
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "BOUNDED")
     monkeypatch.setattr(pr_cycle, "_changed_files", lambda *a, **k: {"src/a.rs"})
     script = [
@@ -117,7 +117,7 @@ def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, generic_prom
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
 
     bugbot_calls = [c for c in fn.calls if c["role"] == "bugbot"]
@@ -126,7 +126,7 @@ def test_scan_bounded_route_restricts_scope_in_the_prompt(tmp_path, generic_prom
     assert "- src/a.rs" in bugbot_calls[1]["prompt"]
 
 
-def test_cycles_log_is_written_for_every_dispatch_and_decision(tmp_path, generic_prompts, monkeypatch):
+def test_cycles_log_is_written_for_every_dispatch_and_decision(tmp_path, rust_dev_prompts, monkeypatch):
     from reasona_dev import cycles_log
 
     monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "FULL")
@@ -134,7 +134,7 @@ def test_cycles_log_is_written_for_every_dispatch_and_decision(tmp_path, generic
 
     run_pr_cycle(
         workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
-        profile="generic", run_role_fn=fn,
+        profile="rust-dev", run_role_fn=fn,
     )
 
     rows = cycles_log.read_records(tmp_path)

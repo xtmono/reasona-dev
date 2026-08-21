@@ -8,8 +8,8 @@ REPO_PROMPTS = REPO_ROOT / ".reasona" / "prompts"
 
 
 @pytest.fixture
-def generic_prompts(tmp_path):
-    """Seed `<tmp_path>/.reasona/prompts/generic/` from this repo's own copy.
+def rust_dev_prompts(tmp_path):
+    """Seed `<tmp_path>/.reasona/prompts/rust-dev/` from this repo's own copy.
 
     Needed because prompt resolution has exactly two layers (project, then
     global) with nothing packaged underneath -- so a bare `tmp_path` repo
@@ -26,4 +26,4 @@ def generic_prompts(tmp_path):
     dest = tmp_path / ".reasona" / "prompts"
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_PROMPTS, dest)
-    return dest / "generic"
+    return dest / "rust-dev"
