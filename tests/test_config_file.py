@@ -65,21 +65,18 @@ def test_config_beats_hardcoded_default():
     assert r.model != "sonnet"  # would be the hardcoded default without config
 
 
-def test_bugbot_falls_back_to_compliance_config_slot_not_compliances_resolved_value():
-    # Same asymmetry as the env-var chain: bugbot must consult compliance's
-    # OWN config slot, never compliance's fully-resolved outcome (which
-    # could have come from a --compliance flag that must NOT propagate to
-    # bugbot).
+def test_bugbot_does_not_consult_compliances_config_slot():
+    # No cross-role fallback anywhere (SKILL.md): a `dev-models.compliance`
+    # config entry must never leak into bugbot's own resolution.
     project_cfg = {"dev-models": {"compliance": "sonnet-from-config"}}
     r = resolve("bugbot", env={}, project_cfg=project_cfg, global_cfg={})
-    assert r.model == "sonnet-from-config"
-    assert "via compliance fallback" in r.source
+    assert r.model == "deepseek-v4-pro"  # bugbot's OWN default, untouched
+    assert r.source == "default"
 
 
-def test_recheck_config_slot_beats_review_fallback():
-    review = resolve("review", env={}, project_cfg={}, global_cfg={})
+def test_recheck_config_slot_beats_its_own_default():
     project_cfg = {"dev-models": {"recheck": "sonnet-recheck-config"}}
-    r = resolve("recheck", env={}, project_cfg=project_cfg, global_cfg={}, review_resolved=review)
+    r = resolve("recheck", env={}, project_cfg=project_cfg, global_cfg={})
     assert r.model == "sonnet-recheck-config"
     assert r.source == "config:project:recheck"
 

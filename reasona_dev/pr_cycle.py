@@ -232,6 +232,37 @@ def _build_fix_prompt(pr_title: str, findings) -> str:
     )
 
 
+def _pr_unit_context_block(*, pr_index: str | None, pr_title: str, workdir: Path, section: str | None) -> str:
+    """The plan's own `## PR <N>:` section, plus the unit/worktree identity
+    every packaged prompt's closing `[Current PR unit]:`/`[Worktree]:` line
+    already asks for -- appended to a role's prompt the same way
+    `memory_block` is (a fixed-shape block the role reads, not a
+    placeholder substituted into the template text, so it works
+    identically against a customized profile that never had dev-ralf's
+    `<N>`/`<worktree_path>` markers to begin with).
+
+    `section` is `None` when a unit has no manifest entry to point at
+    (defensive -- `plan_compile.py` always sets `PRUnit.section` for a
+    validated plan) or when this dispatch is a bounded recheck confirming
+    findings rather than a full omission hunt; in either case the block
+    still names the unit and worktree, just without the prose to
+    cross-check against.
+    """
+    lines = [
+        "\n\n---",
+        f"[Current PR unit]: PR {pr_index or '?'} -- {pr_title}",
+        f"[Worktree]: {workdir}",
+    ]
+    if section and section.strip():
+        lines.append(
+            "\nThe plan's own `## PR " + (pr_index or "<N>") + ":` section for THIS unit "
+            "(authoritative -- cross-check every checklist item and every named file/symbol "
+            "against THIS worktree's actual diff):\n"
+        )
+        lines.append(section.strip())
+    return "\n".join(lines)
+
+
 def _build_recheck_prompt(recheck_profile_prompt: str, findings) -> str:
     """`recheck.md` + the exact findings to confirm.
 
@@ -491,6 +522,8 @@ def run_pr_cycle(
     files: list[str] | None = None,
     plan_name: str | None = None,
     resume: bool = False,
+    pr_index: str | None = None,
+    pr_section: str | None = None,
     run_role_fn=run_role,
 ) -> CycleResult:
     """develop -> review -> bug+compliance scan, worker.md-faithful.
@@ -515,6 +548,23 @@ def run_pr_cycle(
 
     `run_role_fn` is injectable purely for testing -- production callers
     never pass it.
+
+    **`pr_index`/`pr_section`** -- the plan's `## PR <N>: <title>` prose for
+    THIS unit (`plan_compile.PRUnit.section`), appended to every dispatched
+    reviewer/scanner prompt via `_pr_unit_context_block()`. Every packaged
+    prompt (`review.md` item 4, COMPLETENESS) instructs the role to
+    "enumerate EVERY checklist item ... named in the plan's `## PR <N>:`
+    section" -- without this, a reviewer running inside the unit's own
+    worktree has no way to see that section at all (dev-ralf's worker reads
+    it via `sed -n '<section_lines>p' "$plan_rel"` against a plan file path
+    it was spawned with; this driver has no equivalent path to give an
+    agent dispatched through `bernstein run`, so the section text is
+    embedded directly instead -- the same choice `plan_compile.py` already
+    makes for the dev role's own cycle-0 step, `"description": u.section`).
+    Omitting these two leaves the mandate that INCOMPLETE-MERGE (dev-ralf's
+    own failure catalog, rationale.md) exists to prevent structurally
+    unenforceable: the review prompt asks a question no dispatched agent
+    can answer.
     """
     workdir = Path(workdir)
     rundir = Path(rundir)
@@ -523,12 +573,19 @@ def run_pr_cycle(
     progress = ledger.load_progress(workdir, plan_name, stage_name) if (resume and plan_name) else None
 
     recurrence = RecurrenceTracker.from_dict(progress["recurrence"]) if progress else RecurrenceTracker()
-    review_budget = (
-        FixBudget.from_dict(progress["review_budget"]) if progress else FixBudget()
-    )
-    scan_budget = (
-        FixBudget.from_dict(progress["scan_budget"]) if progress else FixBudget()
-    )
+    # ONE shared pool across review, scan, final, sync and ship -- worker.md
+    # -> *Fix budget*: "review, scan, /gh-pr retries, final-audit, sync, ship
+    # fixes are ALL drawn from the same pool." `FixBudget` already tracks all
+    # five stages' per-stage caps plus one shared `total_used`; the review
+    # and scan loops below both spend against the SAME instance, not two
+    # separate `FixBudget()`s, so `MAX_TOTAL_FIX_CYCLES` actually bounds the
+    # whole PR the way it is documented to (previously: a `review_budget`
+    # that was never merged into `scan_budget` meant the real ceiling was
+    # review's 8 cycles PLUS whatever scan/final/sync/ship's own 16-cycle
+    # pool spent, up to 24 -- and `final_phase.should_run_final_audit()`
+    # read `scan_budget` alone, so a PR with review-only fixes and a clean
+    # scan looked exactly like a PR with zero fixes anywhere).
+    budget = FixBudget.from_dict(progress["budget"]) if progress else FixBudget()
     review_convergence = (
         ConvergenceTracker.from_dict(progress["review_convergence"]) if progress else ConvergenceTracker()
     )
@@ -567,6 +624,7 @@ def run_pr_cycle(
     # intersects -- so a fresh repo and an unrelated PR both get an unchanged
     # prompt rather than a growing preamble.
     memory_block = memory.render_for_prompt(memory.select(workdir, files or []))
+    pr_context_block = _pr_unit_context_block(pr_index=pr_index, pr_title=pr_title, workdir=workdir, section=pr_section)
 
     review_profile_prompt = resolve_prompt("review", profile=profile, workdir=workdir)
     if review_profile_prompt is None:
@@ -574,12 +632,14 @@ def run_pr_cycle(
             verdict="ABORT", stage="review",
             reason=_missing_prompt_reason("review", profile, workdir),
         )
-    review_profile_prompt += memory_block
+    review_profile_prompt += memory_block + pr_context_block
     # Absent `recheck.md` is not fatal -- it only means every cycle stays
     # FULL, which is the pre-existing behaviour. A profile opts into the
     # cheaper path by shipping the file, and never silently gets a bounded
     # review it did not define the contract for.
     recheck_profile_prompt = resolve_prompt("recheck", profile=profile, workdir=workdir)
+    if recheck_profile_prompt is not None:
+        recheck_profile_prompt += pr_context_block
 
     resuming_into_scan = bool(progress) and progress.get("phase") == "scan"
 
@@ -589,7 +649,7 @@ def run_pr_cycle(
             phase=phase, review_cycle=review_cycle, route=route,
             pending_confirm=[f.to_dict() for f in pending_confirm],
             scan_cycle=scan_cycle, scope_suffix=scope_suffix,
-            review_budget=review_budget.to_dict(), scan_budget=scan_budget.to_dict(),
+            budget=budget.to_dict(),
             review_convergence=review_convergence.to_dict(), scan_convergence=scan_convergence.to_dict(),
             review_inconclusive=review_inconclusive, scan_inconclusive=scan_inconclusive,
             recurrence=recurrence.to_dict(),
@@ -715,7 +775,7 @@ def run_pr_cycle(
             # intersection can exist yet (see `RecurrenceTracker.record_cycle`).
             recurrence.record_cycle(result.review_result.must_fix)
             decision = evaluate(
-                result.review_result, review_budget, "review", recurrence,
+                result.review_result, budget, "review", recurrence,
                 inconclusive_attempts=review_inconclusive,
                 escalation_model=resolved["dev_escalation"].model,
                 convergence=review_convergence,
@@ -786,8 +846,8 @@ def run_pr_cycle(
                 review_cycles=review_cycles_used, role_results=role_results,
             )
         if bugbot_prompt is not None:
-            bugbot_prompt += memory_block
-        compliance_prompt += memory_block
+            bugbot_prompt += memory_block + pr_context_block
+        compliance_prompt += memory_block + pr_context_block
 
         cycle = progress["scan_cycle"] if resuming_into_scan else 0
         scope_suffix = progress["scope_suffix"] if resuming_into_scan else ""
@@ -861,7 +921,7 @@ def run_pr_cycle(
             )
             recurrence.record_cycle(merged.must_fix)
             decision = evaluate(
-                merged, scan_budget, "scan", recurrence,
+                merged, budget, "scan", recurrence,
                 inconclusive_attempts=scan_inconclusive,
                 escalation_model=resolved["dev_escalation"].model,
                 convergence=scan_convergence,
@@ -909,7 +969,7 @@ def run_pr_cycle(
         return CycleResult(
             verdict="PASS", stage="scan", reason="review + bug/compliance scan clean",
             review_cycles=review_cycles_used, scan_cycles=cycle, role_results=role_results,
-            budget=scan_budget, recurrence=recurrence,
+            budget=budget, recurrence=recurrence,
         )
     finally:
         # Regenerated from the records this cycle just appended, so the NEXT

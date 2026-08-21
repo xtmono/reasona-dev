@@ -230,3 +230,56 @@ def test_port_reaches_every_run_role_fn_dispatch(tmp_path, rust_dev_prompts):
     assert result.verdict == "PASS"
     assert seen_ports  # at least one dispatch happened
     assert all(p == 19999 for p in seen_ports)
+
+
+def test_review_and_scan_fix_cycles_share_one_budget_pool(tmp_path, rust_dev_prompts):
+    """A-2 regression: `review_budget`/`scan_budget` used to be two
+    separate `FixBudget()` instances, so a review-stage fix never counted
+    toward the PR's total. Here review needs one fix and scan is clean --
+    the returned budget's `total_used` must reflect the review fix, and
+    `should_run_final_audit()` (which reads `total_used` alone) must see
+    it, exactly the case that used to look identical to zero fixes
+    anywhere."""
+    from reasona_dev.final_phase import should_run_final_audit
+
+    script = [
+        parse_text_contract(MUST_FIX_TEXT),  # review c1: FIX_REQUIRED
+        ReviewResult(role_status=RoleStatus.COMPLETE),  # dev fix
+        parse_text_contract(PASS_TEXT),  # review c2: PASS
+        parse_text_contract(PASS_TEXT),  # bugbot: clean
+        parse_text_contract(PASS_TEXT),  # compliance: clean
+    ]
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="rust-dev", run_role_fn=_stub_role_fn(script=script),
+    )
+    assert result.verdict == "PASS"
+    assert result.budget is not None
+    assert result.budget.review_cycles == 1
+    assert result.budget.total_used == 1  # the review fix counted against the SHARED pool
+    assert should_run_final_audit(result.budget) is True
+
+
+def test_pr_section_is_appended_to_the_review_prompt(tmp_path, rust_dev_prompts):
+    """A-1 regression: without the plan's own `## PR <N>:` section in the
+    prompt, a dispatched reviewer has no way to execute the review
+    prompt's own COMPLETENESS mandate ("enumerate every checklist item ...
+    named in the plan's section"). `run_pr_cycle(pr_index=..., pr_section=...)`
+    must thread that text into the review dispatch."""
+    seen_prompts = []
+
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        seen_prompts.append(prompt)
+        return RoleRunResult(role=label or role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT), raw_output_path=Path("/dev/null"))
+
+    section = "**Items**:\n- [ ] implement resolve_flow_part_compat\n- [ ] add DimensionProfile.risk_model"
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 3: Add flow compat", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="rust-dev", run_role_fn=fn, pr_index="3", pr_section=section,
+    )
+    assert result.verdict == "PASS"
+    review_prompt = seen_prompts[0]
+    assert "resolve_flow_part_compat" in review_prompt
+    assert "DimensionProfile.risk_model" in review_prompt
+    assert "PR 3" in review_prompt
+    assert str(tmp_path) in review_prompt  # the worktree identity is also present

@@ -359,6 +359,8 @@ def _process_unit(
             plan_name=plan_name,
             resume=resume,
             files=up.unit.files,
+            pr_index=up.index,
+            pr_section=up.unit.section,
             port=port,
         )
 

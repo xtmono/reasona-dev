@@ -480,10 +480,28 @@ def evaluate(
 
     if action == "escalate":
         if dev_model is not None and dev_model == escalation_model:
+            # worker.md: "skip the redundant dispatch and go straight to
+            # the outcome a NON-ESCALATED fix would have reached" -- that
+            # outcome depends on WHICH trigger fired. For observed_recurrence
+            # the non-escalated outcome is the key's second unresolved
+            # occurrence, i.e. immediate FAIL. For cross_reviewer_convergence
+            # and scope_exceeded, a non-escalated fix would have been an
+            # ordinary spawn_fix (worker.md never routes those two straight
+            # to FAIL) -- so THIS guard must fall through to the same,
+            # spending budget normally, rather than failing the PR on a
+            # trigger that was never a stop-the-world signal on its own.
+            if trigger == "observed_recurrence":
+                return GateDecision(
+                    "fail",
+                    f"escalation_from == escalation_to ({escalation_model}) -- no capability "
+                    "increase, skipping the redundant dispatch",
+                    escalation_trigger=trigger,
+                )
+            budget.spend(stage)
             return GateDecision(
-                "fail",
-                f"escalation_from == escalation_to ({escalation_model}) -- no capability "
-                "increase, skipping the redundant dispatch",
+                "spawn_fix",
+                f"{trigger} -- escalation_from == escalation_to ({escalation_model}), "
+                "no capability increase: dispatching a normal (non-escalated) fix instead",
                 escalation_trigger=trigger,
             )
         budget.spend(stage)

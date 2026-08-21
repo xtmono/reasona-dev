@@ -399,3 +399,27 @@ def test_a_severity_line_outside_any_section_is_not_invented_into_a_finding():
     report must not become findings."""
     out = "Some preamble mentioning - [HIGH] nothing in particular\n\nVERDICT: PASS\n"
     assert parse_text_contract(out).gate() == "PASS"
+
+
+def test_convergent_keys_groups_by_location_not_full_key():
+    """A-5 regression: two independent reviewers describing the SAME real
+    defect at the SAME path::symbol, but in their OWN words, must still
+    read as cross_reviewer_convergence -- grouping by `Finding.key()`
+    (which folds the description text in) required near-verbatim wording
+    agreement between two different models, which they essentially never
+    produce, leaving this trigger dead in practice."""
+    same_location_worded_differently = """\
+MUST_FIX:
+- [HIGH] src/session.rs:142 rotate_token
+  || contract: a stale token must not still authenticate after rotation
+  || scenario: replay the old token immediately after rotating it
+  || fix: check the token generation counter before accepting it
+
+VERDICT: FAIL
+"""
+    r1 = parse_text_contract(SAMPLE)
+    r2 = parse_text_contract(same_location_worded_differently)
+    assert r1.must_fix[0].key() != r2.must_fix[0].key()  # different wording -> different key
+    assert r1.must_fix[0].location() == r2.must_fix[0].location()  # same path::symbol
+    result = convergent_keys(r1, r2)
+    assert result == {r1.must_fix[0].key(), r2.must_fix[0].key()}

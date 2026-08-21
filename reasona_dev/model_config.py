@@ -1,28 +1,35 @@
 """Per-role model/adapter/effort resolution with priority chains and recorded provenance.
 
-Ports dev-ralf-renewal-claude.md §3.7 onto reasona-dev, renaming the env
-vars (`DEV_RALF_*` -> `REASONA_DEV_*`) but keeping the exact same priority
-order and defaults (dev-ralf-renewal-codex.md §7 model topology).
+Matches dev-ralf's CURRENT `SKILL.md` model-resolution table exactly, not
+an earlier `dev-ralf-renewal-*.md` design that has since been superseded
+(SKILL.md line 133: "**Each row is self-contained: no row's resolution
+ever consults another row's flag or env var** ... there is no cross-role
+fallback anywhere in this table"; `rationale.md` -> *Role resolution*
+records the two earlier drafts that DID chain across roles -- a `bugbot`/
+`dev-escalation`/`final-audit` fallback to `compliance`'s slot, and a
+`recheck` fallback to `review`'s resolved outcome -- and why both were
+abandoned: "it coupled unrelated roles' configuration, and made the
+effective model of any one role a function of three variables instead of
+one"). This module used to implement exactly those two abandoned designs;
+it no longer does. Every role, including `recheck`, `bugbot` and
+`final_audit`, resolves through the SAME flat chain:
 
-    flag > env var > project config file > global config file > default
+    flag > own env var > project config file > global config file > own hardcoded default
+
+    dev:            --dev            -> REASONA_DEV_DEV_MODEL            -> project cfg -> global cfg -> claude:sonnet:high
+    review:         --review         -> REASONA_DEV_REVIEW_MODEL         -> project cfg -> global cfg -> claude:opus:high
+    recheck:        --recheck        -> REASONA_DEV_RECHECK_MODEL        -> project cfg -> global cfg -> claude:sonnet:high
+    bugbot:         --bugbot         -> REASONA_DEV_BUGBOT_MODEL         -> project cfg -> global cfg -> kilo:deepseek-v4-pro:high
+    compliance:     --compliance     -> REASONA_DEV_COMPLIANCE_MODEL     -> project cfg -> global cfg -> claude:sonnet:high
+    final_audit:    --final-audit    -> REASONA_DEV_FINAL_AUDIT_MODEL    -> project cfg -> global cfg -> claude:opus:high
+    dev_escalation: --dev-escalation -> REASONA_DEV_DEV_ESCALATION_MODEL -> project cfg -> global cfg -> claude:opus:high
 
 Every layer accepts the SAME string shape dev-ralf itself used
 (`DEV_RALF_DEV_MODEL=claude:sonnet:high`, i.e. `tool:model:effort` -- see
-`_split_composite`), not just a bare model name. This is what closes the
-gap this module used to have: the adapter (`claude`/`kilo`/...) and effort
-were previously hardcoded as literals in `review_pipeline.py` and simply
-absent from `plan_compile.py`'s generated step -- neither followed this
-priority chain at all. A bare string (no `:`) still works and is treated as
-"override the model only, keep this role's default adapter/effort" -- so
-existing `--dev opus`-style flags/config entries are unaffected.
-
-    dev:          --dev         -> REASONA_DEV_DEV_MODEL         -> project cfg -> global cfg -> claude:sonnet:high
-    review:       --review      -> REASONA_DEV_REVIEW_MODEL      -> project cfg -> global cfg -> claude:opus:high
-    recheck:      --recheck     -> REASONA_DEV_RECHECK_MODEL     -> project cfg -> global cfg -> resolved review spec
-    bugbot:       --bugbot      -> REASONA_DEV_BUGBOT_MODEL      -> project cfg -> global cfg -> [compliance slot, same 4 steps] -> kilo:deepseek-v4-pro:high
-    compliance:   --compliance  -> REASONA_DEV_COMPLIANCE_MODEL  -> project cfg -> global cfg -> claude:sonnet:high
-    final_audit:  --final-audit -> REASONA_DEV_FINAL_AUDIT_MODEL -> project cfg -> global cfg -> [compliance slot, same 4 steps] -> claude:opus:high
-    dev_escalation: --dev-escalation -> REASONA_DEV_DEV_ESCALATION_MODEL -> project cfg -> global cfg -> claude:opus:high
+`_split_composite`), not just a bare model name. A bare string (no `:`)
+still works and is treated as "override the model only, keep this role's
+default adapter/effort" -- so existing `--dev opus`-style flags/config
+entries are unaffected.
 
 This module never applies BERNSTEIN_ROUTING (bandit) logic -- it is the
 single source of truth for the `model:`/adapter/`effort:` values written
@@ -32,10 +39,10 @@ treats an explicit `model:` as authoritative regardless of routing mode
 run "dev-ralf-faithful": whatever this module picks is exactly what
 executes, nothing adaptive, nothing hardcoded downstream.
 
-CONDUCTOR-COLLAPSE guard (dev-ralf-renewal-claude.md §3.7, condition 2):
-every resolution records not just the value but WHERE it came from
-(flag/env/config/fallback/default) so a wrong model is diagnosable after
-the fact -- never re-derive silently at a later point in the pipeline.
+CONDUCTOR-COLLAPSE guard: every resolution records not just the value but
+WHERE it came from (flag/env/config/default) so a wrong model is
+diagnosable after the fact -- never re-derive silently at a later point in
+the pipeline.
 """
 
 from __future__ import annotations
@@ -50,21 +57,18 @@ from reasona_dev import config_file
 # role: (model, adapter, effort) -- the ONLY place a model/adapter/effort
 # default may be written as a literal in this project. Every consumer
 # (plan_compile.py, pr_cycle.py, plugin.py) reads a ResolvedModel
-# instead of naming an adapter or effort itself.
+# instead of naming an adapter or effort itself. `recheck` has its OWN
+# entry here (SKILL.md's own default: claude:sonnet:high) -- it does not
+# borrow review's.
 _DEFAULTS: dict[str, tuple[str, str, str]] = {
     "dev": ("sonnet", "claude", "high"),
     "review": ("opus", "claude", "high"),
+    "recheck": ("sonnet", "claude", "high"),
     "bugbot": ("deepseek-v4-pro", "kilo", "high"),
     "compliance": ("sonnet", "claude", "high"),
     "final_audit": ("opus", "claude", "high"),
     "dev_escalation": ("opus", "claude", "high"),
 }
-
-# "recheck" has no bare-model default of its own -- it fully inherits
-# review's resolved spec when nothing overrides it (see resolve()) -- but
-# still needs an adapter/effort to apply IF something overrides only the
-# model (e.g. a bare `--recheck sonnet` flag).
-_RECHECK_FALLBACK_ADAPTER_EFFORT: tuple[str, str] = ("claude", "high")
 
 # Bernstein's own role vocabulary (plan.yaml step `role`, review.yaml agent
 # `role`) differs from this module's role keys. This is the single
@@ -128,13 +132,8 @@ def _split_composite(raw: str) -> tuple[str | None, str, str | None, bool]:
     return parts[0], parts[1], effort, ocr
 
 
-def _role_defaults(role: str) -> tuple[str | None, str, str]:
-    if role in _DEFAULTS:
-        return _DEFAULTS[role]
-    if role == "recheck":
-        adapter, effort = _RECHECK_FALLBACK_ADAPTER_EFFORT
-        return None, adapter, effort
-    raise KeyError(f"no defaults registered for role {role!r}")
+def _role_defaults(role: str) -> tuple[str, str, str]:
+    return _DEFAULTS[role]
 
 
 def _env(var: str, env: dict[str, str]) -> str | None:
@@ -160,9 +159,13 @@ def resolve(
     env: dict[str, str] | None = None,
     project_cfg: dict | None = None,
     global_cfg: dict | None = None,
-    review_resolved: ResolvedModel | None = None,
 ) -> ResolvedModel:
-    """Resolve one role.
+    """Resolve one role: flag -> its OWN env var -> project cfg -> global
+    cfg -> its OWN hardcoded default. Every role takes this exact same
+    path -- no role's resolution ever reads another role's flag, env var,
+    or resolved value (SKILL.md: "no cross-role fallback anywhere in this
+    table"; see the module docstring for the two designs that used to do
+    this and were abandoned).
 
     `env` defaults to `os.environ`; `project_cfg`/`global_cfg` default to
     loading nothing (`{}`) rather than touching the filesystem, so tests
@@ -173,25 +176,15 @@ def resolve(
     Every raw string accepted at any layer (`flag`, the env var, or a
     `models.<role>` config entry) may be either a bare model name or the
     full `tool:model:effort` composite (see `_split_composite`) -- a bare
-    name only overrides the model, leaving this role's adapter/effort
-    defaults (or, for `recheck`, review's resolved adapter/effort) in place.
-
-    `review_resolved` is the already-resolved `review` outcome that
-    `recheck` falls back onto ("first-pass reviewers" per
-    dev-ralf-renewal-claude.md §3.7) -- callers resolve `review` first and
-    pass it through. `bugbot`
-    and `final_audit` do NOT take an equivalent `compliance_resolved` parameter:
-    per the same spec they fall back only to the `compliance` role's OWN env
-    var / config-file slot, never to compliance's fully-resolved value (see the
-    `bugbot`/`final_audit` branch below for why that distinction matters --
-    this was a real bug in an earlier draft, see tests/test_model_config.py
-    `test_bugbot_does_not_inherit_compliances_own_default`).
+    name only overrides the model, leaving this role's own default
+    adapter/effort in place.
     """
     env = env if env is not None else dict(os.environ)
     project_cfg = project_cfg if project_cfg is not None else {}
     global_cfg = global_cfg if global_cfg is not None else {}
+    fb_model, fb_adapter, fb_effort = _role_defaults(role)
 
-    def _spec_from(raw: str, source: str, fb_adapter: str, fb_effort: str) -> ResolvedModel:
+    def _spec_from(raw: str, source: str) -> ResolvedModel:
         adapter, model, effort, ocr = _split_composite(raw)
         return ResolvedModel(
             role=role,
@@ -203,61 +196,16 @@ def resolve(
         )
 
     if flag:
-        _, fb_adapter, fb_effort = _role_defaults(role)
-        return _spec_from(flag, "flag", fb_adapter, fb_effort)
+        return _spec_from(flag, "flag")
 
-    if role == "recheck":
-        _, fb_adapter, fb_effort = _role_defaults("recheck")
-        env_val = _env(_ENV_VARS["recheck"], env)
-        if env_val:
-            return _spec_from(env_val, f"env:{_ENV_VARS['recheck']}", fb_adapter, fb_effort)
-        cfg_hit = _config("recheck", project_cfg, global_cfg)
-        if cfg_hit:
-            return _spec_from(cfg_hit[0], cfg_hit[1], fb_adapter, fb_effort)
-        if review_resolved is not None:
-            return ResolvedModel(
-                role=role,
-                model=review_resolved.model,
-                adapter=review_resolved.adapter,
-                effort=review_resolved.effort,
-                source="fallback:review",
-            )
-        # recheck resolved before review somehow -- fall through to review's own chain
-        return resolve("review", env=env, project_cfg=project_cfg, global_cfg=global_cfg)
-
-    if role in ("bugbot", "final_audit"):
-        # dev-ralf-renewal-claude.md §3.7: these fall back to the
-        # `compliance` role's OWN slot (env var, then config file) -- never to
-        # compliance's fully-resolved value. A bare `--compliance` flag (with no
-        # COMPLIANCE_MODEL env var or models.compliance config entry) does NOT
-        # propagate here, and compliance's own DEFAULT does not either. Only
-        # `recheck` inherits a sibling role's fully-resolved outcome
-        # ("first-pass reviewers"); bugbot/final_audit consult compliance's raw slot.
-        _, fb_adapter, fb_effort = _role_defaults(role)
-        env_val = _env(_ENV_VARS[role], env)
-        if env_val:
-            return _spec_from(env_val, f"env:{_ENV_VARS[role]}", fb_adapter, fb_effort)
-        cfg_hit = _config(role, project_cfg, global_cfg)
-        if cfg_hit:
-            return _spec_from(cfg_hit[0], cfg_hit[1], fb_adapter, fb_effort)
-        compliance_env = _env(_ENV_VARS["compliance"], env)
-        if compliance_env:
-            return _spec_from(compliance_env, f"env:{_ENV_VARS['compliance']} (via compliance fallback)", fb_adapter, fb_effort)
-        compliance_cfg_hit = _config("compliance", project_cfg, global_cfg)
-        if compliance_cfg_hit:
-            value, source = compliance_cfg_hit
-            return _spec_from(value, f"{source} (via compliance fallback)", fb_adapter, fb_effort)
-        fb_model, _, _ = _role_defaults(role)
-        return ResolvedModel(role=role, model=fb_model, adapter=fb_adapter, effort=fb_effort, source="default")
-
-    # dev / review / compliance / dev_escalation: flag -> own env var -> project cfg -> global cfg -> default
-    fb_model, fb_adapter, fb_effort = _role_defaults(role)
     env_val = _env(_ENV_VARS[role], env)
     if env_val:
-        return _spec_from(env_val, f"env:{_ENV_VARS[role]}", fb_adapter, fb_effort)
+        return _spec_from(env_val, f"env:{_ENV_VARS[role]}")
+
     cfg_hit = _config(role, project_cfg, global_cfg)
     if cfg_hit:
-        return _spec_from(cfg_hit[0], cfg_hit[1], fb_adapter, fb_effort)
+        return _spec_from(cfg_hit[0], cfg_hit[1])
+
     return ResolvedModel(role=role, model=fb_model, adapter=fb_adapter, effort=fb_effort, source="default")
 
 
@@ -297,7 +245,10 @@ def resolve_all(
     workdir: str | Path | None = None,
     load_config_files: bool = True,
 ) -> dict:
-    """Resolve every role in the correct dependency order (review first).
+    """Resolve every role. No role depends on another's resolved value
+    (see `resolve()`'s own docstring), so there is no ordering constraint
+    here beyond needing `reviewers`/`review` computed before they are read
+    into the returned dict below.
 
     When `load_config_files` is True (default), actually reads
     `~/.reasona/reasona.yaml` and `<workdir>/.reasona/reasona.yaml` from disk
@@ -342,10 +293,7 @@ def resolve_all(
         "review": review,
         "review_all": reviewers,
         "review_ocr_requested": any(r.ocr for r in reviewers),
-        "recheck": resolve(
-            "recheck", flag=flags.get("recheck"), env=env,
-            project_cfg=project_cfg, global_cfg=global_cfg, review_resolved=review,
-        ),
+        "recheck": resolve("recheck", flag=flags.get("recheck"), env=env, project_cfg=project_cfg, global_cfg=global_cfg),
         "compliance": resolve("compliance", flag=flags.get("compliance"), env=env, project_cfg=project_cfg, global_cfg=global_cfg),
         "bugbot": resolve("bugbot", flag=flags.get("bugbot"), env=env, project_cfg=project_cfg, global_cfg=global_cfg),
         "final_audit": resolve(

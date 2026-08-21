@@ -46,37 +46,35 @@ def test_flag_overrides_env_var():
     assert r.source == "flag"
 
 
-def test_recheck_falls_back_to_resolved_review_not_hardcoded_default():
-    review = resolve("review", env={"REASONA_DEV_REVIEW_MODEL": "claude:custom-opus:max"})
-    recheck = resolve("recheck", env={}, review_resolved=review)
-    assert recheck.model == "custom-opus"
+def test_recheck_resolves_via_its_own_default_never_reviews():
+    # SKILL.md: no cross-role fallback anywhere -- recheck's default is its
+    # OWN claude:sonnet:high, independent of whatever review resolved to.
+    resolve("review", env={"REASONA_DEV_REVIEW_MODEL": "claude:custom-opus:max"})
+    recheck = resolve("recheck", env={})
+    assert recheck.model == "sonnet"
     assert recheck.adapter == "claude"
-    assert recheck.effort == "max"
-    assert recheck.source == "fallback:review"
+    assert recheck.effort == "high"
+    assert recheck.source == "default"
 
 
-def test_recheck_own_env_var_wins_over_review_fallback():
-    review = resolve("review", env={})
-    recheck = resolve(
-        "recheck", env={"REASONA_DEV_RECHECK_MODEL": "sonnet-light"}, review_resolved=review
-    )
+def test_recheck_own_env_var_wins_over_its_own_default():
+    recheck = resolve("recheck", env={"REASONA_DEV_RECHECK_MODEL": "sonnet-light"})
     assert recheck.model == "sonnet-light"
+    assert recheck.source == "env:REASONA_DEV_RECHECK_MODEL"
 
 
-def test_bugbot_falls_back_to_compliance_env_var_itself():
-    # dev-ralf-renewal-claude.md §3.7: bugbot falls back to the
-    # COMPLIANCE_MODEL ENV VAR, not to compliance's own resolved outcome.
+def test_bugbot_does_not_consult_compliances_env_var():
+    # SKILL.md: "no cross-role fallback anywhere in this table" -- a
+    # COMPLIANCE_MODEL env var must never leak into bugbot's resolution.
     bugbot = resolve("bugbot", env={"REASONA_DEV_COMPLIANCE_MODEL": "sonnet-strict"})
-    assert bugbot.model == "sonnet-strict"
-    assert bugbot.source.startswith("env:REASONA_DEV_COMPLIANCE_MODEL")
+    assert bugbot.model == "deepseek-v4-pro"  # bugbot's OWN default, untouched
+    assert bugbot.source == "default"
 
 
-def test_bugbot_does_not_inherit_compliances_own_default():
+def test_bugbot_does_not_inherit_compliances_own_flag_either():
     # A bare `--compliance` flag or compliance resolving via ITS OWN default
-    # must NOT propagate to bugbot -- only the COMPLIANCE_MODEL env var does.
-    # This was a real bug in the first draft (bugbot inherited compliance's
-    # fully resolved value, including compliance's default, via a
-    # `compliance_resolved` parameter that has since been removed).
+    # must NOT propagate to bugbot -- every role's resolution reads only its
+    # own flag/env var/config, never a sibling role's.
     compliance = resolve("compliance", flag="whatever-compliance-flag-picked", env={})
     assert compliance.source == "flag"  # compliance itself resolved via its flag
     bugbot = resolve("bugbot", env={})  # no REASONA_DEV_COMPLIANCE_MODEL set
@@ -85,14 +83,8 @@ def test_bugbot_does_not_inherit_compliances_own_default():
     assert bugbot.source == "default"
 
 
-def test_bugbot_own_env_var_wins_over_compliance_env_fallback():
-    bugbot = resolve(
-        "bugbot",
-        env={
-            "REASONA_DEV_COMPLIANCE_MODEL": "sonnet-strict",
-            "REASONA_DEV_BUGBOT_MODEL": "deepseek-v4-pro",
-        },
-    )
+def test_bugbot_own_env_var_wins_over_its_own_default():
+    bugbot = resolve("bugbot", env={"REASONA_DEV_BUGBOT_MODEL": "deepseek-v4-pro"})
     assert bugbot.model == "deepseek-v4-pro"
     assert bugbot.source == "env:REASONA_DEV_BUGBOT_MODEL"
 
@@ -104,14 +96,14 @@ def test_bugbot_final_default_when_nothing_resolved():
     assert bugbot.source == "default"
 
 
-def test_final_audit_falls_back_to_compliance_env_var_not_compliances_default():
-    fa = resolve("final_audit", env={})  # compliance unresolved / no env var
-    assert fa.model == "opus"  # final_audit's OWN default
+def test_final_audit_does_not_consult_compliances_env_var():
+    fa = resolve("final_audit", env={})  # its own default
+    assert fa.model == "opus"
     assert fa.source == "default"
 
     fa2 = resolve("final_audit", env={"REASONA_DEV_COMPLIANCE_MODEL": "sonnet-v3"})
-    assert fa2.model == "sonnet-v3"
-    assert fa2.source.startswith("env:REASONA_DEV_COMPLIANCE_MODEL")
+    assert fa2.model == "opus"  # unaffected -- final_audit has no cross-role fallback
+    assert fa2.source == "default"
 
 
 def test_dev_escalation_resolves_like_any_other_role():
@@ -127,11 +119,14 @@ def test_dev_escalation_resolves_like_any_other_role():
     assert r2.effort == "max"
 
 
-def test_resolve_all_dependency_order_is_correct():
+def test_resolve_all_resolves_every_role_independently():
+    # No role's resolution depends on another's -- a COMPLIANCE_MODEL env
+    # var affects ONLY compliance, never bugbot/final_audit/recheck.
     resolved = resolve_all(load_config_files=False, env={"REASONA_DEV_COMPLIANCE_MODEL": "sonnet-v2"})
-    assert resolved["bugbot"].model == "sonnet-v2"
-    assert resolved["final_audit"].model == "sonnet-v2"
-    assert resolved["recheck"].model == resolved["review"].model
+    assert resolved["compliance"].model == "sonnet-v2"
+    assert resolved["bugbot"].model == "deepseek-v4-pro"
+    assert resolved["final_audit"].model == "opus"
+    assert resolved["recheck"].model == "sonnet"
     assert "dev_escalation" in resolved
 
 

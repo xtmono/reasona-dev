@@ -92,6 +92,17 @@ class Finding:
         parts = [self.path, self.symbol or "", norm]
         return hashlib.sha256("||".join(parts).encode("utf-8")).hexdigest()[:16]
 
+    def location(self) -> str:
+        """`path::symbol` only -- dev-ralf `finding_merge.py`'s convergence
+        grouping key, deliberately narrower than `key()`. Two independent
+        reviewers describing the SAME real defect in different words share
+        a location but not a `key()` (which folds the description text in);
+        grouping by `key()` for convergence -- as an earlier version of
+        `convergent_keys()` below did -- makes cross_reviewer_convergence
+        require near-verbatim wording agreement, which independent models
+        essentially never produce, so the trigger almost never fires."""
+        return f"{self.path}::{self.symbol or ''}"
+
     def is_evidence_complete(self) -> bool:
         if self.disposition is not Disposition.MUST_FIX:
             return True
@@ -430,7 +441,7 @@ def convergent_keys(*results: ReviewResult) -> set[str]:
     """worker.md's `cross_reviewer_convergence` signal: the set of MUST_FIX
     keys flagged by >=2 of the given results in the SAME cycle -- >=2
     INDEPENDENTLY dispatched reviewers agreeing on the same `path::symbol`
-    location, cross-model agreement rather than one model's own
+    LOCATION, cross-model agreement rather than one model's own
     self-assessment. Meant for the review stage's `resolved["review_all"]`
     fan-out (>=2 reviewers); with exactly one reviewer this is always
     empty, which is correct -- there is no second reviewer to agree with.
@@ -438,12 +449,32 @@ def convergent_keys(*results: ReviewResult) -> set[str]:
     consumer: a key found here earns the SAME one-time escalation
     `observed_recurrence` (surviving a prior fix) earns, just triggered by
     cross-reviewer agreement instead of cross-cycle recurrence.
+
+    Grouping is by `Finding.location()` (path+symbol), matching dev-ralf's
+    own `finding_merge.merge_findings()` exactly -- NOT by `Finding.key()`
+    (which also folds in the description text). Two independent reviewers
+    describing one real defect in their own words share a location, not a
+    `key()`; grouping by `key()` would demand near-verbatim wording
+    agreement between models that essentially never produce it, leaving
+    this trigger dead in practice. The returned set is still `key()`
+    values (the actual finding identities `RecurrenceTracker` tracks) --
+    only the GROUPING criterion is the location.
     """
-    counts: dict[str, int] = {}
-    for r in results:
-        for key in {f.key() for f in r.must_fix}:  # a reviewer's own dup findings count once
-            counts[key] = counts.get(key, 0) + 1
-    return {k for k, n in counts.items() if n >= 2}
+    location_reviewers: dict[str, set[int]] = {}
+    keys_at_location: dict[str, set[str]] = {}
+    for reviewer_idx, r in enumerate(results):
+        seen_locations: set[str] = set()  # a reviewer's own dup findings count once
+        for f in r.must_fix:
+            loc = f.location()
+            if loc not in seen_locations:
+                location_reviewers.setdefault(loc, set()).add(reviewer_idx)
+                seen_locations.add(loc)
+            keys_at_location.setdefault(loc, set()).add(f.key())
+    convergent_locations = {loc for loc, ids in location_reviewers.items() if len(ids) >= 2}
+    out: set[str] = set()
+    for loc in convergent_locations:
+        out |= keys_at_location[loc]
+    return out
 
 
 def merge(*results: ReviewResult) -> ReviewResult:

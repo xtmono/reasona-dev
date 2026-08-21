@@ -207,24 +207,47 @@ def test_recurrence_tracker_accepts_the_older_per_key_escalated_list():
     assert RecurrenceTracker.from_dict({"escalated": []}).escalated is False
 
 
-def test_escalation_from_equals_escalation_to_skips_the_dispatch():
+def test_escalation_from_equals_escalation_to_fails_only_for_observed_recurrence():
     """worker.md: when escalation_from == escalation_to verbatim, the
     'escalated' dispatch is an identical re-run at the same tier -- no
-    capability increase. Skip it and go straight to FAIL, without spending
-    the stage budget on the wasted cycle."""
+    capability increase. Skip it and go straight to the outcome a
+    NON-escalated fix would have reached. For observed_recurrence that
+    outcome is the key's second unresolved occurrence, i.e. immediate FAIL
+    (worker.md's own words), without spending the stage budget on the
+    wasted cycle."""
     tracker = RecurrenceTracker()
     f = _mf()
     budget = FixBudget()
 
-    tracker.record_cycle([f])
+    tracker.record_cycle([f])  # cycle 1: establishes previous_keys
+    tracker.record_cycle([f])  # cycle 2: same key survived -> observed_recurrence
+    d = evaluate(
+        _result_with([f]), budget, "review", tracker, 0,
+        escalation_model="sonnet", dev_model="sonnet",
+    )
+    assert d.action == "fail"
+    assert "escalation_from == escalation_to" in d.reason
+    assert d.escalation_trigger == "observed_recurrence"  # still attributable
+    assert budget.review_cycles == 0  # the skipped cycle was never spent
+
+
+def test_escalation_from_equals_escalation_to_still_dispatches_a_normal_fix_for_convergence():
+    """The SAME guard for cross_reviewer_convergence (and, by the same
+    reasoning, scope_exceeded) does NOT fail the PR -- a non-escalated fix
+    reaching either trigger would have been an ordinary spawn_fix, never a
+    stop-the-world FAIL, so the tier-collision guard must fall through to
+    that instead of manufacturing a FAIL the trigger itself never implies."""
+    tracker = RecurrenceTracker()
+    f = _mf()
+    budget = FixBudget()
+
     d = evaluate(
         _result_with([f]), budget, "review", tracker, 0,
         convergent_keys={f.key()}, escalation_model="sonnet", dev_model="sonnet",
     )
-    assert d.action == "fail"
-    assert "escalation_from == escalation_to" in d.reason
+    assert d.action == "spawn_fix"
     assert d.escalation_trigger == "cross_reviewer_convergence"  # still attributable
-    assert budget.review_cycles == 0  # the skipped cycle was never spent
+    assert budget.review_cycles == 1  # a normal fix cycle WAS spent, unlike observed_recurrence
 
 
 def test_escalation_from_different_from_escalation_to_still_escalates():

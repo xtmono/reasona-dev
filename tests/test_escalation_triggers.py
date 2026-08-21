@@ -137,11 +137,15 @@ def test_scope_exceeded_escalates_when_the_full_route_follows_a_fix(tmp_path, ru
     assert fix_models[1] == "opus"    # cycle 2: FULL route after a fix -- scope_exceeded escalates
 
 
-def test_escalation_from_equals_escalation_to_reports_failed_without_a_wasted_dispatch(tmp_path, rust_dev_prompts):
+def test_escalation_from_equals_escalation_to_still_fixes_on_a_convergence_trigger(tmp_path, rust_dev_prompts):
     """worker.md: when `--dev-escalation` is configured down to match
-    `--dev` (the exception path this guard exists for), a would-be
-    escalated dispatch is skipped entirely -- the unit goes FAIL on the
-    tier comparison alone, not after burning a cycle proving it."""
+    `--dev`, the tier-collision guard skips the ESCALATED dispatch -- but
+    only routes straight to FAIL for observed_recurrence. Here the trigger
+    is cross_reviewer_convergence (two reviewers agree on cycle 1), whose
+    non-escalated outcome is an ordinary fix, so the PR still gets ONE dev
+    dispatch; the eventual FAIL comes from the SAME key surviving that fix
+    on cycle 2 (already_escalated + recurring -- a genuinely separate exit),
+    not from the tier comparison itself."""
     resolved = dict(_RESOLVED)
     resolved["dev_escalation"] = ResolvedModel("dev_escalation", "sonnet", "claude", "high", "flag")
     resolved["review_all"] = [
@@ -171,4 +175,4 @@ def test_escalation_from_equals_escalation_to_reports_failed_without_a_wasted_di
         profile="rust-dev", run_role_fn=fn, files=["src/a.rs"],
     )
     assert result.verdict == "FAIL"
-    assert fix_calls == []  # no dev dispatch at all -- the tier comparison alone decided it
+    assert fix_calls == [1]  # cycle 1 DID dispatch a normal (non-escalated) fix

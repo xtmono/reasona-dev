@@ -32,10 +32,11 @@ def test_expected_models_maps_bernstein_role_to_config_role():
 
 
 def test_expected_models_reviewer_accepts_both_review_and_recheck():
-    # recheck falls back to review's resolved value when neither has its
-    # own env/config override, so both slots collapse to "opus" here --
-    # exercise that both are still accepted, not just one.
-    assert plugin._expected_models("reviewer") == {"opus"}
+    # review and recheck resolve fully independently (no cross-role
+    # fallback) -- their defaults genuinely differ (opus vs sonnet), and a
+    # "reviewer"-role spawn is legitimately either one, so both must be
+    # accepted, not just one.
+    assert plugin._expected_models("reviewer") == {"opus", "sonnet"}
 
 
 def test_expected_models_unknown_role_returns_empty_set():

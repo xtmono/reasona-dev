@@ -212,19 +212,23 @@ silently skipped as `"classification":"timeout"` even while still within the out
 
 Since `BERNSTEIN_ROUTING` is off by default (§3.1), the bandit does not pick anything for us. In
 other words, **something has to explicitly set the model somewhere for this to run on exactly the
-same model, the way dev-ralf did.** This module is that place — it ports the priority chain from
-dev-ralf-renewal-claude.md §3.7 verbatim, renamed to `REASONA_DEV_*` environment variables.
+same model, the way dev-ralf did.** This module is that place.
 
 Each layer's value accepts not just a bare model name but dev-ralf's own
 `tool:model:effort[,extra]` composite form (e.g. `claude:sonnet:high`) — see §3.5.0.
 
+**Every role resolves through the exact same flat chain — no cross-role fallback anywhere**
+(§3.14.9 corrects an earlier version of this module that implemented two now-superseded
+`dev-ralf-renewal-*.md` designs which DID chain across roles; dev-ralf's current `SKILL.md` states
+plainly: "each row is self-contained ... there is no cross-role fallback anywhere in this table"):
+
 ```
 dev:            --dev            → REASONA_DEV_DEV_MODEL            → project cfg → global cfg → claude:sonnet:high
-review(first pass): --review     → REASONA_DEV_REVIEW_MODEL         → project cfg → global cfg → claude:opus:high
-recheck:        --recheck        → REASONA_DEV_RECHECK_MODEL        → project cfg → global cfg → review's final resolved value
-bugbot:         --bugbot         → REASONA_DEV_BUGBOT_MODEL         → project cfg → global cfg → [compliance's slot, same 4 steps] → kilo:deepseek-v4-pro:high
+review:         --review         → REASONA_DEV_REVIEW_MODEL         → project cfg → global cfg → claude:opus:high
+recheck:        --recheck        → REASONA_DEV_RECHECK_MODEL        → project cfg → global cfg → claude:sonnet:high
+bugbot:         --bugbot         → REASONA_DEV_BUGBOT_MODEL         → project cfg → global cfg → kilo:deepseek-v4-pro:high
 compliance:     --compliance     → REASONA_DEV_COMPLIANCE_MODEL     → project cfg → global cfg → claude:sonnet:high
-final audit:    --final-audit    → REASONA_DEV_FINAL_AUDIT_MODEL    → project cfg → global cfg → [compliance's slot, same 4 steps] → claude:opus:high
+final audit:    --final-audit    → REASONA_DEV_FINAL_AUDIT_MODEL    → project cfg → global cfg → claude:opus:high
 dev_escalation: (no CLI flag)     → REASONA_DEV_DEV_ESCALATION_MODEL → project cfg → global cfg → claude:opus:high
 ```
 
@@ -233,17 +237,17 @@ alive, not at `plan.yaml`/`review.yaml` generation time, so it has no natural sl
 `reasona-dev compile-plan` or `render-review` subcommand — its env-var/config-file layers behave
 the same as any other role's, but the flag layer is not yet wired into the CLI.
 
-**A real bug was caught while implementing this.** The draft had `bugbot`/`final_audit` fall back
-onto the `compliance` role's **fully resolved outcome** (its value), but the original spec says
-they should fall back only onto the `DEV_RALF_COMPLIANCE_MODEL` **environment variable (and config
-slot) itself.** The two are different — if only a `--compliance` flag is given with no
-`COMPLIANCE_MODEL` env var/config, the draft let that flag value leak through to bugbot, but the
-original spec does not. Only `recheck` is the exception that inherits review's fully resolved value
-("first-pass reviewers") — this asymmetry is intentional and must be implemented precisely
-(`tests/test_model_config.py`'s `test_bugbot_does_not_inherit_compliances_own_default` and
-`tests/test_config_file.py`'s
-`test_bugbot_falls_back_to_compliance_config_slot_not_compliances_resolved_value` pin this
-regression).
+**Historical note — a real bug was caught while implementing an EARLIER version of this module,
+which is worth keeping for what it teaches, even though the design it was fixing is itself gone
+(§3.14.9).** That draft had `bugbot`/`final_audit` fall back onto the `compliance` role's fully
+resolved outcome, when the design doc it was following said they should fall back only onto
+compliance's OWN env var/config slot — a bare `--compliance` flag with nothing else set must not
+leak through to `bugbot`. The bug was real and the fix was correct FOR that design. What §3.14.9
+found later is that the design itself — ANY cross-role fallback, including this corrected version
+of it and `recheck`'s fallback to `review`'s resolved value — was superseded by dev-ralf's own
+`SKILL.md` before this module was ever ported, and the port had followed the superseded document
+instead. The lesson generalizes: fixing a bug against a design doc does not confirm the doc is
+still the target; re-check the doc is current before trusting a fix pins the right behavior.
 
 **Guarding against CONDUCTOR-COLLAPSE**: every value `resolve_all()` returns carries not just
 `value` but also `source` (`flag`/`env:<VAR>`/`config:project:<role>`/`config:global:<role>`/
@@ -2228,16 +2232,114 @@ which is the exact failure the check exists to prevent. `MAX_FINAL_CYCLES` is th
 alongside every other cap in `test_every_stage_cap_matches_dev_ralfs_budget_py`, not exempted from
 it.
 
-**The binding constraint never changed.** `MAX_TOTAL_FIX_CYCLES` (16) is what actually bounds a PR:
-the stage caps sum past it at either value (8+8+2+3+3 = 24, or 8+8+3+3+3 = 25 — dev-ralf's
-`budget.py` says the same of its own). The extra final-audit cycle is only reachable by a PR that
-has not already spent its pool elsewhere.
+**The binding constraint never changed** — as a STATEMENT about what `budget.py`/`cycle_gate.py`
+declare the cap to be, this is still correct: `MAX_TOTAL_FIX_CYCLES` (16) is what the stage caps
+are documented to sum against (8+8+2+3+3 = 24, or 8+8+3+3+3 = 25 — dev-ralf's `budget.py` says the
+same of its own). **§3.14.9 (A-2) found that at the time this sentence was written, the CODE did
+not actually enforce it**: `pr_cycle.run_pr_cycle()` held review's spending in a separate
+`FixBudget()` instance that was never merged into the one scan/final/sync/ship shared, so the real
+ceiling was review's 8 PLUS whatever the other four stages' shared 16-cycle pool spent — up to 24,
+regardless of what this sentence says the declared cap enforces. Fixed in §3.14.9; the two
+instances are now one.
 
 **A standing caveat for the next parity pass.** `~/repository/tas-dev-plugins` is under active
 development and moved twice during this one — once mid-verification. Re-check `git log` on it
 before treating any conclusion here as current, and prefer `budget.py`'s `STAGE_CAPS` over
 worker.md's prose when the two could disagree: since commit `6ff5103` the prose mirrors the tool
 rather than declaring the numbers itself.
+
+## 3.14.9 Third source-level parity re-check — Grade A gaps closed
+
+A source-level review against dev-ralf's `SKILL.md` / `worker.md` / `execution-plan.md` /
+`dispatch.md` / `squash.md` / its 12 tools found six real defects, graded A (the review's own
+grading; a B grade — scheduler-layer gates entirely unported, e.g. the Open Decisions Gate,
+preflight, the implicit DAG edge, a GitHub-state sweep — was reported alongside but is deliberately
+out of scope for this pass, tracked separately). All six are fixed here.
+
+**A-1. Reviewers never received the plan's own `## PR <N>:` section.** `prompt_profile.resolve_prompt()`
+returns the packaged prompt file verbatim; nothing substituted its `<N>`/`<worktree_path>`/`<path>`/
+`<title>` placeholders, and `pr_cycle.run_pr_cycle()` passed neither a plan file path nor the unit's
+own section text to any dispatched role. `review.md` item 4 (COMPLETENESS) instructs the role to
+"enumerate EVERY checklist item ... named in the plan's `## PR <N>:` section" — a mandate no
+dispatched agent could execute, since it never received that section and (unlike dev-ralf's worker,
+spawned with a plan file path it `sed -n '<section_lines>p'`s itself) has no path to read it from
+either. This is dev-ralf's own INCOMPLETE-MERGE failure catalog entry (`rationale.md`) with its
+stated countermeasure structurally disabled. **Fixed**: `run_pr_cycle()` gained `pr_index`/
+`pr_section` parameters (threaded from `orchestrate._process_unit()`'s `up.index`/`up.unit.section`
+— the same `PRUnit.section` text `plan_compile.py` already embeds directly into the dev role's own
+cycle-0 step description, `"description": u.section` — this fix applies the identical, already-
+established choice to the review/recheck/bugbot/compliance dispatches too). A new
+`_pr_unit_context_block()` appends the unit's index, title, worktree path, and (for review/recheck)
+the actual section prose to the prompt, the same way `memory_block` is already appended — not a
+placeholder substitution into the template text, so it works identically against an operator's own
+customized profile. `final_audit.md` (dispatched separately, from `final_phase.run_final_audit()`)
+carries no plan-section-dependent instruction at all — it is a pure code-diff re-audit — so it was
+left unchanged; only its cosmetic unsubstituted `<worktree_path>` literal remains, tracked but not
+fixed in this pass.
+
+**A-2. The 16-cycle shared fix-budget pool was actually two pools.** `run_pr_cycle()` constructed
+`review_budget = FixBudget()` and `scan_budget = FixBudget()` as two separate instances — the
+review loop spent against one, the scan/final/sync/ship stages against the other, and nothing ever
+merged them. worker.md: "review, scan, /gh-pr retries, final-audit, sync, ship fixes are ALL drawn
+from the same pool" — `FixBudget` already models this correctly as ONE object with five per-stage
+counters and one shared `total_used`; the bug was instantiating it twice. Real consequence: the
+documented ceiling (`MAX_TOTAL_FIX_CYCLES` = 16, see §3.14.8's own now-corrected claim above) never
+actually bound a PR — the true ceiling was review's 8 cycles PLUS whatever the other pool's 16
+spent, up to 24. **Fixed**: one `budget = FixBudget()`, checkpointed under a single `progress["budget"]`
+ledger key (was two: `review_budget`/`scan_budget`), shared by both loops and returned as
+`CycleResult.budget`.
+
+**A-3. `should_run_final_audit()` never saw a review-only fix.** A direct consequence of A-2:
+`final_phase.should_run_final_audit(budget)` reads `budget.total_used > 0`, and the `budget` it
+receives is `CycleResult.budget` — which, before A-2, was `scan_budget` alone. A PR needing fixes
+ONLY in review (a clean scan) presented `scan_budget.total_used == 0` to this check, identical to a
+PR needing zero fixes anywhere in the entire cycle, so its mandatory final audit (dev-ralf: a fix
+anywhere on a PR earns a fresh whole-diff audit) was silently skipped. **Fixed automatically by
+A-2** — `CycleResult.budget` is now the one shared instance, so a review-only fix correctly shows
+`total_used > 0`. A regression test (`test_review_and_scan_fix_cycles_share_one_budget_pool`)
+exercises this exact shape: one review fix, a clean scan, and asserts `should_run_final_audit()`
+now returns `True`.
+
+**A-4. Role model resolution implemented a design dev-ralf's own `SKILL.md` supersedes.** `rationale.md`
+→ *Role resolution* records that dev-ralf tried cross-role fallback TWICE (an early draft chaining
+`bugbot`/`dev-escalation`/`final-audit` onto `compliance`'s env var, and separately `recheck` onto
+`review`'s resolved value — "first-pass reviewers") and abandoned both: "every role gets its own
+flag AND its own fully independent three-step chain... there is no cross-role fallback anywhere in
+this table." `model_config.py` implemented exactly the abandoned design, citing a superseded
+`dev-ralf-renewal-claude.md §3.7` as its authority rather than the live `SKILL.md`. Two observable
+effects: `recheck` (default `claude:sonnet:high`) silently became `claude:opus:high` whenever
+`review` resolved to something else, contradicting `pr_cycle.py`'s own module-docstring claim ("the
+cheaper `recheck` model" — now true again); and `bugbot`/`final_audit` read `compliance`'s env var/
+config slot as a fallback that dev-ralf's table never specifies. **Fixed**: `resolve()` collapsed
+to one flat chain for every role (flag → own env var → project cfg → global cfg → own default);
+`recheck` gained its own `_DEFAULTS` entry (`sonnet`/`claude`/`high`) instead of borrowing
+`review`'s adapter/effort as a fallback shape; the `review_resolved`/compliance-fallback parameters
+and branches were deleted outright, not merely bypassed.
+
+**A-5. `cross_reviewer_convergence` grouped by the wrong identity.** dev-ralf's own
+`finding_merge.merge_findings()` groups by `path::symbol` LOCATION for convergence, entirely
+separate from the `key` used for cross-cycle recurrence dedup (which folds the description text
+in). `finding_adapter.convergent_keys()` grouped by `Finding.key()` for both purposes — meaning two
+independent reviewers had to describe one real defect in near-identical wording to trigger
+convergence, which two different models essentially never produce, leaving the trigger dead in
+practice (the docstring's own claim, "the same `path::symbol` location," was already describing
+the intended behavior the code did not implement). **Fixed**: added `Finding.location()` (path +
+symbol only); `convergent_keys()` now groups by location while still returning the actual `key()`
+identities found at each convergent location — matching dev-ralf's `convergent_locations` /
+`convergent_keys` split exactly.
+
+**A-6. The escalation_from==escalation_to guard FAILed on every trigger, not just `observed_recurrence`.**
+worker.md, precisely: when the escalated dispatch would run at the same tier as the normal one
+(no capability increase), skip it and "go straight to the outcome a NON-escalated fix would have
+reached" — for `observed_recurrence` that outcome is the key's second unresolved occurrence, i.e.
+immediate FAIL; for `cross_reviewer_convergence`/`scope_exceeded`, a non-escalated fix was never a
+stop-the-world signal on its own, so the correct non-escalated outcome is an ordinary `spawn_fix`.
+`cycle_gate.evaluate()`'s guard returned `"fail"` unconditionally, regardless of which trigger fired
+— a PR could be failed outright on its FIRST cross-reviewer agreement or its first `scope_exceeded`,
+never given the chance a real dispatch would have had. **Fixed**: the guard now branches on
+`trigger`; only `observed_recurrence` returns `fail` (unchanged), the other two fall through to a
+normal `spawn_fix` (budget spent, no escalated dispatch) — matching "the outcome a non-escalated
+fix would have reached" literally, per trigger.
 
 ## 4. Directory structure
 
