@@ -97,6 +97,7 @@ reasona_dev/
   gh_review_watch.py                /gh-review's watcher, ported near-verbatim -- CI/compliance/bugbot GraphQL snapshot + classify
   gh_review.py                      /gh-review's auto-fix loop -- dispatch dev, one push per cycle, budget-bounded
   cycles_log.py / cycles_query.py    per-cycle measurement log + queries
+  plan_report.py               plan-level teardown: promised-but-absent names + undeclared file scope (reports, never blocks)
   memory.py                        repo-scoped priors generated from cycles.jsonl
   prompt_profile.py            per-unit profile resolution, two-layer prompt lookup
   model_config.py / config_file.py   per-role model priority chain + 2-layer config cascade
@@ -106,7 +107,7 @@ reasona_dev/
   squash.py                        squash message builder + guard
   ledger.py                         per-plan, per-unit resume state
   plugin.py                         pluggy hookimpl
-tests/                      pytest, 509 cases
+tests/                      pytest, 532 cases
 ```
 
 ## CLI

@@ -18,15 +18,21 @@ from dataclasses import dataclass, field
 from reasona_dev.finding_adapter import Finding, ReviewResult
 
 # dev-ralf-renewal-claude.md §3.9 -- stage caps + one binding total.
-# Matched against `~/repository/tas-dev-plugins/plugins/dev/skills/dev-ralf/
-# reference/worker.md` directly (`max_review_cycles=8`, `max_scan_cycles=8`,
-# `max_final_cycles=2`, `MAX_SYNC_CYCLES=3`, `MAX_SHIP_CYCLES=3`,
-# `fix_cycles_max=16`) -- MAX_FINAL_CYCLES was 3 here, a numeric drift from
-# worker.md's `max_final_cycles=2` found during a source-level parity
-# re-check (docs/ARCHITECTURE.md §3.14.6).
+# Every value matched against `~/repository/tas-dev-plugins/plugins/dev/
+# skills/dev-ralf/tools/budget.py`'s `STAGE_CAPS` (the single authority
+# there since it absorbed the arithmetic worker.md used to restate) and
+# worker.md's own section headings: review 8, scan 8, final 3, sync 3,
+# ship 3, total 16.
+#
+# `final` moved 3 -> 2 -> 3 across two parity passes and is worth reading
+# as one story rather than three: reasona-dev ran 3, a source-level check
+# found worker.md at 2 and aligned this to 2 (docs/ARCHITECTURE.md
+# §3.14.6), and both projects were then raised back to 3 by the same
+# operator decision -- dev-ralf in `5ff9641`, reasona-dev here (§3.14.8).
+# The two are consistent at 3; nothing here is a deliberate divergence.
 MAX_REVIEW_CYCLES = 8
 MAX_SCAN_CYCLES = 8
-MAX_FINAL_CYCLES = 2
+MAX_FINAL_CYCLES = 3
 MAX_SYNC_CYCLES = 3
 MAX_TOTAL_FIX_CYCLES = 16
 
@@ -55,14 +61,18 @@ MAX_SHIP_CYCLES = 3
 # is not something retrying indefinitely would fix.
 MAX_FINAL_PHASE_ROUNDS = 3
 
-# `/gh-review`'s own default `--max-cycle` (`~/repository/tas-dev-plugins/
-# plugins/dev/skills/gh-review/SKILL.md` §1). Bounds `reasona_dev.gh_review`'s
-# CI/compliance/bugbot auto-fix loop, pooled into the same
-# `MAX_TOTAL_FIX_CYCLES` every other stage shares
-# (`min(MAX_GH_REVIEW_CYCLES, MAX_TOTAL_FIX_CYCLES - budget.total_used)`,
-# mirroring dev-ralf's own pooling rule for this exact stage). Exhausting it
-# is `blocked`, not `failed` -- same reasoning as `MAX_SHIP_CYCLES` above.
-MAX_GH_REVIEW_CYCLES = 3
+# `/gh-review`'s own default `--max-cycle`. NOT a budget stage of its own --
+# a ceiling on how many fix cycles ONE `/gh-review` invocation may run, the
+# same shape as dev-ralf's `budget.py` `GH_REVIEW_MAX_CYCLE`, which likewise
+# sits beside `STAGE_CAPS` rather than inside it. The effective value is
+# `gh_review_cap()` below; the cycles themselves are charged to the `review`
+# stage (worker.md -> *Fix budget accounting*: "After `/gh-review` returns,
+# call `spend --stage review` once per reported `FIX_COMMITS`"). This used
+# to be a sixth `gh_review` stage in `FixBudget` with its own cap, which
+# handed gh-review 3 cycles ON TOP of review's 8 instead of out of them.
+# Exhausting it is `blocked`, not `failed` -- same reasoning as
+# `MAX_SHIP_CYCLES` above.
+GH_REVIEW_MAX_CYCLE = 3
 
 # A sync conflict `run_sync_cycle()` classifies as SUBSTANTIVE (the dev
 # role's own self-report -- see `final_phase.parse_conflict_kind()`) means
@@ -111,7 +121,6 @@ class FixBudget:
     final_cycles: int = 0
     sync_cycles: int = 0
     ship_cycles: int = 0
-    gh_review_cycles: int = 0
     total_used: int = 0
 
     def can_spend(self, stage: str) -> bool:
@@ -121,12 +130,11 @@ class FixBudget:
             "final": MAX_FINAL_CYCLES,
             "sync": MAX_SYNC_CYCLES,
             "ship": MAX_SHIP_CYCLES,
-            "gh_review": MAX_GH_REVIEW_CYCLES,
         }[stage]
         used = {
             "review": self.review_cycles, "scan": self.scan_cycles,
             "final": self.final_cycles, "sync": self.sync_cycles,
-            "ship": self.ship_cycles, "gh_review": self.gh_review_cycles,
+            "ship": self.ship_cycles,
         }[stage]
         return used < cap and self.total_used < MAX_TOTAL_FIX_CYCLES
 
@@ -141,9 +149,18 @@ class FixBudget:
             self.sync_cycles += 1
         elif stage == "ship":
             self.ship_cycles += 1
-        elif stage == "gh_review":
-            self.gh_review_cycles += 1
+        else:
+            raise KeyError(f"unknown fix-budget stage {stage!r}")
         self.total_used += 1
+
+    def gh_review_cap(self) -> int:
+        """How many fix cycles ONE `/gh-review` invocation may run --
+        dev-ralf `budget.py`'s `gh_review_cap()` verbatim:
+        `max(0, min(GH_REVIEW_MAX_CYCLE, total - total_used))`. Floored at
+        zero so an already-exhausted pool yields 0 rather than a negative
+        cap the caller would have to special-case.
+        """
+        return max(0, min(GH_REVIEW_MAX_CYCLE, MAX_TOTAL_FIX_CYCLES - self.total_used))
 
     # JSON roundtrip -- the ledger (reasona_dev.ledger) checkpoints this
     # every cycle so a resumed run does not re-litigate a budget an
@@ -154,7 +171,7 @@ class FixBudget:
         return {
             "review_cycles": self.review_cycles, "scan_cycles": self.scan_cycles,
             "final_cycles": self.final_cycles, "sync_cycles": self.sync_cycles,
-            "ship_cycles": self.ship_cycles, "gh_review_cycles": self.gh_review_cycles,
+            "ship_cycles": self.ship_cycles,
             "total_used": self.total_used,
         }
 
@@ -163,7 +180,10 @@ class FixBudget:
         return cls(
             review_cycles=d.get("review_cycles", 0), scan_cycles=d.get("scan_cycles", 0),
             final_cycles=d.get("final_cycles", 0), sync_cycles=d.get("sync_cycles", 0),
-            ship_cycles=d.get("ship_cycles", 0), gh_review_cycles=d.get("gh_review_cycles", 0),
+            ship_cycles=d.get("ship_cycles", 0),
+            # A ledger written while gh-review had its own sixth stage
+            # carries `gh_review_cycles`; those cycles are already inside
+            # `total_used`, so dropping the field loses no accounting.
             total_used=d.get("total_used", 0),
         )
 
@@ -173,48 +193,107 @@ class RecurrenceTracker:
     """Tracks how many completed fixes a MUST_FIX key has survived."""
 
     survived: dict[str, int] = field(default_factory=dict)
-    escalated: set[str] = field(default_factory=set)
+    # ONE escalation per PR, not one per key -- worker.md -> *Deterministic
+    # dev escalation*: "ONE escalation per PR, and it is capped ... not an
+    # uncapped ladder", and the scan section's "the SAME escalation budget
+    # applies here as in review -- one per PR total, not one per stage".
+    # dev-ralf enforces this with a single `already_escalated` boolean
+    # (`finding_merge.escalation_decision`); this used to be a `set[str]` of
+    # escalated keys here, which let a PR escalate once per DISTINCT key --
+    # exactly the uncapped ladder that wording forbids.
+    escalated: bool = False
+    # Last cycle's MUST_FIX keys. `observed_recurrence` is the INTERSECTION
+    # of this cycle's keys with the previous cycle's
+    # (`finding_merge.escalation_decision`: `set(current) & set(prior)`) --
+    # `record_cycle()` used to increment `survived` for every MUST_FIX
+    # present from cycle 2 on, counting a brand-new finding as one that had
+    # "survived" a fix it was never subject to.
+    previous_keys: set[str] = field(default_factory=set)
 
-    def record_post_fix(self, still_present: list[Finding]) -> None:
-        for f in still_present:
-            self.survived[f.key()] = self.survived.get(f.key(), 0) + 1
+    def record_cycle(self, must_fix: list[Finding]) -> None:
+        """Call once per cycle, BEFORE `evaluate()`, on EVERY cycle.
+
+        A key only counts as having survived a fix when it was present in
+        the immediately-preceding cycle too. Calling this every cycle (not
+        only from cycle 2 on) is what keeps `previous_keys` accurate across
+        a stage boundary: review exits with an empty MUST_FIX list, so the
+        scan stage's first cycle intersects against an empty set and cannot
+        inherit a review finding as a spurious recurrence.
+        """
+        current = {f.key() for f in must_fix}
+        for key in current & self.previous_keys:
+            self.survived[key] = self.survived.get(key, 0) + 1
+        self.previous_keys = current
 
     def clear(self, key: str) -> None:
         self.survived.pop(key, None)
-        self.escalated.discard(key)
+        self.previous_keys.discard(key)
 
-    def decide(self, key: str, *, converged: bool = False) -> str:
-        """PROCEED | ESCALATE_ONCE | FAIL -- dev-ralf-renewal-claude.md §3.5 + new escalation rule.
+    def escalation_decision(
+        self, must_fix: list[Finding], *,
+        convergent_keys: set[str] | None = None,
+        route_full: bool = False,
+    ) -> tuple[str, str | None]:
+        """`("proceed"|"escalate"|"fail", trigger)` -- a whole-cycle decision,
+        mirroring `finding_merge.escalation_decision` exactly, including its
+        priority order and its refusal to escalate twice.
 
-        Two independent signals feed the SAME per-key escalation, matching
-        worker.md's own two deterministic triggers for it: `converged`
-        (this cycle's `cross_reviewer_convergence` -- see
-        `finding_adapter.convergent_keys()` -- >=2 independently dispatched
-        reviewers flagged this key in the SAME cycle) or the `survived`
-        count already tracked here (`observed_recurrence` -- this key
-        survived a PRIOR completed fix). Either alone earns ONE bounded
-        escalation before a further sighting of the same key is FAIL --
-        worker.md's third trigger, `scope_exceeded` (a fix's diff spilled
-        outside the files its findings named), is decided by the CALLER
-        from `recheck_route()`'s own BOUNDED/FULL result, not here.
+        The three triggers, highest priority first (worker.md ->
+        *Deterministic dev escalation*), all OBSERVED signals, never a
+        reviewer's own severity label:
+
+        1. `cross_reviewer_convergence` -- >=2 independently dispatched
+           reviewers flagged the same key THIS cycle
+           (`finding_adapter.convergent_keys()`).
+        2. `observed_recurrence` -- a key present now was ALSO present at
+           the end of the prior cycle, i.e. it survived that cycle's fix
+           (`record_cycle()` above).
+        3. `scope_exceeded` -- the recheck route came back FULL, so the
+           last fix's diff spilled outside the files its findings named.
+
+        Once the PR's single escalation is spent, a key that survives the
+        escalated fix is stop-the-world (`"fail"`), never a second
+        escalation; anything else simply proceeds with an ordinary fix.
         """
-        n = self.survived.get(key, 0)
-        if key in self.escalated:
-            return "FAIL" if (n >= 1 or converged) else "PROCEED"
-        if n >= 1 or converged:
-            self.escalated.add(key)
-            return "ESCALATE_ONCE"
-        return "PROCEED"
+        current = {f.key() for f in must_fix}
+        recurring = {k for k in current if self.survived.get(k, 0) >= 1}
+
+        if self.escalated:
+            return ("fail", None) if recurring else ("proceed", None)
+        if convergent_keys and (convergent_keys & current):
+            self.escalated = True
+            return "escalate", "cross_reviewer_convergence"
+        if recurring:
+            self.escalated = True
+            return "escalate", "observed_recurrence"
+        if route_full:
+            self.escalated = True
+            return "escalate", "scope_exceeded"
+        return "proceed", None
 
     def to_dict(self) -> dict:
-        # `escalated` is a set -- JSON has no set literal, so it round-trips
-        # as a sorted list (sorted only for a stable diff in the ledger
-        # file, membership is what `decide()` actually uses).
-        return {"survived": dict(self.survived), "escalated": sorted(self.escalated)}
+        # Sets have no JSON literal, so `previous_keys` round-trips as a
+        # sorted list (sorted only for a stable ledger diff -- membership is
+        # what `record_cycle()` actually uses).
+        return {
+            "survived": dict(self.survived),
+            "escalated": self.escalated,
+            "previous_keys": sorted(self.previous_keys),
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> "RecurrenceTracker":
-        return cls(survived=dict(d.get("survived", {})), escalated=set(d.get("escalated", [])))
+        # `escalated` was a LIST of per-key escalations before it became a
+        # per-PR boolean; a ledger written by that older build still
+        # deserializes -- a non-empty list means the one escalation this PR
+        # gets was already spent.
+        raw = d.get("escalated", False)
+        escalated = bool(raw) if isinstance(raw, bool) else len(raw) > 0
+        return cls(
+            survived=dict(d.get("survived", {})),
+            escalated=escalated,
+            previous_keys=set(d.get("previous_keys", [])),
+        )
 
 
 @dataclass
@@ -293,6 +372,14 @@ class GateDecision:
     action: str  # "spawn_fix" | "spawn_fix_escalated" | "pass" | "fail" | "inconclusive_retry" | "abort"
     reason: str
     escalated_model: str | None = None
+    # Which of worker.md's three deterministic triggers produced an
+    # escalation -- `cross_reviewer_convergence` | `observed_recurrence` |
+    # `scope_exceeded`, None when nothing escalated. dev-ralf's result block
+    # requires this (`cycle_gate.ESCALATION_TRIGGERS`, validated by its
+    # `check_v2`); reasona-dev records it through `cycles_log.record_decision`
+    # so an escalation is attributable after the fact rather than only
+    # visible as a model swap.
+    escalation_trigger: str | None = None
 
 
 def evaluate(
@@ -304,7 +391,8 @@ def evaluate(
     escalation_model: str = "opus",
     convergence: ConvergenceTracker | None = None,
     convergence_window: int = 3,
-    converged_keys: set[str] | None = None,
+    convergent_keys: set[str] | None = None,
+    route_full: bool = False,
     dev_model: str | None = None,
 ) -> GateDecision:
     """The single entry point `pr_cycle` calls before spawning a fix task.
@@ -314,16 +402,15 @@ def evaluate(
     `ConvergenceTracker` -- a PR that stops improving fails at
     `convergence_window` cycles instead of at the stage cap.
 
-    `converged_keys` is worker.md's OTHER two escalation triggers, folded
-    into one set the caller builds: `cross_reviewer_convergence`
-    (`finding_adapter.convergent_keys()` -- >=2 independently dispatched
-    reviewers flagged this key in the SAME cycle) unioned with
-    `scope_exceeded` (this cycle's `recheck_route()` came back `FULL`
-    after an actual prior fix -- the caller passes every this-cycle
-    MUST_FIX key when that holds, not just one). Either membership is
-    passed through to `RecurrenceTracker.decide(key, converged=...)`,
-    which treats it exactly like `observed_recurrence` -- one bounded
-    escalation, then FAIL on a further sighting of the same key.
+    `convergent_keys` and `route_full` are two of worker.md's three
+    escalation triggers, passed separately rather than pre-unioned so
+    `RecurrenceTracker.escalation_decision()` can apply dev-ralf's own
+    PRIORITY ORDER and name which one fired: `convergent_keys` is
+    `cross_reviewer_convergence` (`finding_adapter.convergent_keys()` --
+    >=2 independently dispatched reviewers flagged the same key THIS
+    cycle), `route_full` is `scope_exceeded` (this cycle's
+    `recheck_route()` came back FULL after an actual prior fix). The third,
+    `observed_recurrence`, comes from the tracker's own `survived` counts.
 
     `dev_model`, when given, is compared against `escalation_model`
     verbatim (worker.md: "compare `escalation_from` and `escalation_to`
@@ -331,15 +418,12 @@ def evaluate(
     "escalated" dispatch would be an identical re-run at the same tier --
     no capability increase, one wasted fix-budget cycle to prove what the
     comparison already showed. In that case the escalation is still
-    recorded (`RecurrenceTracker.decide()` already marks the key escalated
-    as a side effect of returning `ESCALATE_ONCE`), but the dispatch itself
-    is skipped -- straight to the outcome a non-escalated fix reaching this
-    key again would produce: `fail`, without spending the stage budget on
-    the skipped cycle. Omitting `dev_model` (existing callers) keeps the
-    escalated dispatch unconditional, exactly as before this parameter
-    existed.
+    recorded (`escalation_decision()` already marked this PR's single
+    escalation spent), but the dispatch itself is skipped -- straight to
+    the outcome a non-escalated fix reaching this key again would produce:
+    `fail`, without spending the stage budget on the skipped cycle.
+    Omitting `dev_model` keeps the escalated dispatch unconditional.
     """
-    converged_keys = converged_keys or set()
     gate = result.gate()
 
     if gate == "INCONCLUSIVE":
@@ -378,8 +462,10 @@ def evaluate(
     if convergence is not None:
         convergence.record(len(result.must_fix))
 
-    decisions = {recurrence.decide(f.key(), converged=f.key() in converged_keys) for f in result.must_fix}
-    if "FAIL" in decisions:
+    action, trigger = recurrence.escalation_decision(
+        result.must_fix, convergent_keys=convergent_keys, route_full=route_full,
+    )
+    if action == "fail":
         return GateDecision("fail", "MUST_FIX key survived escalated fix -- stop-the-world")
 
     # The exit recurrence structurally cannot reach: findings that keep
@@ -392,18 +478,20 @@ def evaluate(
             f"(counts: {convergence.counts[-convergence_window:]}) -- not converging",
         )
 
-    if "ESCALATE_ONCE" in decisions:
+    if action == "escalate":
         if dev_model is not None and dev_model == escalation_model:
             return GateDecision(
                 "fail",
                 f"escalation_from == escalation_to ({escalation_model}) -- no capability "
                 "increase, skipping the redundant dispatch",
+                escalation_trigger=trigger,
             )
         budget.spend(stage)
         return GateDecision(
             "spawn_fix_escalated",
-            "recurring finding -- one bounded escalation before FAIL",
+            f"{trigger} -- one bounded escalation before FAIL",
             escalated_model=escalation_model,
+            escalation_trigger=trigger,
         )
 
     budget.spend(stage)

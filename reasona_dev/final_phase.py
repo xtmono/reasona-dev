@@ -106,6 +106,14 @@ class TailResult:
     final_audit: RoleRunResult | None = None
     role_results: list[RoleRunResult] = field(default_factory=list)
     ship_decision: ShipDecision | None = None
+    # The files this unit ACTUALLY changed, `git diff --name-only
+    # <base>...HEAD`. Captured before the squash-merge, because
+    # `orchestrate.py` removes a merged unit's worktree straight afterwards
+    # and it can no longer be computed then -- the same reason worker.md's
+    # *Squash merge* says "Capture `changed_files` FIRST". Feeds
+    # `plan_report.scope_divergence()`; empty when the capture failed or
+    # the unit never reached the merge step.
+    changed_files: list[str] = field(default_factory=list)
 
     @property
     def blocked(self) -> bool:
@@ -411,6 +419,20 @@ def squash_merge(workdir: Path, msg: SquashMessage) -> tuple[bool, str]:
 _MERGE_RACE_MARKERS = ("not mergeable", "base branch was modified", "not up to date", "conflict")
 
 
+def capture_changed_files(workdir: Path, *, base: str = "origin/main") -> list[str]:
+    """`git diff --name-only <base>...HEAD` -- the unit's real file scope.
+
+    Three-dot on purpose: the files THIS branch changed relative to its
+    merge base with `base`, not every difference between the two tips.
+    Never raises -- an unreadable repo yields `[]`, since this feeds a
+    report that must never block a merge.
+    """
+    code, out, _ = _run(["git", "diff", "--name-only", f"{base}...HEAD"], workdir, timeout=60)
+    if code != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def _is_merge_race_failure(reason: str) -> bool:
     lowered = reason.lower()
     return any(marker in lowered for marker in _MERGE_RACE_MARKERS)
@@ -475,8 +497,11 @@ def run_final_audit(
             role="final_audit", model=resolved["final_audit"].model,
             adapter=resolved["final_audit"].adapter, result=result.review_result,
         )
-        if cycle > 1:
-            recurrence.record_post_fix(result.review_result.must_fix)
+        # Every cycle -- see `RecurrenceTracker.record_cycle`. The audit is a
+        # single role, so it has no cross-reviewer convergence signal, and it
+        # runs no recheck routing, so no `scope_exceeded` either: its only
+        # available trigger is `observed_recurrence`.
+        recurrence.record_cycle(result.review_result.must_fix)
 
         decision = evaluate(
             result.review_result, budget, "final", recurrence,
@@ -487,6 +512,7 @@ def run_final_audit(
             workdir=workdir, stage_name=stage_name, stage="final", cycle=cycle,
             action=decision.action, reason=decision.reason,
             escalated_model=decision.escalated_model,
+            escalation_trigger=decision.escalation_trigger,
         )
         if decision.action == "pass":
             return True, f"final audit clean after {cycle} cycle(s)", dispatches
@@ -859,6 +885,12 @@ def run_final_stage(
             return _blocked(gate_reason, pr_url=url, squash_message=msg,
                             final_audit=audit, role_results=dispatches, ship_decision=decision)
 
+        # BEFORE the merge: `orchestrate.py` removes a merged unit's
+        # worktree immediately after this returns, and the branch's own
+        # diff cannot be computed once it is gone (worker.md's *Squash
+        # merge*: "Capture `changed_files` FIRST").
+        changed_files = capture_changed_files(workdir, base=base)
+
         merged, merge_reason = squash_merge(workdir, msg)
         if not merged:
             if _is_merge_race_failure(merge_reason) and outer_round < MAX_FINAL_PHASE_ROUNDS:
@@ -873,7 +905,7 @@ def run_final_stage(
         return TailResult(
             stage_name=stage_name, status=MERGED, reason=merge_reason, pr_url=url,
             squash_message=msg, final_audit=audit, role_results=dispatches,
-            ship_decision=decision,
+            ship_decision=decision, changed_files=changed_files,
         )
     # Unreachable: every iteration above either `continue`s (only when
     # `outer_round < MAX_FINAL_PHASE_ROUNDS`, guaranteeing a next

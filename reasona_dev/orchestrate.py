@@ -95,6 +95,12 @@ class UnitOutcome:
     cycle_result: CycleResult | None = None
     ship_decision: ShipDecision | None = None
     tail: TailResult | None = None
+    # The PR unit this outcome is for -- carried so the plan-level teardown
+    # report (`reasona_dev.plan_report`) can compare what the unit DECLARED
+    # in its `files:` against what `TailResult.changed_files` says it
+    # actually touched. Optional so a hand-built outcome in a test need not
+    # supply one.
+    unit: PRUnit | None = None
 
 
 @dataclass
@@ -311,7 +317,7 @@ def _process_unit(
         # code-quality judgment entirely, same class as `gh`
         # unavailable (§ final_phase.py's blocked/failed split).
         outcome = UnitOutcome(
-            stage_name=up.stage_name, profile=up.profile, status="blocked",
+            unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="blocked",
             reason=f"worktree: {exc}",
         )
         if resume:
@@ -331,7 +337,7 @@ def _process_unit(
         )
         if not ok:
             outcome = UnitOutcome(
-                stage_name=up.stage_name, profile=up.profile, status="blocked",
+                unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="blocked",
                 reason=reason,
             )
             if resume:
@@ -368,7 +374,7 @@ def _process_unit(
             # on this), so it reports `blocked`, not `failed`.
             status = "blocked" if cycle.verdict == "ABORT" else "failed"
             outcome = UnitOutcome(
-                stage_name=up.stage_name, profile=up.profile, status=status,
+                unit=up.unit, stage_name=up.stage_name, profile=up.profile, status=status,
                 reason=f"{cycle.stage}: {cycle.reason}", cycle_result=cycle,
             )
             break
@@ -442,7 +448,7 @@ def _process_unit(
             status = "shipped" if decision.passed else "failed"
             reason = decision.reason
         outcome = UnitOutcome(
-            stage_name=up.stage_name, profile=up.profile,
+            unit=up.unit, stage_name=up.stage_name, profile=up.profile,
             status=status, reason=reason,
             cycle_result=cycle, ship_decision=decision, tail=tail,
         )
@@ -532,13 +538,13 @@ def _run_units_concurrently(
         blocked_by = _blocking_dependency(up, by_index, known)
         if blocked_by is not None:
             _settle(up, UnitOutcome(
-                stage_name=up.stage_name, profile=up.profile, status="skipped",
+                unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="skipped",
                 reason=f"dependency PR {blocked_by} did not ship",
             ))
             return True
         if resume and ledger.unit_status(workdir, plan_name, up.stage_name) == "shipped":
             _settle(up, UnitOutcome(
-                stage_name=up.stage_name, profile=up.profile, status="shipped",
+                unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="shipped",
                 reason="resumed: already shipped in an earlier run of this plan",
             ))
             return True
@@ -707,7 +713,7 @@ def run_plan(
         blocked_by = _blocking_dependency(up, by_index, known)
         if blocked_by is not None:
             outcome = UnitOutcome(
-                stage_name=up.stage_name, profile=up.profile, status="skipped",
+                unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="skipped",
                 reason=f"dependency PR {blocked_by} did not ship",
             )
             result.outcomes.append(outcome)
@@ -716,7 +722,7 @@ def run_plan(
 
         if resume and ledger.unit_status(workdir, plan_name, up.stage_name) == "shipped":
             outcome = UnitOutcome(
-                stage_name=up.stage_name, profile=up.profile, status="shipped",
+                unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="shipped",
                 reason="resumed: already shipped in an earlier run of this plan",
             )
             result.outcomes.append(outcome)

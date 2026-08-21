@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from reasona_dev import gh_review, gh_review_watch as watch
-from reasona_dev.cycle_gate import MAX_GH_REVIEW_CYCLES, FixBudget
+from reasona_dev.cycle_gate import GH_REVIEW_MAX_CYCLE, FixBudget
 from reasona_dev.finding_adapter import ReviewResult, RoleStatus
 from reasona_dev.model_config import ResolvedModel
 from reasona_dev.pr_cycle import RoleRunResult
@@ -124,10 +124,10 @@ def test_run_gh_review_dispatches_one_fix_covering_both_actionable_signals(tmp_p
 
 
 def test_run_gh_review_budget_exhausted_reports_blocked(tmp_path, monkeypatch):
-    snapshots = [_snap(ci="failing") for _ in range(MAX_GH_REVIEW_CYCLES + 1)]
+    snapshots = [_snap(ci="failing") for _ in range(GH_REVIEW_MAX_CYCLE + 1)]
     result = _run(tmp_path, monkeypatch, snapshots)
     assert not result.passed
-    assert f"{MAX_GH_REVIEW_CYCLES} cycles" in result.reason
+    assert f"{GH_REVIEW_MAX_CYCLE} cycles" in result.reason
 
 
 def test_run_gh_review_pr_not_open_blocks_immediately(tmp_path, monkeypatch):
@@ -189,5 +189,5 @@ def test_run_gh_review_spends_the_gh_review_budget_stage(tmp_path, monkeypatch):
     budget = FixBudget()
     result = _run(tmp_path, monkeypatch, [_snap(ci="failing"), _snap()], budget=budget)
     assert result.passed
-    assert budget.gh_review_cycles == 1
+    assert budget.review_cycles == 1  # charged to the review stage
     assert budget.total_used == 1

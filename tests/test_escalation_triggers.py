@@ -112,10 +112,18 @@ def test_scope_exceeded_escalates_when_the_full_route_follows_a_fix(tmp_path, ge
                                  raw_output_path=Path("/dev/null"))
         calls["n"] += 1
         # cycle 1: a fresh finding (triggers the first, non-escalated fix).
-        # cycle 2: the SAME-shaped finding again, but route is forced FULL
-        # by the monkeypatch above (a *different* key each time so
-        # observed_recurrence -- the OTHER trigger -- cannot explain an
-        # escalation here).
+        # cycle 2: a DIFFERENT key, with the route forced FULL above.
+        #
+        # NOTE: this does NOT isolate `scope_exceeded` from
+        # `observed_recurrence`. An earlier version of this comment claimed
+        # a different key each cycle rules the other trigger out; that is
+        # false here, because `RecurrenceTracker.record_post_fix()` counts
+        # EVERY must_fix present from cycle 2 on as "survived", including a
+        # brand-new one (dev-ralf's own `finding_merge.escalate` instead
+        # intersects the current keys with the PRIOR cycle's). So both
+        # triggers fire together on cycle 2 and this asserts only that an
+        # escalation happens, not which signal produced it -- see
+        # docs/ARCHITECTURE.md §3.14.7.
         text = MUST_FIX_TEXT if cycle == 1 else MUST_FIX_TEXT.replace("foo", "bar")
         return RoleRunResult(role="reviewer", cycle=cycle, review_result=parse_text_contract(text),
                              raw_output_path=Path("/dev/null"))

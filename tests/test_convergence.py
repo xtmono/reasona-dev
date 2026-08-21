@@ -83,7 +83,7 @@ def test_same_key_case_still_reports_the_recurrence_reason():
 
     reasons = []
     for _ in range(4):
-        recurrence.record_post_fix(stuck.must_fix)
+        recurrence.record_cycle(stuck.must_fix)
         decision = evaluate(
             stuck, budget, "review", recurrence,
             inconclusive_attempts=0, convergence=convergence,

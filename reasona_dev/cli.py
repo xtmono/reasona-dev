@@ -172,7 +172,7 @@ def _cmd_prompts(args: argparse.Namespace) -> int:
 
 
 def _cmd_run_plan(args: argparse.Namespace) -> int:
-    from reasona_dev import ledger, orchestrate
+    from reasona_dev import ledger, orchestrate, plan_report
     from reasona_dev.model_config import resolve_all
     from reasona_dev.plan_compile import PlanError
 
@@ -215,6 +215,21 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
         print(f"reasona-dev: {exc}", file=sys.stderr)
         return 1
     print(result.render(), file=sys.stderr)
+    # Plan-level teardown, after every unit has already reached a terminal
+    # outcome: what the plan promised that the repo never got, and what its
+    # units touched beyond their declared `files:`. Reports only -- it can
+    # neither block a merge (they already happened) nor change the exit
+    # code, matching dev-ralf's own *Teardown & final report* (§3.14.7).
+    try:
+        units = orchestrate.resolve_plan_units(plan_text, workdir)
+    except PlanError:
+        units = []
+    print(
+        plan_report.build(
+            workdir, [u.unit for u in units], result.outcomes, plan_path=args.plan_file,
+        ),
+        file=sys.stderr,
+    )
     return 0 if result.passed else 1
 
 
@@ -290,7 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(--ship only). Matches /gh-review's own --max-wait default "
             "(900s). This is wait time for GitHub's own workflows to "
             "finish, not a dev-fix attempt count -- see "
-            "cycle_gate.MAX_GH_REVIEW_CYCLES for that bound."
+            "cycle_gate.GH_REVIEW_MAX_CYCLE for that bound."
         ),
     )
     p_run.add_argument(

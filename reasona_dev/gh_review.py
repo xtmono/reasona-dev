@@ -8,11 +8,15 @@ re-poll -- bounded by both a wall-clock budget and a cycle-count budget.
 workflows to finish is wall-clock time, not a dev-fix attempt --
 `max_wait_seconds` (`time.monotonic()`) bounds that, independent of
 `FixBudget`. Actually dispatching a fix IS the same kind of resource every
-other stage in this pipeline spends -- `budget`'s `"gh_review"` stage
-(`cycle_gate.MAX_GH_REVIEW_CYCLES`) bounds that, pooled into the same
-`MAX_TOTAL_FIX_CYCLES` ceiling the rest of the pipeline shares, mirroring
-dev-ralf's own `min(max_cycle, fix_cycles_max - fix_cycles_total)` pooling
-rule (confirmed against `/gh-review`'s reference material).
+other stage in this pipeline spends -- and it is charged to the **`review`
+stage**, not a stage of its own (worker.md -> *Fix budget accounting*:
+"After `/gh-review` returns, call `spend --stage review` once per reported
+`FIX_COMMITS`"; dev-ralf's `budget.py` has exactly five stages and
+gh-review is not one of them). How many cycles ONE invocation may run is
+`FixBudget.gh_review_cap()` -- `min(GH_REVIEW_MAX_CYCLE, remaining pool)`,
+dev-ralf's `gh_review_cap()` verbatim. A watcher call that produces no fix
+commit spends nothing, so the charge happens once the push has actually
+landed a commit, never on merely entering an actionable cycle.
 
 **Exhausting either budget is `blocked`, not `failed`.** By the time this
 runs, review, scan, and ship_gate have already passed -- CI/compliance/
@@ -45,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from reasona_dev import _shell, gh_review_watch as watch
-from reasona_dev.cycle_gate import MAX_GH_REVIEW_CYCLES, MAX_TOTAL_FIX_CYCLES, FixBudget
+from reasona_dev.cycle_gate import FixBudget
 from reasona_dev.model_config import ResolvedModel
 from reasona_dev.pr_cycle import RoleRunResult, run_role
 
@@ -154,7 +158,7 @@ def run_gh_review(
     if owner_repo is None:
         return GhReviewResult(passed=False, reason=f"could not parse owner/repo from PR url: {pr_url}")
 
-    max_cycles = min(MAX_GH_REVIEW_CYCLES, MAX_TOTAL_FIX_CYCLES - budget.total_used)
+    max_cycles = budget.gh_review_cap()
     start = time.monotonic()
     watcher_calls = 0
     dispatches: list[RoleRunResult] = []
@@ -208,7 +212,6 @@ def run_gh_review(
             )
 
         cycle += 1
-        budget.spend("gh_review")
         prompts = []
         if snap["ci"]["state"] == "failing":
             prompts.append(_ci_fix_prompt(workdir, snap["ci"]["failing_checks"]))
@@ -235,6 +238,13 @@ def run_gh_review(
         short_sha = sha_out.strip()
         if short_sha:
             fix_commits.append(short_sha)
+            # Charged per FIX_COMMIT, to the `review` stage -- see the
+            # module docstring. `can_spend` was already satisfied by
+            # `gh_review_cap()` bounding `max_cycles` at entry, but the
+            # review stage's OWN cap can still be full even when the pool
+            # is not, so it is re-checked rather than assumed.
+            if budget.can_spend("review"):
+                budget.spend("review")
 
         if snap["compliance"]["state"] == "fail" and snap["compliance"]["comment_id"] is not None:
             _post_reply(

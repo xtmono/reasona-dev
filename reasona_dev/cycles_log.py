@@ -167,6 +167,7 @@ def record_decision(
     action: str,
     reason: str,
     escalated_model: str | None = None,
+    escalation_trigger: str | None = None,
 ) -> None:
     """Append the deterministic gate decision that followed a cycle's
     dispatches.
@@ -190,6 +191,13 @@ def record_decision(
             "action": action,
             "reason": reason,
             "escalated_model": escalated_model,
+            # WHICH of worker.md's three deterministic triggers escalated
+            # (`cross_reviewer_convergence` | `observed_recurrence` |
+            # `scope_exceeded`), None when nothing did. `escalated_model`
+            # alone says only THAT a swap happened -- attribution needs the
+            # signal, which is exactly what a later budget-shape review is
+            # trying to weigh.
+            "escalation_trigger": escalation_trigger,
         }
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")

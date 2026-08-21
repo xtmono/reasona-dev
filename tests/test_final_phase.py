@@ -455,7 +455,7 @@ def test_a_gh_review_fix_commit_is_re_verified_by_the_final_audit(tmp_path, monk
     _stub(monkeypatch)
 
     def _gh_review_that_made_a_fix(**kw):
-        kw["budget"].spend("gh_review")  # what a real FIX_COMMITS>0 return does
+        kw["budget"].spend("review")  # what a real FIX_COMMITS>0 return does (charged to `review`)
         return gh_review.GhReviewResult(passed=True, reason="ci green after 1 fix", fix_commits=["abc123"])
 
     monkeypatch.setattr(gh_review, "run_gh_review", _gh_review_that_made_a_fix)

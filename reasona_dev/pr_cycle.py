@@ -558,6 +558,7 @@ def run_pr_cycle(
             workdir=workdir, stage_name=stage_name, stage=stage, cycle=cycle,
             action=decision.action, reason=decision.reason,
             escalated_model=decision.escalated_model,
+            escalation_trigger=decision.escalation_trigger,
         )
 
     # Priors derived from THIS repo's own recorded review history, scoped to
@@ -617,7 +618,10 @@ def run_pr_cycle(
         while not resuming_into_scan:
             cycle += 1
             bounded = route == "BOUNDED" and recheck_profile_prompt is not None
-            converged_keys: set[str] = set()  # BOUNDED never fans out -- no cross-reviewer signal possible
+            # BOUNDED never fans out to a second reviewer, so there is no
+            # cross-reviewer signal to observe on that route.
+            convergent: set[str] = set()
+            scope_exceeded = False
             if bounded:
                 # The cheap bounded re-check never fans out to multiple
                 # reviewers or the OCR co-reviewer -- it exists specifically
@@ -690,29 +694,33 @@ def run_pr_cycle(
                 # count below): `cross_reviewer_convergence` (>=2
                 # independently dispatched reviewers named the SAME key
                 # THIS cycle -- empty with a single reviewer, correctly)
-                # and `scope_exceeded` (this cycle dispatched the FULL
-                # reviewer set because the LAST fix's diff spilled outside
-                # the files its findings named -- `route == "FULL"` on any
-                # cycle after the first IS that condition, since `bounded`
-                # above is only true when `route == "BOUNDED"`).
+                # and `scope_exceeded` (worker.md: "`recheck_route == full`
+                # -- the fix diff spilled outside the files the findings
+                # named"). Tested on `route` DIRECTLY, never on "we are in
+                # the FULL dispatch branch": `bounded` is also False when a
+                # profile ships no `recheck.md`, in which case a genuinely
+                # BOUNDED route still lands here -- reading the branch
+                # instead of `route` reported scope_exceeded for every such
+                # profile from cycle 2 on, spending the one-per-key
+                # escalation allowance on a signal that never fired (and so
+                # turning the NEXT, genuine recurrence into a FAIL).
+                # `cycle > 1` because `route` starts at its "FULL" default
+                # before any fix has happened; worker.md likewise computes
+                # the route only "before EVERY review cycle after cycle 1".
                 convergent = convergent_keys(*(r.review_result for r, _ in dispatched))
-                scope_exceeded = cycle > 1
-                converged_keys = convergent | (
-                    {f.key() for f in merged_result.must_fix} if scope_exceeded else set()
-                )
-            if cycle > 1:
-                # This review followed a dev fix -- whatever MUST_FIX is still
-                # here just SURVIVED that fix. Record it BEFORE evaluate() so
-                # `RecurrenceTracker.decide()` sees the updated count (dev-ralf
-                # §3.5: a key surviving one completed fix earns exactly one
-                # bounded escalation before FAIL).
-                recurrence.record_post_fix(result.review_result.must_fix)
+                scope_exceeded = cycle > 1 and route == "FULL"
+            # EVERY cycle, before evaluate(): a key only counts as having
+            # survived a fix when the PREVIOUS cycle raised it too, so the
+            # tracker needs this cycle's key set regardless of whether an
+            # intersection can exist yet (see `RecurrenceTracker.record_cycle`).
+            recurrence.record_cycle(result.review_result.must_fix)
             decision = evaluate(
                 result.review_result, review_budget, "review", recurrence,
                 inconclusive_attempts=review_inconclusive,
                 escalation_model=resolved["dev_escalation"].model,
                 convergence=review_convergence,
-                converged_keys=converged_keys,
+                convergent_keys=convergent,
+                route_full=scope_exceeded,
                 dev_model=resolved["dev"].model,
             )
             _log_decision("review", cycle, decision)
@@ -783,6 +791,12 @@ def run_pr_cycle(
 
         cycle = progress["scan_cycle"] if resuming_into_scan else 0
         scope_suffix = progress["scope_suffix"] if resuming_into_scan else ""
+        # `scope_exceeded` for the scan stage -- the same signal the review
+        # loop derives from its own `route`, tracked here explicitly because
+        # the scan stage expresses its route as a prompt scope suffix rather
+        # than a stored route string. False on cycle 1: no fix has happened
+        # yet for a route to describe.
+        scan_route_full = False
         while True:
             cycle += 1
             if docs_only:
@@ -832,13 +846,27 @@ def run_pr_cycle(
                 rundir=rundir, cycle=cycle, port=port, run_role_fn=run_role_fn,
             ))
             merged = merge(bugbot_result.review_result, compliance_result.review_result)
-            if cycle > 1:
-                recurrence.record_post_fix(merged.must_fix)
+            # worker.md's *Merge scans & fix loop*: "the SAME
+            # `finding_merge.py merge` call as reviewers, with
+            # `bugbot`/`compliance` as the reviewer ids ... recompute
+            # recheck route + escalation decision (same tools, same rules
+            # as review)" -- so the two scanners agreeing on one key IS
+            # `cross_reviewer_convergence` here, exactly as two reviewers
+            # agreeing is in the review stage. Skipped when bugbot did not
+            # run (docs-only, `_is_docs_only`): a single scanner cannot
+            # converge with anything.
+            scan_convergent = (
+                set() if docs_only
+                else convergent_keys(bugbot_result.review_result, compliance_result.review_result)
+            )
+            recurrence.record_cycle(merged.must_fix)
             decision = evaluate(
                 merged, scan_budget, "scan", recurrence,
                 inconclusive_attempts=scan_inconclusive,
                 escalation_model=resolved["dev_escalation"].model,
                 convergence=scan_convergence,
+                convergent_keys=scan_convergent,
+                route_full=scan_route_full,
                 dev_model=resolved["dev"].model,
             )
             _log_decision("scan", cycle, decision)
@@ -871,8 +899,10 @@ def run_pr_cycle(
             _log("scan", cycle, fix_result, resolved["dev"])
             if _safe_recheck_route(workdir, pre_fix_head, finding_files) == "BOUNDED":
                 scope_suffix = _bounded_scope_suffix(_changed_files(workdir, pre_fix_head))
+                scan_route_full = False
             else:
                 scope_suffix = ""
+                scan_route_full = True
             _snapshot(phase="scan", review_cycle=review_cycles_used, route="FULL",
                       pending_confirm=[], scan_cycle=cycle, scope_suffix=scope_suffix)
 

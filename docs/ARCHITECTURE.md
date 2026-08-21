@@ -1361,7 +1361,8 @@ has ever seen in its final combined form, and interaction between fixes is exact
 review structurally cannot see. So the trigger is `budget.total_used > 0`.
 
 The audit runs in the `"final"` phase of the **same `FixBudget`** review and scan already consumed
-(`MAX_FINAL_CYCLES` = 3). Giving it a separate budget would let a PR spend 8+8+3+3 cycles (review +
+(`MAX_FINAL_CYCLES` = 3, matching dev-ralf's own `final` cap — §3.14.8). Giving it a
+separate budget would let a PR spend 8+8+3+3 cycles (review +
 scan + final + sync, §3.9.2) while every stage still reports itself within its own ceiling, and
 giving it a fresh `RecurrenceTracker` would let it forget that a finding the audit raises already
 survived one fix earlier. So `pr_cycle` exports budget and recurrence via `CycleResult`.
@@ -2030,9 +2031,10 @@ module by module, to confirm the pipeline now behaves identically. Most of it al
 budget pooling, PR title sanitization, both mechanical/substantive sync points). Seven real,
 previously-undiscovered gaps were found and closed:
 
-**1. `MAX_FINAL_CYCLES` was 3, worker.md says `max_final_cycles=2`.** A plain numeric drift —
-fixed in `cycle_gate.py`, pinned against worker.md's own numbers by
-`test_every_stage_cap_matches_worker_md`.
+**1. `MAX_FINAL_CYCLES` was 3, worker.md said `max_final_cycles=2` at the time.** Set to 2 here,
+and every other cap pinned against dev-ralf's own numbers by
+`test_every_stage_cap_matches_dev_ralfs_budget_py`. **Both projects were raised back to 3
+shortly afterwards — see §3.14.8 for what actually happened to this number.**
 
 **2. Incomplete-evidence re-query was missing entirely.** worker.md: a MUST_FIX reported without a
 complete contract/scenario/fix earns ONE re-query before ever reaching a dev-fix or recheck prompt
@@ -2106,6 +2108,136 @@ true`... but skip the redundant dispatch."
 38 new tests across `tests/test_cycle_gate.py`, `tests/test_finding_adapter.py`,
 `tests/test_pr_cycle.py`, `tests/test_final_phase.py`, `tests/test_gh_pr.py`, and two new files
 (`tests/test_evidence_correction.py`, `tests/test_escalation_triggers.py`) — 509 total.
+
+## 3.14.7 Second source-level parity re-check — escalation semantics, budget stages, teardown
+
+`~/repository/tas-dev-plugins` had moved on since §3.14.6 (commit `6ff5103`, "move fix-budget
+arithmetic into `tools/budget.py`", which also rewrote 46 lines of worker.md). Re-reading worker.md
+in full at that revision, and comparing it against reasona-dev module by module, found six more
+divergences. The pipeline STAGE ORDER matched (worker.md's own pipeline line is unchanged, and
+§3.14.5 had already corrected reasona-dev to it) — everything below is semantics inside those
+stages.
+
+**1. `observed_recurrence` over-triggered.** dev-ralf's `finding_merge.escalation_decision`
+computes `recurring = set(current_must_fix_keys) & set(prior_must_fix_keys)` — a key only counts
+as having survived a fix when the PREVIOUS cycle raised it too. `RecurrenceTracker.record_post_fix()`
+instead incremented `survived` for EVERY MUST_FIX present from cycle 2 on, so a finding discovered
+for the first time on cycle 2 was treated as one that had survived a fix it was never subject to,
+and escalated immediately. Replaced by `record_cycle()`, which keeps the previous cycle's key set
+(`previous_keys`) and increments only the intersection. It is now called on EVERY cycle rather than
+only from cycle 2 — that is what keeps `previous_keys` correct across a stage boundary (review
+exits with an empty MUST_FIX list, so the scan stage's first cycle cannot inherit a review finding
+as a spurious recurrence).
+
+**2. The escalation cap was per-key, not per-PR.** worker.md is emphatic — "ONE escalation per PR,
+and it is capped ... not an uncapped ladder", and, for the scan stage, "one per PR total, not one
+per stage" — and dev-ralf enforces it with a single `already_escalated` boolean. reasona-dev's
+`escalated` was a `set[str]` of escalated KEYS, so a PR with three distinct recurring findings
+escalated three times. Now a plain `bool`. `from_dict` still accepts the older list shape (a
+non-empty one means the single escalation was already spent), so a ledger written by the previous
+build still resumes.
+
+**3. Which trigger fired was not recorded.** dev-ralf's result block requires `escalation_trigger ∈
+{cross_reviewer_convergence, observed_recurrence, scope_exceeded}` and validates it in `check_v2`.
+reasona-dev unioned the three signals into one `converged_keys` set and lost the distinction — the
+names existed only in comments. `RecurrenceTracker.escalation_decision()` now mirrors dev-ralf's
+function exactly, including its PRIORITY ORDER (convergence > recurrence > scope_exceeded) and its
+refusal to escalate twice; `GateDecision.escalation_trigger` carries the name and
+`cycles_log.record_decision()` persists it. `evaluate()` takes `convergent_keys` and `route_full`
+separately rather than pre-unioned, which is what makes the priority order expressible at all.
+
+The scan stage gained the convergence signal it never had: worker.md runs "the SAME
+`finding_merge.py merge` call as reviewers, with `bugbot`/`compliance` as the reviewer ids", so the
+two scanners agreeing on one key IS `cross_reviewer_convergence` there. It is skipped when bugbot
+did not run (docs-only, §3.14.6 item 5) — a single scanner cannot converge with anything.
+
+**4. `scope_exceeded` was read off the wrong thing** — a defect introduced by §3.14.6 item 3
+itself. It tested "we are in the FULL dispatch branch" (`cycle > 1`) rather than `route == "FULL"`.
+Those are not the same: `bounded = route == "BOUNDED" and recheck_profile_prompt is not None`, so a
+profile that ships no `recheck.md` (a supported configuration — "absent `recheck.md` is not fatal,
+it only means every cycle stays FULL") takes the FULL branch even on a genuinely BOUNDED route.
+Every such profile reported `scope_exceeded` from cycle 2 on, spending the PR's one escalation on a
+signal that never fired — and, because the allowance is one-shot, turning the NEXT genuine
+recurrence into a FAIL. The packaged `generic` profile does ship `recheck.md`, so the default
+configuration was unaffected, which is why no test caught it.
+
+**5. gh-review had a budget stage dev-ralf does not have.** `budget.py`'s `STAGE_CAPS` is exactly
+`review 8 / scan 8 / final 2 / sync 3 / ship 3`, and worker.md charges gh-review's fixes to the
+`review` stage ("After `/gh-review` returns, call `spend --stage review` once per reported
+`FIX_COMMITS`"). reasona-dev had a sixth `gh_review` stage with its own cap of 3, which handed
+gh-review three cycles ON TOP of review's eight instead of out of them. The stage is gone;
+`MAX_GH_REVIEW_CYCLES` became `GH_REVIEW_MAX_CYCLE`, a ceiling beside the caps rather than one of
+them, and `FixBudget.gh_review_cap()` reproduces dev-ralf's `max(0, min(ceiling, pool - used))`.
+The charge also moved to where dev-ralf makes it: once per fix COMMIT, after the push has landed
+one, not on merely entering an actionable cycle ("a watcher call that produced no fix commit spends
+nothing"). `FixBudget.spend()` now raises on an unknown stage instead of silently incrementing only
+the total.
+
+**6. There was no plan-level teardown at all.** dev-ralf runs two reporters once after a plan's
+last PR merges — `completeness.py` (names a plan promised that the repo never got) and
+`scope_report.py` (source files a PR touched beyond its declared `pr_files`). Both report and never
+block. reasona-dev had neither: `run_plan()` returned straight out of its per-unit loop and the CLI
+printed a status tally. `reasona_dev/plan_report.py` adds both, invoked from `_cmd_run_plan` after
+`run_plan()` returns, and cannot change the exit code.
+
+Two design points carried over rather than re-derived. The completeness check is **plan-level, not
+per-PR**: dev-ralf measured the per-PR variant at 19.7% of names flagged with zero real findings,
+because a plan legitimately names things a LATER unit builds, and deferring it to the whole plan
+against the whole repo took that to a 0% noise floor. And `changed_files` is captured **before** the
+squash-merge (`final_phase.capture_changed_files()`, carried on `TailResult.changed_files`), because
+`orchestrate.py` removes a merged unit's worktree immediately afterwards — the same ordering
+constraint worker.md states as "Capture `changed_files` FIRST".
+
+One reasona-dev-specific difference was needed: dev-ralf excludes `docs/plans/` from its search
+corpus because that is where its plans live, but reasona-dev takes an arbitrary `--plan` path, so
+the plan file being reported on is excluded BY PATH as well. Without that a plan kept anywhere else
+is its own evidence and the report is silently always clean — found by running the reporter against
+a real repository, not by the fixtures, which had used the conventional directory.
+
+**Deliberately not ported.** dev-ralf's `budget.py` is a stateful CLI whose purpose is to stop
+worker.md's PROSE from re-deriving the arithmetic at five separate dispatch sites; reasona-dev's
+`FixBudget` has always been one class computing it in one place, so the refactor has no analogue
+here. `calibrate_completeness.py` measures `completeness.py`'s noise floor on a repo's plan history
+— an out-of-band tool, run manually before trusting the probe on a new repo, not part of any
+pipeline.
+
+531 tests passing.
+
+## 3.14.8 `MAX_FINAL_CYCLES` — 3 → 2 → 3, and why the record matters
+
+`MAX_FINAL_CYCLES` bounds how many dev fix dispatches the **final audit** stage may make: the
+`"final"` stage of `FixBudget`, spent by `final_phase.run_final_audit()`'s loop, `verdict=FAIL`
+when exhausted while the audit still reports `FIX_REQUIRED`. dev-ralf's counterpart is
+`budget.py`'s `STAGE_CAPS["final"]`, driving the *Conditional final audit* section of worker.md.
+
+The number moved twice in two days, and reading the three states in isolation is misleading:
+
+1. reasona-dev ran **3** while dev-ralf ran **2**. This was unnoticed drift, not a decision — found
+   only by reading dev-ralf's source directly (§3.14.6 item 1).
+2. reasona-dev was aligned **down to 2** to match.
+3. The operator then raised **both projects to 3** — dev-ralf in commit `5ff9641`
+   ("raise the final-audit fix-budget stage cap to 3"), reasona-dev here. They are consistent at 3.
+
+**Why this is written down at all.** Between (2) and (3) this project briefly recorded the 3 as an
+*intentional divergence from dev-ralf*, complete with a code comment saying "do not change it back"
+and a test deliberately exempting the cap from the drift check. That was wrong: dev-ralf had
+already moved to 3 hours earlier, and the parity verification that produced the "divergence"
+framing had simply read an older revision. The correction matters more than the number — a cap
+exempted from the drift check on a false premise is a cap that can never be caught drifting again,
+which is the exact failure the check exists to prevent. `MAX_FINAL_CYCLES` is therefore pinned
+alongside every other cap in `test_every_stage_cap_matches_dev_ralfs_budget_py`, not exempted from
+it.
+
+**The binding constraint never changed.** `MAX_TOTAL_FIX_CYCLES` (16) is what actually bounds a PR:
+the stage caps sum past it at either value (8+8+2+3+3 = 24, or 8+8+3+3+3 = 25 — dev-ralf's
+`budget.py` says the same of its own). The extra final-audit cycle is only reachable by a PR that
+has not already spent its pool elsewhere.
+
+**A standing caveat for the next parity pass.** `~/repository/tas-dev-plugins` is under active
+development and moved twice during this one — once mid-verification. Re-check `git log` on it
+before treating any conclusion here as current, and prefer `budget.py`'s `STAGE_CAPS` over
+worker.md's prose when the two could disagree: since commit `6ff5103` the prose mirrors the tool
+rather than declaring the numbers itself.
 
 ## 4. Directory structure
 
