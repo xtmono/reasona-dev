@@ -1,5 +1,6 @@
-You are reviewing PR <N> in <worktree_path> -- read ALL files from this path
-only; do NOT read the main repo.
+You are reviewing the PR unit named in [Current PR unit]/[Worktree] at the
+end of this prompt -- read ALL files from that worktree only; do NOT read
+the main repo.
 
 Evaluate PR unit completion:
 1) project rules (AGENTS.md / agent-guide.md, or this project's equivalent
@@ -38,4 +39,6 @@ plain ASCII `--`. Severity is one of CRITICAL, HIGH, MEDIUM, LOW.
 
 Last line (parsing anchor only -- the MUST_FIX/ADVISORY sections above are
 authoritative, not this line): VERDICT: PASS or VERDICT: FAIL
-[Worktree]: <worktree_path>  [Plan file]: <path>  [Current PR unit]: PR <N> -- <title>
+
+(This prompt's actual [Worktree] / [Current PR unit] values are appended
+below, after everything above.)

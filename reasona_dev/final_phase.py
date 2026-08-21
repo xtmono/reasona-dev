@@ -72,7 +72,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import _shell, config_file, cycles_log, squash
+from reasona_dev import _shell, ci_gate, config_file, cycles_log, squash
 from reasona_dev import gh_review as gh_review_mod
 from reasona_dev.cycle_gate import (
     MAX_FINAL_PHASE_ROUNDS,
@@ -239,6 +239,33 @@ def _run_conflict_fix(
     )
 
 
+def _build_sync_ci_fix_prompt(ci_tail: str) -> str:
+    return "\n".join(
+        [
+            "The merge conflict resolution you just committed does not pass "
+            "this project's fast CI check. Fix the problem in place, on top "
+            "of the commit you just made -- keep the merge and its "
+            "conflict-resolution intent, do not undo or re-open the merge, "
+            "then stage and commit the fix.",
+            "",
+            "CI output (tail):",
+            ci_tail[-2000:],
+        ]
+    )
+
+
+def _run_sync_ci_fix(
+    *, workdir: Path, pr_title: str, ci_tail: str,
+    dev_model: ResolvedModel, rundir: Path, cycle: int, port: int, run_role_fn,
+) -> RoleRunResult:
+    return run_role_fn(
+        workdir=workdir, role="backend",
+        title=f"{pr_title} -- fix sync CI failure c{cycle}",
+        prompt=_build_sync_ci_fix_prompt(ci_tail),
+        model=dev_model, rundir=rundir, cycle=cycle, port=port,
+    )
+
+
 def run_sync_cycle(
     *,
     workdir: Path,
@@ -299,6 +326,39 @@ def run_sync_cycle(
         else:
             kind = "substantive"  # no output at all -- same fail-safe default
         substantive = substantive or (kind == "substantive")
+
+        # N-B: worker.md's *Sync* section: "Mechanical -> $CI_FAST -> commit
+        # -> retry merge." The conflict-resolution commit just made must
+        # itself pass $CI_FAST before this cycle counts as resolved. Unlike
+        # `ci_gate.run_fast()`'s revert-on-failure use everywhere else in
+        # this pipeline, reverting here would be wrong -- there is no
+        # "pre-fix" state to revert to that is not also the unresolved
+        # conflict itself, so a revert would destroy the very resolution
+        # just committed. The top of this loop's next iteration would call
+        # `sync_main()` again and, since the merge commit already landed,
+        # get an immediate "up to date" and return "ok" -- silently
+        # ignoring a CI failure -- so instead the CI-fail/re-fix exchange
+        # happens right here, still spending from the same `"sync"` budget,
+        # before control ever reaches the top of the outer loop again.
+        ci_fast_command = config_file.resolve_ci_command(
+            "fast", config_file.load_project(workdir), config_file.load_global(),
+        )
+        ci_ok, ci_tail = ci_gate.run_fast(workdir, ci_fast_command, pre_fix_head=None)
+        while not ci_ok:
+            if not budget.can_spend("sync"):
+                return (
+                    "blocked", f"sync CI failed and budget exhausted: {ci_tail[-500:]}",
+                    dispatches, changed, substantive,
+                )
+            budget.spend("sync")
+            cycle += 1
+            ci_fix_result = _run_sync_ci_fix(
+                workdir=workdir, pr_title=pr_title, ci_tail=ci_tail,
+                dev_model=resolved["dev"], rundir=rundir, cycle=cycle, port=port,
+                run_role_fn=run_role_fn,
+            )
+            dispatches.append(ci_fix_result)
+            ci_ok, ci_tail = ci_gate.run_fast(workdir, ci_fast_command, pre_fix_head=None)
 
 
 def is_up_to_date(workdir: Path, *, base: str = "origin/main") -> tuple[bool, str]:

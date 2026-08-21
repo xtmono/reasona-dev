@@ -2454,6 +2454,88 @@ dispatches (`_run_conflict_fix()`/`_run_ship_fix()`) in this pass -- those are s
 shapes from `_run_dev_fix()` with their own bookkeeping, scoped out to keep this change to the three
 highest-frequency fix loops the review's own cost argument was about.
 
+## 3.14.11 Fifth source-level parity re-check — the cycle-0 CI gate, sync-fix CI, and record corrections
+
+A follow-up review, after §3.14.10's B-item fixes landed, found B-5's local CI gate (`ci_gate.py`)
+still had two dispatch shapes it never reached, plus a docstring inaccuracy and a stale comment left
+over from earlier passes. This section closes all of them.
+
+**N-A (the largest remaining B-5 gap).** worker.md's *Develop & review*, Cycle 0: "① dispatch the
+skeleton ② verify `$CI_FAST` is green, else PR ABORT" — dev-ralf's own one hard-abort CI checkpoint.
+§3.14.10's B-5 wired `ci_gate.run_fast()` into `pr_cycle._run_dev_fix()` (review/scan/final-audit fix
+loops) and `gh_pr.run_gh_pr()` (the pre-`/gh-pr` full gate), but never into cycle-0 itself — a
+skeleton that does not even compile used to sail straight into review. **Fixed**:
+`orchestrate._process_unit()` now runs `ci_gate.run_fast(unit_workdir, ci_fast_command,
+pre_fix_head=None)` immediately after a successful `dispatch_cycle0_fn()`, before review/scan ever
+starts; a failure produces `status="blocked"` (an environment/build problem, not a code-quality
+judgment — the same failed/blocked split §3.7.11.1 already documents) and the unit never reaches
+review. `pre_fix_head=None` deliberately disables `run_fast()`'s revert — cycle-0 is the first commit
+on the unit's branch, there is no prior state to revert to, and worker.md itself aborts here rather
+than reverting. `ledger.mark_dev_dispatched()` is called only AFTER this gate passes, not right after
+`dispatch_cycle0_fn()` — marking it earlier would make a resumed run see `dev_already_dispatched() ==
+True` and skip cycle-0 (and this gate) entirely on retry, sending the still-broken skeleton straight
+into review on the next run.
+
+**N-B (the sync-conflict-fix gate — a different shape from every other gate).** The review flagged
+that reusing `ci_gate.run_fast()`'s revert-on-failure semantics for `final_phase._run_conflict_fix()`
+would be wrong: reverting a failed sync-conflict-resolution commit would destroy the merge conflict
+resolution itself, not just a bad fix, and there is no "pre" state to revert to that is not also the
+unresolved conflict. worker.md's own *Sync* section already gives the right shape instead:
+"Mechanical → `$CI_FAST` → commit → retry merge." **Fixed**: after `run_sync_cycle()`'s conflict-fix
+dispatch commits, it now runs `ci_gate.run_fast(workdir, ci_fast_command, pre_fix_head=None)`
+(never reverting). On failure, the loop does not fall through to `sync_main()` (which would report
+"up to date" and silently accept the CI-red commit as resolved, since the merge already landed) —
+instead it dispatches a further fix against the CI failure output (`_run_sync_ci_fix()`), re-checking
+`$CI_FAST` after each, spending from the same `"sync"` stage budget as the conflict-resolution
+dispatches, until it passes or the budget is exhausted (`status="blocked"`). The review separately
+ranked the ship-fix gate gap as low priority (`acceptance.run_all()` gives natural re-verification
+the next round) and the gh-review-fix gate gap as lowest (GitHub's own CI is the immediate backstop
+there) — neither is closed in this pass.
+
+**N-C.** `open_decisions.py`'s module docstring claimed a markdown table row "is rejected" as an Open
+Decisions entry. The actual parser has no explicit rejection/violation check for table rows — they
+are simply invisible to `_OD_ENTRY` (a table row is not a column-0 `-` bullet, so it is never matched
+as an entry at all, silently, not flagged). The existing test
+(`test_a_markdown_table_is_invisible_to_this_parser_same_as_reasona_plans`) already asserted the
+correct silent behavior; only the docstring's wording was wrong. **Fixed**: reworded to say
+"invisible to this parser," matching what the code (and the test) actually does.
+
+**N-D (informational — no code change).** B-7 (§3.14.10) means any custom profile lacking
+`final_audit.md` now blocks every unit that undergoes ANY fix, not only unfixed units — because
+`should_run_final_audit()` gates on `budget.total_used > 0`. This is the intended consequence of
+treating a missing `final_audit.md` the same as review/compliance's identical condition, but it is a
+breaking change for an existing custom-profile operator who never shipped that file: a profile that
+previously fixed PRs cleanly will now block on the first one that needed any fix at all. Worth a
+release note for anyone running a custom profile; not a defect to fix in code.
+
+**N-E (a record correction, not a history rewrite).** §3.14.10's commit message states "571 tests
+passing (was 542)." Independently re-running the suite at the prior commit (`4cfc83e`, the tip
+§3.14.10 started from) gives **536** passing, not 542 — the real delta from that pass was +35, not
++29. Per the standing rule this project follows for a factual error found in an already-pushed
+record (§3.14.8's own precedent — commit history is never rewritten to fix a stated number after the
+fact): this paragraph is the correction, not a `git commit --amend`.
+
+**R-3 (packaged prompt text vs. the trailer block — lowest priority, cosmetic).** A-1 (§3.14.9) added
+`_pr_unit_context_block()`'s trailer (real `[Current PR unit]`/`[Worktree]` values) without removing
+the packaged prompts' own raw, never-substituted `<N>`/`<worktree_path>`/`<path>`/`<title>` markers —
+so a dispatched agent saw an unfilled placeholder early in the prompt and the real value again at the
+end, in the same text. Functionally harmless (nothing parses the placeholder occurrences), but
+confusing to read. **Fixed**: `review.md`, `recheck.md`, `bugbot.md`, `compliance.md`, and
+`final_audit.md` now point at "the worktree/PR unit named in `[Worktree]`/`[Current PR unit]` at the
+end of this prompt" instead of an unfilled `<worktree_path>`/`<N>` marker, and the packaged prompts'
+own trailing `[Worktree]: <worktree_path> ...` templates (the parts that would have needed literal
+substitution dev-ralf's own worker did with `sed`, which this project never does) were removed in
+favor of the one already-substituted trailer each dispatch appends. `review.md`'s reference to the
+plan's own `## PR <N>:` HEADING FORMAT (item 4, COMPLETENESS) is untouched — that is not a
+per-dispatch placeholder, it documents the plan file's literal markdown syntax.
+
+**R-4.** `pr_cycle.run_pr_cycle()`'s docstring claimed cycle-0 was "gated by `$CI_FAST`-equivalent
+`completion_signals`" — a mechanism that was never ported and was removed for good from
+`plan_compile.py` in an earlier parity pass (§3.14.6). Doubly stale now that N-A gives cycle-0 a REAL
+CI-fast gate, just via a different mechanism (`ci_gate.run_fast()`, called from
+`orchestrate._process_unit()`, not from this module at all). **Fixed**: reworded to point at the
+actual gate and its actual location.
+
 ## 4. Directory structure
 
 ```

@@ -8,9 +8,10 @@ producer of this section, states the identical rule from the other side:
 "plan-ralf never adds that tag"). reasona-plan's `check_plan._open_decisions()`
 already implements this parsing (column-0 `-` bullets own their indented
 continuation lines; a column-0 line that is not a bullet ends the entry; a
-markdown table row is not an entry and is rejected, since the parser
-cannot see rows as entries and every decision written as one would go
-uncounted). This module ports that same parsing into reasona-dev, the
+markdown table row is not a bullet, so it is simply invisible to this
+parser -- not flagged, not rejected, just never counted as an entry, so a
+decision written as a table row would go silently unchecked). This module
+ports that same parsing into reasona-dev, the
 consumer side of the contract plan-ralf's own Report already describes to
 the human ("reasona-dev refuses to start while this entry lacks an
 explicit decided: <choice> tag") -- until now, nothing here actually

@@ -1,4 +1,5 @@
-Work in <worktree_path> only -- do NOT read the main repo.
+Work only in the worktree named in [Worktree] at the end of this prompt --
+do NOT read the main repo.
 
 You are performing a focused bug review on this PR's diff. Identify ONLY
 genuine bugs, logic errors, security vulnerabilities, race conditions,

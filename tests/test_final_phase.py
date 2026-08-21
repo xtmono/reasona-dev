@@ -744,6 +744,67 @@ def test_sync_cycle_captures_a_substantive_self_report(tmp_path):
     assert substantive is True
 
 
+def test_sync_cycle_retries_the_fix_when_ci_fast_fails_after_resolution(tmp_path, monkeypatch):
+    """N-B: worker.md's *Sync*: "Mechanical -> $CI_FAST -> commit -> retry
+    merge." A conflict resolution that passes but leaves the branch
+    CI-red must not be accepted as resolved -- and, unlike a normal dev
+    fix cycle, must NOT be reverted (that would destroy the merge
+    resolution itself). Simulate one CI failure followed by a pass."""
+    work = _repo_with_conflicting_origin(tmp_path)
+    calls = {"n": 0}
+
+    def _fake_run_fast(workdir, command, *, pre_fix_head, timeout=600):
+        calls["n"] += 1
+        return (False, "boom") if calls["n"] == 1 else (True, "")
+
+    monkeypatch.setattr(final_phase.ci_gate, "run_fast", _fake_run_fast)
+
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        if "resolve merge conflict" in title:
+            (workdir / "a.txt").write_text("resolved\n")
+            _git(["add", "a.txt"], workdir)
+            _git(["commit", "-q", "--no-edit"], workdir)
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
+                             raw_output_path=Path("/dev/null"))
+
+    budget = FixBudget()
+    status, reason, dispatches, changed, substantive = final_phase.run_sync_cycle(
+        workdir=work, pr_title="t", resolved=_RESOLVED, rundir=tmp_path / "r",
+        budget=budget, run_role_fn=_resolve,
+    )
+    assert status == "ok" and changed is True
+    assert calls["n"] == 2  # first CI check failed, the retry passed
+    assert len(dispatches) == 2  # the conflict fix, then the CI fix
+    assert (work / "a.txt").read_text() == "resolved\n"
+
+
+def test_sync_cycle_blocks_when_ci_fast_never_passes_after_resolution(tmp_path, monkeypatch):
+    work = _repo_with_conflicting_origin(tmp_path)
+
+    monkeypatch.setattr(final_phase.ci_gate, "run_fast", lambda *a, **kw: (False, "still broken"))
+
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        if "resolve merge conflict" in title:
+            (workdir / "a.txt").write_text("resolved\n")
+            _git(["add", "a.txt"], workdir)
+            _git(["commit", "-q", "--no-edit"], workdir)
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
+                             raw_output_path=Path("/dev/null"))
+
+    budget = FixBudget()
+    status, reason, dispatches, changed, substantive = final_phase.run_sync_cycle(
+        workdir=work, pr_title="t", resolved=_RESOLVED, rundir=tmp_path / "r",
+        budget=budget, run_role_fn=_resolve,
+    )
+    assert status == "blocked"
+    assert "sync CI failed" in reason
+    assert budget.sync_cycles == MAX_SYNC_CYCLES
+    # the resolution commit is untouched -- a CI-gate revert never ran
+    assert (work / "a.txt").read_text() == "resolved\n"
+
+
 def test_sync_cycle_gives_up_after_its_budget_is_exhausted(tmp_path):
     work = _repo_with_conflicting_origin(tmp_path)
     budget = FixBudget()

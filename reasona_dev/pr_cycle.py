@@ -552,9 +552,13 @@ def run_pr_cycle(
     """develop -> review -> bug+compliance scan, worker.md-faithful.
 
     Assumes `dev`'s cycle-0 implementation already happened (this driver
-    picks up at *Review cycles* -- `plan_compile.py`'s own step covers
-    cycle-0 development, gated by `$CI_FAST`-equivalent `completion_signals`
-    the way it already is).
+    picks up at *Review cycles* -- `orchestrate.py`'s `_process_unit()`
+    covers cycle-0 development and its own `$CI_FAST` gate before this
+    driver is ever called, not the `completion_signals` mechanism worker.md
+    used -- that mechanism was never ported, and was removed for good from
+    `plan_compile.py` in an earlier parity pass; see `ci_gate.run_fast()`
+    called from `orchestrate.py` for the real gate this docstring used to
+    describe inaccurately).
 
     Each role dispatch is its own `bernstein run`, so there is no server
     lifetime to manage here and no cleanup path to get wrong.

@@ -1,7 +1,7 @@
-You are performing a FRESH whole-PR audit of <worktree_path> -- read ALL
-files from this path only; do NOT read the main repo. You have NOT seen any
-prior review/scan finding on this PR; do not assume anything already got
-caught.
+You are performing a FRESH whole-PR audit of the worktree named in
+[Worktree] at the end of this prompt -- read ALL files from that worktree
+only; do NOT read the main repo. You have NOT seen any prior review/scan
+finding on this PR; do not assume anything already got caught.
 
 Audit the complete diff (`git diff origin/main...HEAD`) for: completeness,
 cross-file correctness, regression, backward compatibility, security,

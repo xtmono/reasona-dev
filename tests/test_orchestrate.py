@@ -982,6 +982,57 @@ def test_a_failing_cycle0_dispatch_blocks_the_unit_without_running_review(tmp_pa
     assert "boom" in result.outcomes[0].reason
 
 
+def test_a_failing_cycle0_ci_check_blocks_the_unit_without_running_review(tmp_path):
+    """N-A: worker.md's *Develop & review*, Cycle 0: "① dispatch the
+    skeleton ② verify $CI_FAST is green, else PR ABORT." A skeleton that
+    dispatches cleanly but fails `$CI_FAST` must still block before review
+    ever runs -- same shape as a failing dispatch itself."""
+    workdir = _repo(tmp_path)
+    (workdir / ".reasona" / "reasona.yaml").write_text(
+        "dev-profile: rust-dev\n"
+        "dev-profile-map:\n"
+        '  "crates/**": rust\n'
+        '  "services/**/*.py": python\n'
+        "ci:\n"
+        "  fast: \"false\"\n"
+    )
+    cycle_fn, ship_fn = _recorder()
+    result = _run(tmp_path, cycle_fn, ship_fn, workdir_override=workdir)
+    statuses = {o.stage_name: o.status for o in result.outcomes}
+    assert statuses == {"pr-1": "blocked", "pr-2": "skipped", "pr-3": "skipped"}
+    assert cycle_fn.calls == []
+    assert "cycle-0 CI failed" in result.outcomes[0].reason
+
+
+def test_cycle0_ci_check_is_a_noop_when_ci_fast_is_unconfigured(tmp_path):
+    """The default, no `ci:` key at all -- must not block anything (the
+    pre-existing behavior, unaffected unless an operator opts in)."""
+    cycle_fn, ship_fn = _recorder()
+    result = _run(tmp_path, cycle_fn, ship_fn)
+    assert result.passed
+
+
+def test_a_cycle0_ci_failure_is_retried_on_the_next_resumed_run(tmp_path):
+    """A cycle-0 CI failure must NOT be recorded as `dev_dispatched` --
+    otherwise a resumed run would see `dev_already_dispatched() == True`
+    and skip cycle-0 (and this gate) entirely, sending the still-broken
+    skeleton straight into review."""
+    from reasona_dev import ledger
+
+    workdir = _repo(tmp_path)
+    (workdir / ".reasona" / "reasona.yaml").write_text(
+        "dev-profile: rust-dev\n"
+        "dev-profile-map:\n"
+        '  "crates/**": rust\n'
+        '  "services/**/*.py": python\n'
+        "ci:\n"
+        "  fast: \"false\"\n"
+    )
+    cycle_fn, ship_fn = _recorder()
+    _run(tmp_path, cycle_fn, ship_fn, workdir_override=workdir)
+    assert ledger.dev_already_dispatched(workdir, "testplan", "pr-1") is False
+
+
 def test_a_failing_worktree_creation_blocks_the_unit(tmp_path):
     cycle_fn, ship_fn = _recorder()
 

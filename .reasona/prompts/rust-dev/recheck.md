@@ -1,5 +1,6 @@
-You are RE-CHECKING a fix on PR <N> in <worktree_path> -- read ALL files from
-this path only; do NOT read the main repo.
+You are RE-CHECKING a fix on the PR unit named in [Current PR unit]/
+[Worktree] at the end of this prompt -- read ALL files from that worktree
+only; do NOT read the main repo.
 
 This is a BOUNDED recheck, not a fresh review. The fix that just landed
 touched only files that were already named in the findings being confirmed,
@@ -47,4 +48,6 @@ MUST_FIX items at all.
 
 Last line (parsing anchor only -- the MUST_FIX/ADVISORY sections above are
 authoritative, not this line): VERDICT: PASS or VERDICT: FAIL
-[Worktree]: <worktree_path>  [Plan file]: <path>  [Current PR unit]: PR <N> -- <title>
+
+(This prompt's actual [Worktree] / [Current PR unit] values are appended
+below, after everything above.)

@@ -46,7 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import _shell, bernstein_dispatch, config_file, final_phase as final_phase_mod, gh_pr, ledger, open_decisions, worktree
+from reasona_dev import _shell, bernstein_dispatch, ci_gate, config_file, final_phase as final_phase_mod, gh_pr, ledger, open_decisions, worktree
 from reasona_dev.plan_report import _SOURCE_EXT
 from reasona_dev import gh_review as gh_review_mod
 from reasona_dev import ship_gate
@@ -434,6 +434,38 @@ def _process_unit(
                     workdir, plan_name, up.stage_name, status=outcome.status, reason=outcome.reason,
                 )
             return outcome
+        # N-A: worker.md -> *Develop & review*, Cycle 0: "① dispatch the
+        # skeleton ② verify $CI_FAST is green -- else PR ABORT." This was
+        # the one hole B-5's own coverage left: `ci_gate` only reached the
+        # review/scan/final-audit fix loops (`pr_cycle._run_dev_fix()`) and
+        # the pre-`/gh-pr` full gate, never cycle-0 itself, so a skeleton
+        # that does not even compile used to sail straight into review. No
+        # revert here (unlike a later fix cycle) -- cycle-0 IS the first
+        # commit on this unit's branch, there is no prior state to revert
+        # to, and worker.md itself does not revert on this failure either,
+        # it aborts.
+        #
+        # `mark_dev_dispatched` is deliberately NOT called until AFTER this
+        # gate passes: marking it right after `dispatch_cycle0_fn()` (as an
+        # earlier version of this function did) would make a RESUMED run,
+        # after a cycle-0-CI-blocked unit, see `dev_already_dispatched() ==
+        # True` and skip cycle-0 (and this very gate) entirely on retry --
+        # sending a still-broken skeleton straight into review.
+        ci_fast_command = config_file.resolve_ci_command(
+            "fast", config_file.load_project(workdir), config_file.load_global(),
+        )
+        ci_ok, ci_tail = ci_gate.run_fast(unit_workdir, ci_fast_command, pre_fix_head=None)
+        if not ci_ok:
+            outcome = UnitOutcome(
+                unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="blocked",
+                reason=f"cycle-0 CI failed: {ci_tail[-500:]}",
+            )
+            if resume:
+                ledger.mark_unit_terminal(
+                    workdir, plan_name, up.stage_name, status=outcome.status, reason=outcome.reason,
+                )
+            return outcome
+
         if resume:
             ledger.mark_dev_dispatched(workdir, plan_name, up.stage_name)
 
