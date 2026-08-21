@@ -72,7 +72,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import _shell, cycles_log, squash
+from reasona_dev import _shell, config_file, cycles_log, squash
 from reasona_dev import gh_review as gh_review_mod
 from reasona_dev.cycle_gate import (
     MAX_FINAL_PHASE_ROUNDS,
@@ -81,7 +81,7 @@ from reasona_dev.cycle_gate import (
     evaluate,
 )
 from reasona_dev.model_config import ResolvedModel
-from reasona_dev.pr_cycle import RoleRunResult, _run_dev_fix, run_role
+from reasona_dev.pr_cycle import RoleRunResult, _head_sha, _missing_prompt_reason, _run_dev_fix, run_role
 from reasona_dev.prompt_profile import resolve_prompt
 from reasona_dev.ship_gate import ShipDecision
 from reasona_dev.squash import SquashMessage
@@ -476,10 +476,22 @@ def run_final_audit(
     """
     prompt = resolve_prompt("final_audit", profile=profile, workdir=workdir)
     if prompt is None:
-        # Not fatal: a profile that ships no final_audit.md has declared it
-        # does not want one. Silently skipping a REQUESTED audit would be
-        # wrong; skipping an undefined one is the profile's own decision.
-        return True, "profile defines no final_audit prompt -- skipped", []
+        # B-7: this used to silently PASS a missing prompt ("the profile's
+        # own decision" not to have one) -- but review/compliance treat the
+        # identical condition (a role's prompt missing from every layer) as
+        # an ABORT via `_missing_prompt_reason`, and this stage running only
+        # AFTER a fix already happened (`should_run_final_audit()`) means a
+        # profile that genuinely never configured `final_audit.md` was
+        # skipping its own last-line audit on every single fixed PR without
+        # a trace. Same failure, same treatment: blocked, not a quiet pass.
+        return False, _missing_prompt_reason("final_audit", profile, workdir), []
+
+    # R-1: minimal PR/worktree identity, the same trailer review/recheck's
+    # packaged prompts already carry -- final_audit.md does not reference
+    # the plan's own `## PR <N>:` section (it audits the diff, not plan
+    # completeness), so unlike review/recheck this does not also need the
+    # full section text `pr_cycle._pr_unit_context_block()` appends there.
+    prompt += f"\n\n---\n[Current PR unit]: {pr_title}\n[Worktree]: {workdir}\n"
 
     dispatches: list[RoleRunResult] = []
     cycle = 0
@@ -524,11 +536,20 @@ def run_final_audit(
             # loops carry, and re-auditing is cheaper to simply refuse.
             return False, "final audit inconclusive -- verification did not run", dispatches
 
+        # B-5: same CI-fast gate the review/scan fix loops apply -- resolved
+        # fresh here rather than threaded in as a parameter, since
+        # `run_final_audit()` (unlike `run_pr_cycle()`) does not already
+        # carry a config load anywhere else in its call chain.
+        ci_fast_command = config_file.resolve_ci_command(
+            "fast", config_file.load_project(workdir), config_file.load_global(),
+        )
+        pre_fix_head = _head_sha(workdir)
         fix = _run_dev_fix(
             workdir=workdir, pr_title=pr_title,
             findings=result.review_result.must_fix, dev_model=resolved["dev"],
             escalated_model=decision.escalated_model, rundir=rundir,
             cycle=cycle, run_role_fn=run_role_fn, port=port,
+            pre_fix_head=pre_fix_head, ci_fast_command=ci_fast_command,
         )
         dispatches.append(fix)
 

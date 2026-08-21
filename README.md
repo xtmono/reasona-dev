@@ -104,10 +104,12 @@ reasona_dev/
   bernstein_config.py          bootstraps/syncs a target repo's bernstein.yaml
   finding_adapter.py           text + KV contract parsers
   cycle_gate.py                  recheck routing, escalation, budget, convergence
+  ci_gate.py                       local CI gate -- ci.fast after every dev fix (revert on failure), ci.full before /gh-pr
+  open_decisions.py                the Open Decisions Gate -- refuses an undecided plan entry before any dispatch
   squash.py                        squash message builder + guard
   ledger.py                         per-plan, per-unit resume state
   plugin.py                         pluggy hookimpl
-tests/                      pytest, 536 cases
+tests/                      pytest, 571 cases
 ```
 
 ## CLI
@@ -176,6 +178,26 @@ dev-profile-map:
 Resolution order: unit's own `profile:` > `dev-profile-map:` glob match >
 `dev-profile:` > `"rust-dev"`. A unit whose files match two profiles is
 refused at compile time — split it or set `profile:` explicitly.
+
+## Local CI gate (opt-in)
+
+```yaml
+# <repo>/.reasona/reasona.yaml
+ci:
+  fast: "cargo check --workspace --all-targets"   # after every dev fix -- revert on failure
+  full: "make ci"                                  # once, right before /gh-pr creates anything
+```
+
+Unconfigured (no `ci:` key, the default) is a no-op on both — nothing changes for a repo that
+doesn't set this. `fast` catches a broken fix locally, in seconds, instead of only via GitHub's
+own CI after the PR is already public; `full` refuses to open a PR at all when it fails.
+
+## Open decisions
+
+A plan's `## Open decisions (human)` section (plan-ralf's own output format) must have every entry
+marked `decided: <choice>` before `run-plan` dispatches a single agent — even choosing the printed
+default is a decision that must be recorded. `run-plan` refuses to start, listing every undecided
+entry, otherwise.
 
 ## Running a plan
 

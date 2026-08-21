@@ -10,8 +10,12 @@ failure-path tests. This is a second, independent pass -- not a rubber
 stamp of the earlier review.
 
 Report findings in this exact shape -- do not report a verdict, report
-findings; section membership is what gates, not your judgment. Findings
-here are ADVISORY only -- a final audit never blocks merge on its own:
+findings; section membership is what gates, not your judgment. A MUST_FIX
+here is NOT merely advisory: it spends this PR's shared fix budget on a
+bounded fix loop, the same as the earlier review/scan stages, and CAN
+block the merge if the fix attempt does not resolve it. Report a real
+finding as MUST_FIX regardless -- do not soften it to ADVISORY because you
+believe a final-stage finding is harmless:
 
 MUST_FIX:
 - [CRITICAL] src/session.rs:142 rotate_token

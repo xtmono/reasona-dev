@@ -46,7 +46,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import bernstein_dispatch, config_file, final_phase as final_phase_mod, ledger, worktree
+from reasona_dev import _shell, bernstein_dispatch, config_file, final_phase as final_phase_mod, gh_pr, ledger, open_decisions, worktree
+from reasona_dev.plan_report import _SOURCE_EXT
 from reasona_dev import gh_review as gh_review_mod
 from reasona_dev import ship_gate
 from reasona_dev.model_config import ResolvedModel
@@ -148,6 +149,42 @@ class PlanRunResult:
         return "\n".join(lines)
 
 
+def plan_upstream_warning(workdir: str | Path, plan_path: str | Path, *, base: str = "origin/main") -> str | None:
+    """dev-ralf preflight P2 ("plan already merged into `base`"),
+    downgraded here from a hard ABORT to a warning. `worktree.py`'s
+    `ensure_unit_worktree()` always cuts a unit's worktree from `base`, so
+    anything a dispatched role reads from the checked-out TREE is invisible
+    if the plan is only local -- but `pr_cycle.py`'s `_pr_unit_context_block()`
+    (A-1) now passes each unit's own PR-section text by value, not by
+    reading the plan file from the worktree, which removed the primary
+    reason dev-ralf hard-blocks on this. The remaining risk is narrower:
+    something ELSE the plan implicitly relies on being present in the tree
+    (a referenced doc, a schema file the plan describes but does not
+    declare in `files:`). A hard ABORT would also wrongly refuse a
+    perfectly normal case dev-ralf's own worker never has to handle:
+    `--workdir` pointing at a repo with no pushed `origin/main` state for
+    this plan at all, e.g. a plan still being iterated on locally.
+
+    Returns `None` when the check passes OR cannot be meaningfully run
+    (`plan_path` outside `workdir`, no `base` ref, `workdir` not a git repo)
+    -- silence, not a false alarm, is the safe default for an advisory.
+    """
+    workdir = Path(workdir)
+    try:
+        rel = Path(plan_path).resolve().relative_to(workdir.resolve())
+    except ValueError:
+        return None
+    code, _out, _err = _shell.run(["git", "cat-file", "-e", f"{base}:{rel.as_posix()}"], workdir, timeout=15)
+    if code == 0:
+        return None
+    return (
+        f"plan file {rel} is not visible on {base} yet -- every PR unit's worktree is cut "
+        f"from {base}, so anything this plan relies on besides its own PR sections (already "
+        "passed by value, per-unit) may be invisible to a dispatched role. Not blocking -- "
+        "merge the plan first if a unit's cycle-0/review seems to be missing context."
+    )
+
+
 def resolve_plan_units(plan_text: str, workdir: str | Path) -> list[UnitPlan]:
     """Parse a plan and resolve every unit's profile, up front.
 
@@ -162,6 +199,25 @@ def resolve_plan_units(plan_text: str, workdir: str | Path) -> list[UnitPlan]:
         raise PlanError("plan has defect(s):\n  - " + "\n  - ".join(manifest_errors))
     if not units:
         units = parse_plan_units(plan_text)
+
+    # B-1: the Open Decisions Gate -- dev-ralf's own hard blocker
+    # (worker.md), never ported until now even though plan-ralf's own
+    # Report already tells the human reasona-dev enforces it. Every entry
+    # in `## Open decisions (human)` must carry `decided: <choice>` before
+    # a single agent is dispatched -- a `default-if-unresolved` silently
+    # taking effect because nobody decided is exactly the failure this
+    # blocks, and it must fire before ANY unit's cycle-0, not just the one
+    # a decision happens to be about (a decision left in the plan body,
+    # not scoped to one PR, may bear on units the author never connected
+    # it to).
+    undecided = open_decisions.undecided_entries(plan_text)
+    if undecided:
+        listed = "\n  - ".join(open_decisions.entry_summary(e) for e in undecided)
+        raise PlanError(
+            f"plan has {len(undecided)} undecided entr{'y' if len(undecided) == 1 else 'ies'} "
+            f"in `## Open decisions (human)` -- add `decided: <choice>` to each before running "
+            f"(even choosing the printed default is a decision that must be recorded):\n  - {listed}"
+        )
 
     project_cfg = config_file.load_project(workdir)
     global_cfg = config_file.load_global()
@@ -221,6 +277,39 @@ def order_units(units: list[UnitPlan]) -> list[UnitPlan]:
             )
         remaining = still
     return ordered
+
+
+def _shares_source_files(a: UnitPlan, b: UnitPlan) -> bool:
+    """dev-ralf's implicit DAG edge (execution-plan.md): two PR units that
+    both declare the SAME source file (not docs/config) in `files:`, with
+    no explicit `depends_on` between them, are serialized -- `job=1`'s
+    sequential scheduler already gets this for free (declaration order),
+    but `job>1`'s concurrent scheduler (`_run_units_concurrently()`)
+    dispatches purely by dependency-readiness and would otherwise let two
+    units edit the same source file in two worktrees at once. Uses the
+    SAME `_SOURCE_EXT` list `plan_report.py`'s own advisory does (itself
+    dev-ralf `scope_report.py`'s `SOURCE_EXT`), so the plan Report's "these
+    two share a file" note and this scheduling guard never disagree on
+    what counts as source.
+    """
+    a_src = {p for p in a.unit.files if Path(p).suffix.lower() in _SOURCE_EXT}
+    b_src = {p for p in b.unit.files if Path(p).suffix.lower() in _SOURCE_EXT}
+    return bool(a_src & b_src)
+
+
+def _shipped_on_github(merged_pr_titles: dict[str, tuple[int, str]], unit: PRUnit) -> tuple[int | None, str | None]:
+    """B-4: a lightweight fallback for `ledger.unit_status()` -- when the
+    local ledger does not know a unit shipped (lost, cleared by
+    `--restart`, or simply never seen on this machine), check whether
+    `merged_pr_titles` (ONE `gh_pr.list_merged_pr_titles()` fetch per
+    `run_plan()` call, not per unit -- see that function's own docstring)
+    already shows a MERGED PR with this unit's exact title before
+    re-developing it from scratch. Pure dict lookup, no `gh` call of its
+    own, safe to call for every unit on every run.
+    """
+    unit_type, subject = gh_pr.resolve_type_subject(unit)
+    title = gh_pr.build_pr_title(unit_type, subject)
+    return merged_pr_titles.get(title, (None, None))
 
 
 def _blocking_dependency(unit: UnitPlan, outcomes: dict[str, UnitOutcome], known: set[str]) -> str | None:
@@ -486,6 +575,7 @@ def _run_units_concurrently(
     ship_gate_fn,
     final_stage_fn,
     known: set[str],
+    merged_pr_titles: dict[str, tuple[int, str]],
 ) -> list[UnitOutcome]:
     """Bounded-concurrency topological scheduler: up to `job` units run at
     once via `_process_unit()`, each on its own TCP port (`port, port+1,
@@ -510,6 +600,7 @@ def _run_units_concurrently(
     lock = threading.Lock()
     by_index: dict[str, UnitOutcome] = {}
     index_of = {u.index: i for i, u in enumerate(units)}
+    units_by_index = {u.index: u for u in units}
     outcomes: list[UnitOutcome | None] = [None] * len(units)
     free_ports: list[int] = list(range(port, port + job))
     pending: list[UnitPlan] = list(units)
@@ -550,6 +641,14 @@ def _run_units_concurrently(
                 reason="resumed: already shipped in an earlier run of this plan",
             ))
             return True
+        if resume:
+            gh_pr_num, gh_pr_url = _shipped_on_github(merged_pr_titles, up.unit)
+            if gh_pr_num is not None:
+                _settle(up, UnitOutcome(
+                    unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="shipped",
+                    reason=f"GitHub already shows PR #{gh_pr_num} merged for this unit ({gh_pr_url}) -- the ledger did not know",
+                ))
+                return True
         return False
 
     with ThreadPoolExecutor(max_workers=job) as executor:
@@ -563,7 +662,17 @@ def _run_units_concurrently(
 
             still = []
             for up in pending:
-                if free_ports and _deps_resolved(up):
+                # B-3: the implicit DAG edge -- never dispatch a unit
+                # alongside another currently IN-FLIGHT unit that shares a
+                # declared source file, even with no explicit `depends_on`
+                # between them (`_shares_source_files()`). This unit simply
+                # waits its turn on the next round rather than being
+                # skipped or failed; it is not blocked forever, only until
+                # the conflicting unit finishes and frees its slot.
+                source_conflict = any(
+                    _shares_source_files(up, units_by_index[idx]) for idx in in_flight
+                )
+                if free_ports and _deps_resolved(up) and not source_conflict:
                     unit_port = free_ports.pop()
                     fut = executor.submit(
                         _process_unit, up=up, workdir=workdir, plan_name=plan_name,
@@ -697,6 +806,11 @@ def run_plan(
         units = units[positions[from_pr]:]
 
     known = {u.index for u in units}
+    # B-4: ONE `gh pr list --state merged` fetch for the whole run (never
+    # per unit -- see `gh_pr.list_merged_pr_titles()`), only when `resume`
+    # is even in play; a fresh (`resume=False`) run has nothing to recover
+    # and must not pay this network cost.
+    merged_pr_titles = gh_pr.list_merged_pr_titles(workdir) if resume else {}
 
     if job > 1:
         result.outcomes = _run_units_concurrently(
@@ -707,6 +821,7 @@ def run_plan(
             ensure_worktree_fn=ensure_worktree_fn, remove_worktree_fn=remove_worktree_fn,
             dispatch_cycle0_fn=dispatch_cycle0_fn, run_pr_cycle_fn=run_pr_cycle_fn,
             ship_gate_fn=ship_gate_fn, final_stage_fn=final_stage_fn, known=known,
+            merged_pr_titles=merged_pr_titles,
         )
         return result
 
@@ -730,6 +845,17 @@ def run_plan(
             result.outcomes.append(outcome)
             by_index[up.index] = outcome
             continue
+
+        if resume:
+            gh_pr_num, gh_pr_url = _shipped_on_github(merged_pr_titles, up.unit)
+            if gh_pr_num is not None:
+                outcome = UnitOutcome(
+                    unit=up.unit, stage_name=up.stage_name, profile=up.profile, status="shipped",
+                    reason=f"GitHub already shows PR #{gh_pr_num} merged for this unit ({gh_pr_url}) -- the ledger did not know",
+                )
+                result.outcomes.append(outcome)
+                by_index[up.index] = outcome
+                continue
 
         outcome = _process_unit(
             up=up, workdir=workdir, plan_name=plan_name, plan_text=plan_text,

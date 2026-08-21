@@ -102,3 +102,33 @@ def test_remove_unit_worktree_follows_a_rename_before_deleting(tmp_path):
 def test_remove_unit_worktree_on_a_never_created_worktree_does_not_raise(tmp_path):
     repo = _repo(tmp_path)
     worktree.remove_unit_worktree(repo, "plan", "pr-1")  # nothing to remove -- must not raise
+
+
+def test_remove_unit_worktree_reaps_leftover_processes_before_removal(tmp_path, monkeypatch):
+    """B-6-3: worker.md's post-merge cleanup kills anything still running
+    inside the worktree BEFORE `git worktree remove`, needed once a local
+    CI command (`ci_gate.py`) can leave a build/test child process
+    behind. The pattern must carry a trailing `/` -- a bare path also
+    matches a sibling worktree that shares it as a prefix."""
+    repo = _repo(tmp_path)
+    path, _branch = worktree.ensure_unit_worktree(repo, "plan", "pr-1", base="main")
+
+    calls = []
+    from reasona_dev import _shell
+
+    orig_run = _shell.run
+
+    def spy(cmd, workdir, *, timeout=300):
+        calls.append(cmd)
+        return orig_run(cmd, workdir, timeout=timeout)
+
+    monkeypatch.setattr(worktree._shell, "run", spy)
+    worktree.remove_unit_worktree(repo, "plan", "pr-1")
+
+    pkill_calls = [c for c in calls if c[0] == "pkill"]
+    assert len(pkill_calls) == 1
+    assert pkill_calls[0] == ["pkill", "-9", "-f", f"{path}/"]
+    # pkill happened BEFORE the worktree removal, not after
+    remove_idx = next(i for i, c in enumerate(calls) if c[:2] == ["git", "worktree"])
+    pkill_idx = next(i for i, c in enumerate(calls) if c[0] == "pkill")
+    assert pkill_idx < remove_idx

@@ -46,7 +46,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reasona_dev import cycles_log, ledger, memory
+from reasona_dev import ci_gate, config_file, cycles_log, ledger, memory
 from reasona_dev.bernstein_dispatch import DEFAULT_ROLE_SCOPE, run_plan_file, write_role_plan
 from reasona_dev.cycle_gate import (
     ConvergenceTracker,
@@ -466,21 +466,44 @@ def _run_dev_fix(
     cycle: int,
     run_role_fn,
     port: int = 8052,
+    pre_fix_head: str | None = None,
+    ci_fast_command: str | None = None,
 ) -> RoleRunResult:
     """Dispatch one dev fix-cycle. `escalated_model` (from
     `GateDecision.escalated_model`) overrides `dev_model.model` for exactly
     this dispatch when set -- the bounded, logged, one-time escalation
     `cycle_gate.evaluate()` already decided on, never a silent swap.
+
+    **B-5**: when `ci_fast_command` is configured (`reasona_dev.ci_gate`),
+    run it right after the fix commits and revert to `pre_fix_head` on
+    failure -- a fix that does not even compile must not survive into the
+    next cycle's diff. `pre_fix_head` MUST be captured by the caller
+    BEFORE this dispatch (the pattern every call site already follows for
+    `_safe_recheck_route()`'s own diffing) -- this function never computes
+    it itself, so a caller that omits it simply gets no revert (the same
+    "unconfigured, no-op" default `ci_fast_command=None` gets). A CI
+    failure is recorded on `RoleRunResult.error_detail` (surfaced via the
+    same `cycles_log.record_dispatch()` path any other dispatch error
+    already reaches) rather than changing this function's return shape --
+    the caller's own `_safe_recheck_route()` diff against the (now
+    reverted) HEAD already reports "nothing changed" on its own, which is
+    the correct downstream signal.
     """
     model = dev_model if escalated_model is None else ResolvedModel(
         role="dev", model=escalated_model, adapter=dev_model.adapter,
         effort=dev_model.effort, source="cycle_gate:escalated",
     )
-    return run_role_fn(
+    result = run_role_fn(
         workdir=workdir, role="backend", title=f"{pr_title} -- fix c{cycle}",
         prompt=_build_fix_prompt(pr_title, findings), model=model, rundir=rundir, cycle=cycle,
         port=port,
     )
+    if ci_fast_command:
+        ok, tail = ci_gate.run_fast(workdir, ci_fast_command, pre_fix_head=pre_fix_head)
+        if not ok:
+            note = f"ci-fast failed, reverted to pre-fix HEAD: {tail[-500:]}"
+            result.error_detail = f"{result.error_detail}; {note}" if result.error_detail else note
+    return result
 
 
 def _missing_prompt_reason(role: str, profile: str, workdir: Path) -> str:
@@ -569,6 +592,13 @@ def run_pr_cycle(
     workdir = Path(workdir)
     rundir = Path(rundir)
     stage_name = stage_name or _slug(pr_title)
+
+    # B-5: resolved ONCE per cycle, not per fix dispatch -- a plain read of
+    # two small YAML files, cheap enough that re-resolving it per dispatch
+    # would only be waste, not a correctness concern either way.
+    ci_fast_command = config_file.resolve_ci_command(
+        "fast", config_file.load_project(workdir), config_file.load_global(),
+    )
 
     progress = ledger.load_progress(workdir, plan_name, stage_name) if (resume and plan_name) else None
 
@@ -815,6 +845,7 @@ def run_pr_cycle(
                 workdir=workdir, pr_title=pr_title, findings=pending_confirm,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
                 rundir=rundir, cycle=cycle, run_role_fn=run_role_fn, port=port,
+                pre_fix_head=pre_fix_head, ci_fast_command=ci_fast_command,
             )
             role_results.append(fix_result)
             _log("review", cycle, fix_result, resolved["dev"])
@@ -954,6 +985,7 @@ def run_pr_cycle(
                 workdir=workdir, pr_title=pr_title, findings=merged.must_fix,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
                 rundir=rundir, cycle=cycle, run_role_fn=run_role_fn, port=port,
+                pre_fix_head=pre_fix_head, ci_fast_command=ci_fast_command,
             )
             role_results.append(fix_result)
             _log("scan", cycle, fix_result, resolved["dev"])

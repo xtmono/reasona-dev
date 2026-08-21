@@ -108,5 +108,23 @@ def remove_unit_worktree(workdir: str | Path, plan_name: str, stage_name: str) -
     # still applies.
     _, branch_out, _ = _shell.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], path, timeout=30)
     branch = branch_out.strip() or unit_branch_name(plan_name, stage_name)
+    _reap_worktree_processes(path)
     _shell.run(["git", "worktree", "remove", "--force", str(path)], workdir, timeout=60)
     _shell.run(["git", "branch", "-D", branch], workdir, timeout=30)
+
+
+def _reap_worktree_processes(path: Path) -> None:
+    """Best-effort: kill anything still running inside this worktree before
+    it is removed out from under it -- worker.md's post-merge cleanup
+    (`pkill -9 -f "$worktree_path/"`), needed once a local CI command
+    (`ci_gate.py`) can leave a build/test child process behind. Never
+    raises; `git worktree remove --force` right after this is the real
+    guarantee, this step only avoids handing a process a yanked cwd.
+
+    The trailing `/` in the pattern is deliberate, not cosmetic: a bare
+    path also matches a SIBLING worktree that shares it as a path prefix
+    (`.worktrees/pr-1` vs `.worktrees/pr-10`) -- a real risk under `--job>1`
+    concurrent unit dispatch, not a hypothetical one. Never pass a bare
+    binary name either; that would match unrelated processes system-wide.
+    """
+    _shell.run(["pkill", "-9", "-f", f"{path}/"], path.parent, timeout=10)

@@ -283,3 +283,71 @@ def test_pr_section_is_appended_to_the_review_prompt(tmp_path, rust_dev_prompts)
     assert "DimensionProfile.risk_model" in review_prompt
     assert "PR 3" in review_prompt
     assert str(tmp_path) in review_prompt  # the worktree identity is also present
+
+
+# --- B-5: local CI gate ------------------------------------------------------
+
+def _git_repo(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    (tmp_path / "a.txt").write_text("v1\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=tmp_path, check=True,
+    )
+
+
+def test_ci_fast_failure_reverts_the_fix_and_records_it(tmp_path, rust_dev_prompts):
+    """B-5: a configured `ci.fast` command that fails after a dev fix
+    commits reverts that commit -- a fix that does not even compile must
+    not survive into the recheck route's diff."""
+    _git_repo(tmp_path)
+    (tmp_path / ".reasona" / "reasona.yaml").write_text("ci:\n  fast: exit 1\n")
+
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        if role == "backend":
+            (tmp_path / "a.txt").write_text("v2 -- broken fix\n")
+            import subprocess
+
+            subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+            subprocess.run(
+                ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "fix"],
+                cwd=tmp_path, check=True,
+            )
+            return RoleRunResult(role=role, cycle=cycle, review_result=ReviewResult(role_status=RoleStatus.COMPLETE), raw_output_path=Path("/dev/null"))
+        script = [
+            parse_text_contract(MUST_FIX_TEXT),
+            None,  # the fix dispatch, handled above
+            parse_text_contract(PASS_TEXT),
+            parse_text_contract(PASS_TEXT),
+            parse_text_contract(PASS_TEXT),
+        ]
+        idx = fn.calls
+        fn.calls += 1
+        result = script[idx] if idx < len(script) and script[idx] is not None else parse_text_contract(PASS_TEXT)
+        return RoleRunResult(role=role, cycle=cycle, review_result=result, raw_output_path=Path("/dev/null"))
+
+    fn.calls = 0
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="rust-dev", run_role_fn=fn,
+    )
+    assert result.verdict == "PASS"
+    fix_result = next(r for r in result.role_results if r.role == "backend")
+    assert fix_result.error_detail is not None
+    assert "ci-fast failed" in fix_result.error_detail
+    assert (tmp_path / "a.txt").read_text() == "v1\n"  # reverted
+
+
+def test_ci_fast_unconfigured_never_touches_git(tmp_path, rust_dev_prompts):
+    """No `ci:` key at all -- the pre-existing behavior, unaffected."""
+    _git_repo(tmp_path)
+
+    script = [parse_text_contract(PASS_TEXT), parse_text_contract(PASS_TEXT), parse_text_contract(PASS_TEXT)]
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="rust-dev", run_role_fn=_stub_role_fn(script=script),
+    )
+    assert result.verdict == "PASS"

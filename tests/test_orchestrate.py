@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from reasona_dev import orchestrate
@@ -52,6 +54,36 @@ pr_units:
 - [ ] use it
 """
 
+SHARED_FILE_PLAN = """\
+---
+plan: sharedfile
+pr_units:
+  - index: 1
+    title: "shared contract"
+    files: [crates/core/src/lib.rs]
+  - index: 2
+    title: "first editor"
+    depends_on: [1]
+    files: [crates/flow/src/shared.rs]
+  - index: 3
+    title: "second editor"
+    depends_on: [1]
+    files: [crates/flow/src/shared.rs]
+---
+
+## PR 1: shared contract
+
+- [ ] define it
+
+## PR 2: first editor
+
+- [ ] edit it
+
+## PR 3: second editor
+
+- [ ] edit it too
+"""
+
 
 def _repo(tmp_path):
     repo = tmp_path / "repo"
@@ -102,6 +134,33 @@ pr_units:
         resolve_plan_units(plan, _repo(tmp_path))
     assert "PR 1 spans" in str(exc.value)
     assert "PR 2 spans" in str(exc.value)
+
+
+def test_an_undecided_open_decision_refuses_to_resolve_the_plan(tmp_path):
+    """B-1: dev-ralf's own Open Decisions Gate, ported. plan-ralf's own
+    Report already tells the human this refusal exists; until now nothing
+    here actually enforced it."""
+    plan = MIXED_PLAN + """
+## Open decisions (human)
+
+- [key: rollout-strategy] Canary or big-bang rollout?
+  - Default if unresolved: canary
+"""
+    with pytest.raises(PlanError) as exc:
+        resolve_plan_units(plan, _repo(tmp_path))
+    assert "undecided" in str(exc.value)
+    assert "Canary or big-bang rollout" in str(exc.value)
+
+
+def test_a_fully_decided_open_decisions_section_does_not_block(tmp_path):
+    plan = MIXED_PLAN + """
+## Open decisions (human)
+
+- [key: rollout-strategy] Canary or big-bang rollout?
+  - decided: canary
+"""
+    units = resolve_plan_units(plan, _repo(tmp_path))
+    assert len(units) == 3
 
 
 def test_conflicts_surface_before_anything_runs(tmp_path):
@@ -674,6 +733,50 @@ def test_job_greater_than_one_still_respects_dependency_order(tmp_path):
     assert statuses == {"pr-1": "failed", "pr-2": "skipped", "pr-3": "skipped"}
 
 
+def test_job_greater_than_one_never_overlaps_units_sharing_a_source_file(tmp_path):
+    """B-3 (dev-ralf's implicit DAG edge): pr-2 and pr-3 both declare
+    `crates/flow/src/shared.rs` and have NO `depends_on` edge between each
+    other (only on pr-1) -- readiness alone would let `job=2` dispatch them
+    concurrently, which is exactly the case the barrier in
+    `test_job_greater_than_one_runs_independent_units_concurrently` proves
+    happens for units that do NOT share a file. Here the barrier must NOT
+    be reached by both at once -- if the scheduler dispatched them
+    concurrently, the barrier would succeed and this test would incorrectly
+    pass, so the assertion is on ORDER: one must fully finish (reach the
+    `order` list) before the other starts."""
+    import threading
+
+    order = []
+    lock = threading.Lock()
+    overlap_detected = threading.Event()
+    currently_running = set()
+
+    def cycle_fn(**kw):
+        name = kw["stage_name"]
+        with lock:
+            order.append(name)
+            if name in ("pr-2", "pr-3"):
+                if currently_running & {"pr-2", "pr-3"} - {name}:
+                    overlap_detected.set()
+                currently_running.add(name)
+        if name in ("pr-2", "pr-3"):
+            import time
+
+            time.sleep(0.05)  # give a real concurrency bug time to manifest
+        with lock:
+            currently_running.discard(name)
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    result = _run(tmp_path, cycle_fn, ship_fn, plan=SHARED_FILE_PLAN, job=2)
+    assert result.passed
+    assert not overlap_detected.is_set()
+    assert order[0] == "pr-1"
+    assert set(order[1:]) == {"pr-2", "pr-3"}
+
+
 def test_run_plan_job_flag_reaches_orchestrate(tmp_path, monkeypatch):
     from reasona_dev.cli import main
 
@@ -925,3 +1028,92 @@ def test_a_pr_open_units_worktree_is_not_removed(tmp_path):
     cycle_fn, ship_fn = _recorder()
     _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn, remove_worktree_fn=_remove)
     assert removed == []
+
+
+def test_plan_upstream_warning_when_plan_not_on_origin_main(tmp_path):
+    """B-2 (dev-ralf preflight P2), downgraded from an ABORT to a warning."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / "a.txt").write_text("x\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=repo, check=True,
+    )
+    subprocess.run(["git", "branch", "origin/main"], cwd=repo, check=True)
+
+    plan = repo / "docs" / "plans" / "p.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("draft, never committed\n")
+
+    warning = orchestrate.plan_upstream_warning(repo, plan, base="origin/main")
+    assert warning is not None
+    assert "docs/plans/p.md" in warning
+    assert "origin/main" in warning
+
+
+def test_plan_upstream_warning_is_none_when_the_plan_is_already_upstream(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    plan = repo / "docs" / "plans" / "p.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("shipped content\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=repo, check=True,
+    )
+    subprocess.run(["git", "branch", "origin/main"], cwd=repo, check=True)
+
+    assert orchestrate.plan_upstream_warning(repo, plan, base="origin/main") is None
+
+
+def test_plan_upstream_warning_is_none_when_the_plan_lives_outside_the_workdir(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside_plan = tmp_path / "elsewhere" / "p.md"
+    outside_plan.parent.mkdir(parents=True)
+    outside_plan.write_text("x\n")
+    assert orchestrate.plan_upstream_warning(repo, outside_plan) is None
+
+
+def test_a_merged_github_pr_marks_the_unit_shipped_without_dispatching(tmp_path, monkeypatch):
+    """B-4: when the local ledger does not know a unit shipped (a lost or
+    `--restart`-cleared ledger), a merged PR on GitHub with the unit's
+    exact title is enough to mark it shipped without re-dispatching dev/
+    review -- `gh_pr.list_merged_pr_titles()` is fetched ONCE for the whole
+    run, not once per unit."""
+    from reasona_dev import gh_pr
+
+    fetch_calls = []
+
+    def _fake_list_merged(workdir, **kw):
+        fetch_calls.append(1)
+        return {"feat: shared contract": (5, "https://gh/pr/5")}
+
+    monkeypatch.setattr(gh_pr, "list_merged_pr_titles", _fake_list_merged)
+
+    cycle_fn, ship_fn = _recorder()
+    result = _run(tmp_path, cycle_fn, ship_fn)
+
+    assert len(fetch_calls) == 1  # one fetch for the whole plan, not per unit
+    statuses = {o.stage_name: o.status for o in result.outcomes}
+    assert statuses["pr-1"] == "shipped"
+    assert "GitHub already shows PR #5" in next(o.reason for o in result.outcomes if o.stage_name == "pr-1")
+    # pr-1 was never actually dispatched -- only pr-2/pr-3 (which depend on it) were
+    assert {c["stage_name"] for c in cycle_fn.calls} == {"pr-2", "pr-3"}
+
+
+def test_a_fresh_run_never_calls_the_github_merged_pr_sweep(tmp_path, monkeypatch):
+    """`resume=False` has nothing to recover -- the sweep must not even
+    fire, since it would just be a wasted network call."""
+    from reasona_dev import gh_pr
+
+    fetch_calls = []
+    monkeypatch.setattr(gh_pr, "list_merged_pr_titles", lambda workdir, **kw: fetch_calls.append(1) or {})
+
+    cycle_fn, ship_fn = _recorder()
+    _run(tmp_path, cycle_fn, ship_fn, resume=False)
+    assert fetch_calls == []

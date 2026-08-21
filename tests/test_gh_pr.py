@@ -181,6 +181,45 @@ def test_find_duplicate_pr_returns_none_on_gh_failure(tmp_path, monkeypatch):
     assert num is None and url is None
 
 
+def test_list_merged_pr_titles_maps_title_to_number_and_url(tmp_path, monkeypatch):
+    def _fake_run(cmd, workdir, **kw):
+        assert cmd[:3] == ["gh", "pr", "list"]
+        assert "--state" in cmd and "merged" in cmd
+        return 0, (
+            '[{"number": 9, "title": "feat: add subtract()", "url": "https://gh/pr/9"},'
+            ' {"number": 11, "title": "fix: rounding error", "url": "https://gh/pr/11"}]'
+        ), ""
+
+    monkeypatch.setattr(gh_pr._shell, "run", _fake_run)
+    titles = gh_pr.list_merged_pr_titles(tmp_path)
+    assert titles == {
+        "feat: add subtract()": (9, "https://gh/pr/9"),
+        "fix: rounding error": (11, "https://gh/pr/11"),
+    }
+
+
+def test_list_merged_pr_titles_is_one_call_regardless_of_result_size(tmp_path, monkeypatch):
+    calls = []
+
+    def _fake_run(cmd, workdir, **kw):
+        calls.append(cmd)
+        return 0, "[]", ""
+
+    monkeypatch.setattr(gh_pr._shell, "run", _fake_run)
+    gh_pr.list_merged_pr_titles(tmp_path)
+    assert len(calls) == 1
+
+
+def test_list_merged_pr_titles_returns_empty_on_gh_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(gh_pr._shell, "run", lambda cmd, workdir, **kw: (1, "", "not authenticated"))
+    assert gh_pr.list_merged_pr_titles(tmp_path) == {}
+
+
+def test_list_merged_pr_titles_returns_empty_on_malformed_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(gh_pr._shell, "run", lambda cmd, workdir, **kw: (0, "not json", ""))
+    assert gh_pr.list_merged_pr_titles(tmp_path) == {}
+
+
 # --- run_gh_pr composition -------------------------------------------------------
 
 def test_run_gh_pr_refuses_to_create_a_duplicate(tmp_path, monkeypatch):
@@ -235,6 +274,23 @@ def test_run_gh_pr_creates_issue_renames_branch_and_creates_pr(tmp_path, monkeyp
     assert seen["head"] == "issue/42-add-subtract"
     assert seen["base"] == "main"
     assert seen["title"] == "feat: add subtract()"
+
+
+def test_run_gh_pr_refuses_to_create_a_pr_when_full_ci_fails(tmp_path, monkeypatch):
+    """B-5: worker.md §4 -- a full CI failure blocks PR creation outright,
+    never opening a PR whose accumulated commits do not build/test clean."""
+    _stub_shell(monkeypatch)
+    (tmp_path / ".reasona").mkdir()
+    (tmp_path / ".reasona" / "reasona.yaml").write_text("ci:\n  full: whatever\n")
+    monkeypatch.setattr(gh_pr.ci_gate, "run_full", lambda workdir, command, **kw: (False, "build failed"))
+
+    create_pr_calls = []
+    monkeypatch.setattr(final_phase, "create_pr", lambda *a, **kw: create_pr_calls.append(1) or (None, "should not be called"))
+
+    result = gh_pr.run_gh_pr(workdir=tmp_path, stage_name="pr-1", unit=UNIT, plan_name=None)
+    assert result.passed is False
+    assert "full CI failed" in result.reason
+    assert create_pr_calls == []
 
 
 def test_run_gh_pr_reuses_a_known_issue_on_resume(tmp_path, monkeypatch):

@@ -48,7 +48,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from reasona_dev import _shell, final_phase, ledger
+from reasona_dev import _shell, ci_gate, config_file, final_phase, ledger
 from reasona_dev.plan_compile import PRUnit
 
 MAX_PR_REPAIR_ATTEMPTS = 3
@@ -183,6 +183,43 @@ def find_duplicate_pr(workdir: Path, *, title: str) -> tuple[int | None, str | N
     return None, None
 
 
+def list_merged_pr_titles(workdir: Path, *, limit: int = 200) -> dict[str, tuple[int, str]]:
+    """B-4 (a scoped-down GitHub-state sweep): title -> (pr_number, pr_url)
+    for every recently-merged PR, in ONE `gh` call for a whole plan run.
+
+    Reused deliberately as a single batch fetch rather than dev-ralf's own
+    per-PR title-normalization + body-scoring heuristic (execution-plan.md)
+    AND rather than one `gh pr list` search per unit: this project's local
+    `ledger.json` is a disk file, not context an LLM scheduler can lose to
+    compaction, so the only real gap this closes is a LOST or
+    `--restart`-cleared ledger re-developing a unit GitHub already shows as
+    done -- an exact-title match against one batch listing is enough for
+    that case, and costs the SAME one network round trip per run regardless
+    of plan size (an N-unit plan making N separate `gh pr list --search`
+    calls, every single run including a completely fresh one with nothing
+    to find yet, was the wrong shape for what is meant to be a rare-path
+    safety net, not a per-unit step).
+
+    Empty dict (never raises) on an unreachable `gh`/empty result -- the
+    caller degrades to "ledger is the only source of truth", the behavior
+    before this existed.
+    """
+    code, out, _ = _shell.run(
+        ["gh", "pr", "list", "--state", "merged", "--limit", str(limit), "--json", "number,title,url"],
+        workdir, timeout=60,
+    )
+    if code != 0 or not out.strip():
+        return {}
+    try:
+        items = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    return {
+        item["title"]: (item.get("number"), item.get("url"))
+        for item in items if item.get("title")
+    }
+
+
 def create_issue(workdir: Path, *, title: str, body: str) -> tuple[int | None, str]:
     code, out, err = _shell.run(
         ["gh", "issue", "create", "--title", title, "--body", body], workdir, timeout=120,
@@ -287,6 +324,19 @@ def run_gh_pr(
         return GhPrResult(passed=False, reason=branch_reason, issue_num=issue_num)
 
     body = build_pr_body(issue_num=issue_num, plan_name=plan_name or "", unit=unit)
+
+    # B-5: the full CI gate, worker.md §4's placement -- once, right before
+    # a PR is created, never per fix cycle (that is `ci.fast`'s job, inside
+    # `pr_cycle._run_dev_fix()`). No-op when `ci.full` is unconfigured.
+    ci_full_command = config_file.resolve_ci_command(
+        "full", config_file.load_project(workdir), config_file.load_global(),
+    )
+    ci_ok, ci_tail = ci_gate.run_full(workdir, ci_full_command)
+    if not ci_ok:
+        return GhPrResult(
+            passed=False, reason=f"full CI failed, refusing to open a PR: {ci_tail[-500:]}",
+            issue_num=issue_num, branch=branch,
+        )
 
     known_pr_url = ledger.known_pr_url(workdir, plan_name, stage_name) if plan_name else None
     url, pr_reason = final_phase.create_pr(

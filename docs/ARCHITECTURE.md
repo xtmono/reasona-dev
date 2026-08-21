@@ -2341,6 +2341,119 @@ never given the chance a real dispatch would have had. **Fixed**: the guard now 
 normal `spawn_fix` (budget spent, no escalated dispatch) — matching "the outcome a non-escalated
 fix would have reached" literally, per trigger.
 
+## 3.14.10 Fourth source-level parity re-check — the Grade-A remainder + Grade-B gates
+
+A follow-up review, after §3.14.9's six Grade-A fixes landed, found a small remainder in A-1 and
+graded a set of previously-unported dev-ralf scheduler/gates B. This section closes the remainder
+and the subset of B graded worth porting; the rest (worker/anti-stop layer, result-block schema
+validation, DUP-WORKER/SCHEDULER-OVERSTEP/CONDUCTOR-COLLAPSE spawn guards) are structurally moot in
+a synchronous single-process driver with no LLM scheduler and no subagent lifecycle -- see §3.14.9's
+own "what was deliberately not ported" reasoning, which applies identically here.
+
+**R-1 / R-2 (A-1's remainder).** `final_phase.run_final_audit()` was the one role dispatch carrying
+NO PR-unit/worktree identity at all (review/recheck/bugbot/compliance all got
+`pr_cycle._pr_unit_context_block()` in §3.14.9's A-1 fix). Fixed with a minimal trailer
+(`[Current PR unit]:`/`[Worktree]:`) -- `final_audit.md` never references the plan's `## PR <N>:`
+section (it audits the diff, not plan completeness), so unlike review/recheck it does not also need
+the full section text. Separately, `final_audit.md`'s own prompt text claimed "Findings here are
+ADVISORY only -- a final audit never blocks merge on its own" -- false: `run_final_audit()` spends
+the shared fix budget's `"final"` stage on a MUST_FIX and returns `blocked` for the whole unit if
+that bounded fix loop does not resolve it (`run_final_stage()`'s `if not passed: return None,
+"blocked", ...`). A model told its own findings are harmless could soften a real MUST_FIX to
+ADVISORY. Corrected the prompt text to state the true consequence.
+
+**B-7.** A profile shipping no `final_audit.md` silently PASSED (`return True, "... skipped", []`)
+-- a different consequence from review/compliance's identical condition (`_missing_prompt_reason()`
+-> ABORT/blocked). Since this stage only runs AFTER a fix already happened, a profile that never
+configured `final_audit.md` was silently skipping its own last-line audit on every fixed PR, every
+run, with no trace. Now returns `(False, _missing_prompt_reason(...), [])`, same treatment as
+review/compliance.
+
+**B-6 (③, process reap).** `worktree.remove_unit_worktree()` now runs `pkill -9 -f "<path>/"`
+(`_reap_worktree_processes()`) before `git worktree remove --force` -- worker.md's own post-merge
+cleanup, needed once a local CI command (B-5, below) can leave a build/test child process behind.
+The trailing `/` is deliberate: a bare path also matches a SIBLING worktree sharing it as a prefix
+(`.worktrees/pr-1` vs `.worktrees/pr-10`), a real risk under `--job>1`, not a hypothetical one.
+worker.md's other four cleanup steps were graded not worth porting: main-sync is moot
+(`ensure_unit_worktree()` always cuts from `origin/main`, never local main); remote-branch deletion
+is redundant with GitHub's own auto-delete-on-merge; local-branch deletion was already implemented;
+verification was unornamented in dev-ralf itself.
+
+**B-2 (preflight P2, downgraded to a warning).** `orchestrate.plan_upstream_warning()`: when
+`--plan` is not yet visible on `base` (default `origin/main`), print a warning, never abort. dev-ralf
+hard-blocks on this because its worker reads the plan FILE from a worktree cut from `origin/main` --
+A-1 (§3.14.9) removed that dependency for reasona-dev (`_pr_unit_context_block()` passes each unit's
+PR-section text by value), so the remaining risk is narrower (something else the plan implicitly
+relies on) and a hard ABORT would also wrongly refuse a legitimate case dev-ralf's own worker never
+has to handle: `--workdir` pointing at a repo with no pushed `origin/main` state for this plan yet.
+dev-ralf's other three preflight checks (plan-file-exists, anti-stop hooks, sibling-tool presence)
+are moot here: the CLI already fails reading a missing `--plan` file, and there is no subagent
+lifecycle or sibling-skill dependency to check.
+
+**B-3 (the implicit DAG edge, `--job>1` only).** `_run_units_concurrently()`'s scheduler dispatched
+purely by `depends_on` readiness -- for `job=1` (the default, sequential) this is harmless, since
+declaration order already serializes any two units regardless of a shared file. Under `job>1`,
+two units sharing a declared SOURCE file (`plan_report.py`'s own `_SOURCE_EXT` list, reused so the
+plan Report's own advisory and this scheduling guard never disagree) but no explicit `depends_on`
+edge between them could run concurrently in two worktrees, silently. `_shares_source_files()` now
+blocks a unit from being dispatched while a source-file-sharing unit is still in flight -- it waits
+its turn on the next scheduling round, never fails or is skipped. dev-ralf's OWN conservative
+fallback (an empty `pr_files` serializes against every prior PR) was deliberately NOT ported: it
+would silently defeat `--job>1` for any plan that omits `files:` on a unit, which is exactly the
+"available, if you remember" failure mode this project exists to avoid elsewhere.
+
+**B-4 (a scoped-down GitHub-state sweep).** A local `ledger.json` lost or cleared by `--restart`
+used to mean the SAME unit gets re-developed from scratch even if GitHub already shows it merged
+-- not a wrong merge (worst case: `create_pr()`'s own "no commits between main and branch" failure
+ends the unit `blocked`), but wasted review/scan cycles. `gh_pr.list_merged_pr_titles()` fetches
+every merged PR's title in ONE `gh pr list --state merged` call per `run_plan()` invocation (never
+per unit -- an N-unit plan making N separate searches, on every single run including a fresh one
+with nothing to find, was rejected as the wrong shape for what is meant to be a rare-path safety
+net); `orchestrate._shipped_on_github()` looks up each unit's exact expected title
+(`gh_pr.build_pr_title()`) against that one fetched map. Only runs when `resume=True`, and the fetch
+itself degrades to an empty map (proceed as if unknown) on any `gh` failure. Deliberately NOT
+ported: dev-ralf's own title-normalization + body-scoring fuzzy-match heuristic
+(execution-plan.md) -- an exact-title match is enough for the local-ledger-lost case this closes,
+and the fuzzy heuristic's own fragility is not worth importing for it.
+
+**B-1 (the Open Decisions Gate).** plan-ralf's own Report already tells the human "reasona-dev
+refuses to start while [an Open-decisions] entry lacks an explicit `decided: <choice>` tag" -- a
+contract stated on the producer side that had nothing enforcing it on the consumer side.
+`reasona_dev/open_decisions.py` ports the entry-parsing dev-ralf's own worker.md rule needs
+(column-0 `-` bullets own their indented continuation; a markdown table row is not an entry, same
+rejection reasona-plan's `check_plan._open_decisions()` applies, for the same reason: a decision
+written as a table row is invisible to the parser and goes uncounted by both sides). Wired into
+`orchestrate.resolve_plan_units()`, raising `PlanError` listing EVERY undecided entry (not just the
+first -- the same "collect all conflicts" convention `ProfileConflict` already uses) before a single
+unit's profile is even resolved, let alone dispatched.
+
+**B-5 (a local CI gate).** `acceptance.py`'s own module docstring already named the gap: "a plan
+that never writes an `acceptance:` block gets zero build/test verification anywhere in
+reasona-dev's pipeline, silently." dev-ralf runs `$CI_FAST` after every dev fix (reverting on
+failure) and a full `make ci` once before `/gh-pr`; reasona-dev had neither, relying entirely on
+GitHub's own CI as the sole backstop -- after the PR is already public, paying a full CI round trip
+for what a local `cargo check` would catch in seconds. Ported as `reasona_dev/ci_gate.py`
+(`run_fast()`/`run_full()`), configured via the SAME two-layer `reasona.yaml` cascade every other
+setting uses (`config_file.resolve_ci_command()`):
+
+```yaml
+ci:
+  fast: "cargo check --workspace --all-targets"   # after every dev fix -- pr_cycle._run_dev_fix()
+  full: "make ci"                                  # once before /gh-pr -- gh_pr.run_gh_pr()
+```
+
+Unconfigured (no `ci:` key -- the default) is a no-op on both gates: this is opt-in, and upgrading
+reasona-dev with no config change leaves every existing repo's behavior byte-for-byte unchanged.
+`run_fast()` reverts (`git reset --hard <pre_fix_head>`) on failure so a fix that does not even
+compile never survives into the next cycle's recheck-route diff; wired into `pr_cycle._run_dev_fix()`,
+which is the single function ALL of review's, scan's, and the final audit's dev-fix dispatches
+already share, so one change covers all three fix loops. `run_full()` never reverts (there is no
+single "pre" commit a whole PR's accumulated history could correctly revert to) -- it only refuses
+to open the PR. NOT wired into `final_phase.py`'s sync-conflict-resolution or ship-gate-acceptance-fix
+dispatches (`_run_conflict_fix()`/`_run_ship_fix()`) in this pass -- those are separate dispatch
+shapes from `_run_dev_fix()` with their own bookkeeping, scoped out to keep this change to the three
+highest-frequency fix loops the review's own cost argument was about.
+
 ## 4. Directory structure
 
 ```
@@ -2369,6 +2482,8 @@ reasona-dev/
 │   ├── prompt_profile.py     per-unit profile resolution + two-layer prompt lookup (§3.5.4, §3.7.10)
 │   ├── model_config.py       the per-role model priority chain (flag > env > project cfg > global cfg > fallback > default), CONDUCTOR-COLLAPSE audit trail
 │   ├── config_file.py        reasona-dev's own two-layer cfg (~/.reasona → <workdir>/.reasona, reasona.yaml)
+│   ├── ci_gate.py             local CI gate (ci.fast after every dev fix, ci.full before /gh-pr) — B-5, §3.14.10
+│   ├── open_decisions.py      the Open Decisions Gate — refuses an undecided plan entry before dispatch — B-1, §3.14.10
 │   ├── bernstein_config.py   automatic placement of the target repo's .bernstein/bernstein.yaml + role_model_policy sync (§3.5.3)
 │   ├── finding_adapter.py    parser for the `||` text contract + the external-skill KV contract (`parse_kv_contract`)
 │   ├── cycle_gate.py         result-invariant verification (inherited from dev-ralf's cycle_gate.py)

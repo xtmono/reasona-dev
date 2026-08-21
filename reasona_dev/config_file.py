@@ -83,3 +83,29 @@ def model_for(role: str, cfg: dict) -> str | None:
         return None
     val = models.get(role)
     return val.strip() if isinstance(val, str) and val.strip() else None
+
+
+def ci_command(kind: str, cfg: dict) -> str | None:
+    """Extract `ci.<kind>` (`kind` is `"fast"` or `"full"`) from a loaded
+    config dict -- B-5's local CI gate (`reasona_dev.ci_gate`):
+
+        ci:
+          fast: "cargo check --workspace --all-targets"   # after every dev fix
+          full: "make ci"                                  # once before /gh-pr
+
+    Unconfigured (the default, no `ci:` key at all) means the gate this
+    key feeds is simply not run -- the pre-existing behavior, unaffected
+    unless an operator opts in. Same shell-string, two-layer resolution as
+    every other setting in this file (`resolve_ci_command()` below).
+    """
+    ci = cfg.get("ci")
+    if not isinstance(ci, dict):
+        return None
+    val = ci.get(kind)
+    return val.strip() if isinstance(val, str) and val.strip() else None
+
+
+def resolve_ci_command(kind: str, project_cfg: dict, global_cfg: dict) -> str | None:
+    """Project config wins over global, same precedence as every model
+    slot -- see `model_config.resolve()`."""
+    return ci_command(kind, project_cfg) or ci_command(kind, global_cfg)

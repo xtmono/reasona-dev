@@ -183,6 +183,10 @@ def _cmd_run_plan(args: argparse.Namespace) -> int:
     resolved = resolve_all(workdir=workdir, flags=flags, review_flags=review_flags)
     plan_name = Path(args.plan_file).stem
 
+    upstream_warning = orchestrate.plan_upstream_warning(workdir, args.plan_file, base=args.base)
+    if upstream_warning:
+        print(f"reasona-dev: WARNING: {upstream_warning}", file=sys.stderr)
+
     if args.restart:
         try:
             units = orchestrate.resolve_plan_units(plan_text, workdir)

@@ -97,17 +97,20 @@ def test_any_fix_cycle_triggers_the_audit():
     assert should_run_final_audit(b) is True
 
 
-def test_audit_is_skipped_when_the_profile_defines_no_prompt(tmp_path):
-    """Skipping an UNDEFINED audit is the profile's decision; skipping a
-    requested one would be a silent gap."""
+def test_audit_blocks_when_the_profile_defines_no_prompt(tmp_path):
+    """B-7: a missing final_audit prompt is treated the same as a missing
+    review/compliance prompt (_missing_prompt_reason -> ABORT/blocked), not
+    silently passed -- this stage only runs after a fix already happened,
+    so silently passing here means the PR's last-line audit never ran and
+    left no trace."""
     passed, reason, dispatches = final_phase.run_final_audit(
         workdir=tmp_path, stage_name="pr-1", pr_title="t",
         profile="nonexistent", resolved=_RESOLVED, rundir=tmp_path / "r",
         budget=FixBudget(), recurrence=RecurrenceTracker(),
         run_role_fn=lambda **kw: pytest.fail("must not dispatch"),
     )
-    assert passed is True and dispatches == []
-    assert "no final_audit prompt" in reason
+    assert passed is False and dispatches == []
+    assert "final_audit" in reason
 
 
 def test_audit_runs_on_the_final_audit_model(tmp_path, rust_dev_prompts):
@@ -127,6 +130,27 @@ def test_audit_runs_on_the_final_audit_model(tmp_path, rust_dev_prompts):
     )
     assert passed
     assert seen["model"] == "opus"  # resolved["final_audit"]
+
+
+def test_audit_prompt_carries_the_pr_and_worktree_identity(tmp_path, rust_dev_prompts):
+    """R-1: final_audit's prompt was the only role dispatch carrying NO PR
+    unit/worktree identity at all -- unlike review/recheck/bugbot/compliance,
+    which now get it via pr_cycle._pr_unit_context_block()."""
+    seen = {}
+
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        seen["prompt"] = prompt
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=parse_text_contract(PASS_TEXT),
+                             raw_output_path=Path("/dev/null"))
+
+    final_phase.run_final_audit(
+        workdir=tmp_path, stage_name="pr-1", pr_title="PR 4: Add caching",
+        profile="rust-dev", resolved=_RESOLVED, rundir=tmp_path / "r",
+        budget=FixBudget(), recurrence=RecurrenceTracker(), run_role_fn=_fn,
+    )
+    assert "PR 4: Add caching" in seen["prompt"]
+    assert str(tmp_path) in seen["prompt"]
 
 
 def test_audit_findings_spend_the_final_stage_budget(tmp_path, rust_dev_prompts):

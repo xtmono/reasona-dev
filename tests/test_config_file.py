@@ -85,3 +85,30 @@ def test_flag_beats_config_file():
     r = resolve("dev", flag="haiku", project_cfg={"dev-models": {"dev": "opus"}}, env={})
     assert r.model == "haiku"
     assert r.source == "flag"
+
+
+def test_ci_command_extracts_kind_from_ci_key():
+    cfg = {"ci": {"fast": "cargo check", "full": "make ci"}}
+    assert config_file.ci_command("fast", cfg) == "cargo check"
+    assert config_file.ci_command("full", cfg) == "make ci"
+
+
+def test_ci_command_missing_or_malformed():
+    assert config_file.ci_command("fast", {}) is None
+    assert config_file.ci_command("fast", {"ci": "not-a-dict"}) is None
+    assert config_file.ci_command("fast", {"ci": {}}) is None
+    assert config_file.ci_command("fast", {"ci": {"fast": "  "}}) is None
+
+
+def test_resolve_ci_command_project_beats_global():
+    project_cfg = {"ci": {"fast": "project-cmd"}}
+    global_cfg = {"ci": {"fast": "global-cmd"}}
+    assert config_file.resolve_ci_command("fast", project_cfg, global_cfg) == "project-cmd"
+
+
+def test_resolve_ci_command_falls_back_to_global():
+    assert config_file.resolve_ci_command("fast", {}, {"ci": {"fast": "global-cmd"}}) == "global-cmd"
+
+
+def test_resolve_ci_command_none_when_neither_configured():
+    assert config_file.resolve_ci_command("fast", {}, {}) is None
