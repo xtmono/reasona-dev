@@ -249,7 +249,7 @@ def test_a_nonzero_exit_with_real_output_is_recorded_but_not_reclassified(tmp_pa
     only `error_detail` should surface the exit code as a diagnostic."""
     from reasona_dev import bernstein_dispatch, pr_cycle as pc
 
-    def fake_write_plan(*, path, role, title, description, model, effort, cli, scope):
+    def fake_write_plan(*, path, role, title, description, model, effort, cli, scope, files=None):
         marker = "to the file `"
         start = description.index(marker) + len(marker)
         out_path = description[start:description.index("`", start)]
