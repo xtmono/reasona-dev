@@ -2612,6 +2612,19 @@ project-local to copy, and every one of `ensure_bernstein_yaml()`/`config_file`/
 already falls back to that same global path regardless of which worktree it runs in, so nothing
 breaks for that configuration either.
 
+**Follow-up correction, same day: copying the template alone was not enough.** The first cut of
+`_sync_reasona_config()` copied `.reasona/bernstein-template.yaml` into the worktree but stopped
+there, on the assumption that `ensure_bernstein_yaml()` -- which actually regenerates `.bernstein/
+bernstein.yaml`, the file `bernstein run` reads -- would get called from somewhere else. It does
+not: that call only happens from `plan_compile.write_plan_yaml()`, at cycle-0 dispatch, and a unit
+resuming past cycle-0 (`dev_already_dispatched()` already `True` -- true for review/scan/
+final-audit on every call after the first) never reaches it again. Caught immediately on the SAME
+`thaki-agent-security` PR units this section's fix was written for: their `.bernstein/
+bernstein.yaml` had been deleted by hand after cycle-0 already completed, and nothing in the resume
+path would have put it back. `_sync_reasona_config()` now also calls `ensure_bernstein_yaml(path)`
+itself, right after copying the template, so the derived file is regenerated every call too --
+not only when cycle-0 happens to run again.
+
 ## 4. Directory structure
 
 ```

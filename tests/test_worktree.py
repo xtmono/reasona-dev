@@ -84,6 +84,38 @@ def test_ensure_unit_worktree_copies_the_project_local_reasona_config(tmp_path):
     assert (path / ".reasona" / "bernstein-template.yaml").read_text() == "role_model_policy:\n  backend:\n    provider: claude\n"
     assert (path / ".reasona" / "reasona.yaml").read_text() == "dev-models:\n  dev: claude:sonnet:high\n"
     assert (path / ".reasona" / "prompts" / "rust-dev" / "review.md").read_text() == "review this\n"
+    # copying the TEMPLATE alone is not the fix -- .bernstein/bernstein.yaml
+    # (the file `bernstein run` actually reads) must be regenerated too
+    assert (path / ".bernstein" / "bernstein.yaml").is_file()
+    assert (path / "bernstein.yaml").is_symlink()
+
+
+def test_ensure_unit_worktree_regenerates_bernstein_yaml_even_past_cycle0(tmp_path):
+    """A unit resuming past cycle-0 never calls `plan_compile.
+    write_plan_yaml()` again (that only happens at cycle-0 dispatch), so if
+    `.bernstein/bernstein.yaml` is ever missing from an EXISTING worktree
+    (deleted by hand, a cleanup sweep, anything) nothing else in the
+    resume path would put it back -- a real incident on
+    `thaki-agent-security`'s already-past-cycle-0 pr-1/pr-2 worktrees."""
+    repo = _repo(tmp_path)
+    (repo / ".reasona").mkdir()
+    (repo / ".reasona" / "bernstein-template.yaml").write_text("role_model_policy:\n  backend:\n    provider: claude\n")
+
+    path, _ = worktree.ensure_unit_worktree(repo, "plan", "pr-1", base="main")
+    assert (path / ".bernstein" / "bernstein.yaml").is_file()
+
+    # simulate an operator (or cleanup) deleting the derived files, same as
+    # what actually happened on the real incident
+    (path / "bernstein.yaml").unlink()
+    import shutil as _shutil
+    _shutil.rmtree(path / ".bernstein")
+    assert not (path / ".bernstein").exists()
+
+    path2, _ = worktree.ensure_unit_worktree(repo, "plan", "pr-1", base="main")
+
+    assert path2 == path
+    assert (path / ".bernstein" / "bernstein.yaml").is_file()
+    assert (path / "bernstein.yaml").is_symlink()
 
 
 def test_ensure_unit_worktree_skips_reasona_config_missing_at_the_source(tmp_path):
