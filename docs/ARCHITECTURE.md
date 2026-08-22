@@ -3141,6 +3141,35 @@ replies in the same cycle share the same bullet list -- this pipeline dispatches
 every actionable signal in a cycle, not one per bot, so there is only one set of bullets to draw
 from.
 
+## 3.27 A role dispatch died on an OpenRouter key this project has never used -- Bernstein's own auto-decompose, silently on
+
+Live incident, TAS plan 49 PR2: a "reviewer" role dispatch failed outright, `bernstein run exit=1
+stderr="preflight: internal_llm_provider is set to 'openrouter_free' but neither
+OPENROUTER_API_KEY_FREE nor OPENROUTER_API_KEY_PAID is set..."` -- this project has never
+configured or used OpenRouter (every role in `role_model_policy` above pins `provider: claude`).
+Root-caused against the installed Bernstein source, three facts compounding:
+
+1. `auto_decompose` defaults to `True` (`core/config/config_schema.py`'s own `Field` default) --
+   Bernstein may spawn an internal Manager LLM call to split a task it judges "large" into
+   subtasks, entirely on its own, with no opt-in from this project.
+2. The seed file PARSER's own fallback for a missing `internal_llm_provider` key is
+   `"openrouter_free"` (`core/config/seed_parser.py`) -- NOT the dataclass field's own default of
+   `"none"` (`core/config/seed_config.py`), an inconsistency inside Bernstein itself. This
+   project's `bernstein-template.yaml` never mentioned the key, so it silently got
+   `"openrouter_free"`, not `"none"`.
+3. That auto-decompose call then tried OpenRouter -- credentials nothing in this project has ever
+   configured -- and the whole `bernstein run` exited 1, taking down a dispatch that had nothing
+   to do with task size or OpenRouter from this project's own point of view.
+
+Fixed by adding `internal_llm_provider: none` to `bernstein-template.yaml` explicitly.
+`config_schema.py`'s own `provider_disabled` branch then auto-disables `auto_decompose`/
+`evolution_enabled` too, since neither was ever explicitly set here (only an EXPLICIT
+`auto_decompose: true` alongside `internal_llm_provider: none` raises a hard config error --
+silently defaulted-true is auto-disabled instead). Bernstein's internal auto-decompose was always
+redundant here anyway: `bernstein_dispatch.write_role_plan()` already does this project's own
+single-step task decomposition (one stage, one step, one role) before a task ever reaches
+Bernstein.
+
 ## 4. Directory structure
 
 ```

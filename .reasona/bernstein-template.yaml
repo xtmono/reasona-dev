@@ -138,3 +138,35 @@ role_model_policy:
 
 worktree_setup:
   setup_command: "true"  # per-PR build isolation; override per repo
+
+# ---------------------------------------------------------------------------
+# internal_llm_provider: explicitly OFF. reasona-dev never uses OpenRouter.
+# ---------------------------------------------------------------------------
+# Root-caused a live TAS plan 49 PR2 failure: a role dispatch died with
+# `bernstein run exit=1 stderr="preflight: internal_llm_provider is set to
+# 'openrouter_free' but neither OPENROUTER_API_KEY_FREE nor
+# OPENROUTER_API_KEY_PAID is set..."` -- confirmed against installed source
+# (core/config/config_schema.py, core/config/seed_parser.py,
+# core/tasks/task_lifecycle.py):
+#
+#   1. `auto_decompose` defaults to `True` (config_schema.py Field default) --
+#      Bernstein may spawn an internal Manager LLM call to split a task it
+#      judges "large" into subtasks, entirely on its own, with no opt-in from
+#      this project.
+#   2. The seed PARSER's own fallback for a MISSING `internal_llm_provider`
+#      key is `"openrouter_free"` (seed_parser.py), not the dataclass
+#      field's own default of `"none"` (seed_config.py) -- an inconsistency
+#      in Bernstein itself. Any bernstein.yaml (like this file, before this
+#      section existed) that never mentions the key gets "openrouter_free"
+#      silently, not "none".
+#   3. That auto-decompose call then tries OpenRouter, credentials this
+#      project has never configured or needed (every role above pins
+#      `provider: claude`), and the whole `bernstein run` exits 1.
+#
+# Setting `internal_llm_provider: none` explicitly also auto-disables
+# `auto_decompose`/`evolution_enabled` when they were left at their own
+# defaults (config_schema.py's `provider_disabled` branch) -- reasona-dev's
+# own `write_role_plan()` already does its own single-step task
+# decomposition (one stage, one step, one role); Bernstein's internal
+# auto-decompose is a redundant feature this project never wanted.
+internal_llm_provider: none
