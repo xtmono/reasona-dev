@@ -31,9 +31,10 @@ reasona_dev = "reasona_dev.plugin:ReasonaGatePlugin"
 # adapters/registry.py -> _load_entrypoint_adapters(), entry_points(group="bernstein.adapters")
 # `agy` needs no entry here -- it is already a native Bernstein adapter
 # (Antigravity CLI, same binary/flags dev-ralf's dispatch.md documents).
-# Only `ocr` was confirmed absent from the installed registry.
+# `ocr` and `omp` were confirmed absent from the installed registry.
 [project.entry-points."bernstein.adapters"]
 ocr = "reasona_dev.adapters.ocr:OcrAdapter"
+omp = "reasona_dev.adapters.omp:OmpAdapter"
 
 [build-system]
 requires = ["hatchling"]

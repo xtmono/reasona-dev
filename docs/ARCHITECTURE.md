@@ -3193,6 +3193,42 @@ step; Bernstein exposes no cleanup command for its own already-pushed branches (
 re-implement branch discovery+deletion here anyway, for a problem `--merge direct` prevents from
 ever occurring.
 
+## 3.29 Ported dev-ralf's `omp` CLI support the same way `ocr` was ported
+
+dev-ralf reverted its general external-CLI choice from `kilo` back to `opencode` (`kilo`, adopted
+2026-08-14 to work around an `opencode --format json` hang, went on to show the identical
+silent-hang defect in production despite passing local verification before adoption -- see
+`rationale.md` in `tas-dev-plugins` for the full incident) and, in the same commit, added `omp`
+(Oh My Pi) as a new supported CLI. Checked whether either half applies here:
+
+- **The `opencode`/`kilo` revert itself does not port.** dev-ralf's `reference/dispatch.md` documents
+  a raw external-CLI dispatch mechanism (its OWN warmup/session/Monitor management) this project
+  replaced entirely with `bernstein run` batch calls (§3.10's own rationale) -- Bernstein's own
+  adapter layer owns CLI invocation, not this project. The one place `"kilo"` appears in this
+  project's own code, `model_config.py`'s hardcoded `bugbot` fallback
+  (`("deepseek-v4-pro", "kilo", "high")`), predates and is unrelated to dev-ralf's kilo adoption
+  (git blame: present since this module's very first commit) -- confirmed with the user and left
+  as-is; this project's own `.reasona/reasona.yaml` already overrides `bugbot` away from it to
+  `claude:claude-opus-5:high` regardless.
+- **`omp` support DOES port, the same way `ocr` did.** Confirmed absent from the installed Bernstein
+  3.15.1 adapter registry (`adapters/`, `adapters/registry.py` -- no `omp.py`, nothing else wires
+  `"omp"`; `amp.py` is a different, unrelated adapter). `reasona_dev/adapters/omp.py` is a new
+  `CLIAdapter` subclass, registered under the `bernstein.adapters` entry-point group in
+  `pyproject.toml`, the identical mechanism `adapters/ocr.py` already established -- a role whose
+  `role_model_policy.provider` is `omp` is spawned through here without any of this project's own
+  code touching the subprocess.
+
+**Deliberately single-shot, never `--resume` -- see `omp.py`'s own module docstring for the full
+argument.** dev-ralf's own `omp` support is a two-phase design: warmup once (`--mode json`, capture
+the session id) then `--resume "$session_id"` on every subsequent fix cycle of the SAME PR, a
+session-reuse cost optimization. This project has nothing to reuse: every
+`bernstein_dispatch.run_plan_file()` call is its own fresh `bernstein run` subprocess that spawns,
+executes, and exits -- there is no live session anywhere in this architecture for `--resume` to
+attach to, on any adapter (the same reasoning `ocr.py`'s own `supports_session_continuation = False`
+already established). Each cycle's full context is already reassembled into the prompt text itself,
+so `omp.py` runs `omp` exactly once per spawn with the complete prompt and never sends `--mode json`
+or `--resume`.
+
 ## 4. Directory structure
 
 ```
