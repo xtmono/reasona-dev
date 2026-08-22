@@ -3170,6 +3170,29 @@ redundant here anyway: `bernstein_dispatch.write_role_plan()` already does this 
 single-step task decomposition (one stage, one step, one role) before a task ever reaches
 Bernstein.
 
+## 3.28 `--auto-approve` alone still opened a throwaway PR for every dispatch -- `--merge direct` closes it
+
+Live incident, TAS plan 49: `bernstein/task-56e29fcd85bc` and `reasona/49-plan-compile-scaling-plan/
+pr-3` were found still sitting on origin well after their owning PR fully shipped -- Bernstein's own
+worktree-cleanup step never deletes a branch it pushed, and nothing downstream (reasona-dev or
+otherwise) ever reads or closes them. Root-caused against the installed source
+(`core/orchestration/orchestrator.py`, the approval-gate construction just after WAL setup):
+`--auto-approve` only skips the CLI's own confirmation prompt -- the merge-back APPROVAL GATE is a
+completely separate concept, controlled by `--approval` (default `"auto"`) crossed with `--merge`
+(default `"pr"`, not `"direct"`). `bernstein_dispatch.run_plan_file()` sent no `--merge` flag at all,
+so `_effective_approval` resolved to `"pr"` regardless of `--auto-approve`, activating
+`ApprovalGate(mode=PR)` (`core/security/approval.py`): every completed task's work gets pushed to a
+throwaway `bernstein/task-<id>` branch AND a real GitHub PR opened for it, on top of (not instead of)
+the direct merge into the calling worktree.
+
+**Fix: `--merge direct` added to the `bernstein run` command.** This forces `_effective_approval =
+"auto"`, so `self._approval_gate` is never constructed -- no push, no PR, ever. This closes the gap
+at its source (nothing is ever created to clean up) rather than adding a post-hoc branch-deletion
+step; Bernstein exposes no cleanup command for its own already-pushed branches (checked `bernstein
+--help` -- no `clean`/`prune`/`gc` subcommand exists), so a reactive cleanup would have had to
+re-implement branch discovery+deletion here anyway, for a problem `--merge direct` prevents from
+ever occurring.
+
 ## 4. Directory structure
 
 ```

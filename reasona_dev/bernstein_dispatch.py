@@ -256,12 +256,31 @@ def run_plan_file(
     port: int = 8052,
     timeout: int = 3600,
 ) -> DispatchResult:
-    """`bernstein run <plan> --auto-approve`, wait, then reap.
+    """`bernstein run <plan> --auto-approve --merge direct`, wait, then reap.
 
     Synchronous by construction: the run spawns, executes, merges and exits,
     so there is nothing to poll. It does leave its detached server and
     watchdog behind, so `stop_leftovers` runs afterwards -- see there for why
     that is required rather than tidy.
+
+    **`--merge direct` is not optional, and `--auto-approve` does not cover
+    it.** Confirmed against installed source
+    (`core/orchestration/orchestrator.py` around the approval-gate
+    construction): `--auto-approve` only skips the CLI's own confirmation
+    prompt; the merge-back approval GATE is a completely separate concept
+    controlled by `--approval` (default `"auto"`) crossed with `--merge`
+    (default `"pr"`, NOT `"direct"`). With no `--merge` flag -- what this
+    call sent before this fix -- `_effective_approval` resolves to `"pr"`
+    regardless of `--auto-approve`, which activates `ApprovalGate(mode=PR)`:
+    every completed task's work gets pushed to a throwaway
+    `bernstein/task-<id>` branch AND a real GitHub PR opened for it, on top
+    of (not instead of) the direct merge into this call's own worktree --
+    neither reasona-dev nor anything downstream ever reads or closes that
+    PR/branch, and Bernstein's own cleanup never deletes it either (a real
+    incident: TAS plan 49's `bernstein/task-56e29fcd85bc` orphaned on
+    origin, still there after the owning PR fully shipped). `--merge direct`
+    forces `_effective_approval = "auto"`, so `self._approval_gate` is never
+    constructed at all -- no push, no PR, ever.
 
     A non-zero exit is reported rather than raised: the caller decides what a
     failed dispatch means, and for most roles the artifact's presence is the
@@ -271,7 +290,7 @@ def run_plan_file(
         proc = subprocess.run(
             [
                 "bernstein", "run", str(plan_path),
-                "--auto-approve", "--quiet", "--port", str(port),
+                "--auto-approve", "--merge", "direct", "--quiet", "--port", str(port),
             ],
             cwd=str(workdir), capture_output=True, text=True, timeout=timeout,
         )

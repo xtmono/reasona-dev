@@ -161,6 +161,12 @@ def test_the_dispatch_is_synchronous(tmp_path, monkeypatch):
     seen["cmd"] = calls[0]
     assert calls[0][:3] == ["bernstein", "run", str(tmp_path / "p.yaml")]
     assert "--auto-approve" in calls[0]
+    # --merge direct, not the default "pr" -- otherwise --auto-approve alone
+    # still activates ApprovalGate(mode=PR): a throwaway bernstein/task-<id>
+    # branch pushed to origin and a real GitHub PR opened, on top of the
+    # direct merge, that nothing ever reads or cleans up.
+    idx = calls[0].index("--merge")
+    assert calls[0][idx + 1] == "direct"
     assert ["--port", "8099"] == calls[0][-2:]
     # ...and the leftovers are reaped before the next dispatch can collide
     assert calls[1][:2] == ["bernstein", "stop"]
