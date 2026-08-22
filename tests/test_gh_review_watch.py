@@ -109,6 +109,34 @@ def test_compliance_uses_the_latest_comment_by_created_at():
     assert watch.parse_compliance_review([old, new])["state"] == "pass"
 
 
+def test_compliance_in_progress_placeholder_does_not_erase_earlier_real_fail():
+    """Real incident (PR #1264, 2026-08-22): a re-review round posts a
+    `... round N in progress` placeholder -- matching the marker, but with
+    no VERDICT of its own -- before its own result exists. The earlier
+    round's real FAIL must still be reported, not overwritten by
+    `state: "missing"`."""
+    fail = _comment("TAS PR Compliance Review\nVERDICT: FAIL", created="2026-08-22T02:08:01Z")
+    in_progress = _comment(
+        "TAS PR Compliance Review -- round 2 in progress\n- [x] Round-cap check",
+        created="2026-08-22T02:45:25Z",
+    )
+    result = watch.parse_compliance_review([fail, in_progress])
+    assert result["state"] == "fail"
+    assert result["round_in_progress"] is True
+
+
+def test_compliance_no_round_in_progress_when_latest_has_the_verdict():
+    only = _comment("TAS PR Compliance Review\nVERDICT: PASS")
+    result = watch.parse_compliance_review([only])
+    assert result["state"] == "pass"
+    assert result["round_in_progress"] is False
+
+
+def test_compliance_missing_state_also_reports_round_in_progress_false():
+    result = watch.parse_compliance_review([])
+    assert result["round_in_progress"] is False
+
+
 def test_compliance_bot_authored_wins_over_body_only_match():
     """A non-bot account whose body happens to contain the marker text
     must not outrank an actual bot-authored artefact."""

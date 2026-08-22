@@ -232,7 +232,10 @@ def _build_fix_prompt(pr_title: str, findings) -> str:
     )
 
 
-def _pr_unit_context_block(*, pr_index: str | None, pr_title: str, workdir: Path, section: str | None) -> str:
+def _pr_unit_context_block(
+    *, pr_index: str | None, pr_title: str, workdir: Path, section: str | None,
+    files: list[str] | None = None,
+) -> str:
     """The plan's own `## PR <N>:` section, plus the unit/worktree identity
     every packaged prompt's closing `[Current PR unit]:`/`[Worktree]:` line
     already asks for -- appended to a role's prompt the same way
@@ -247,12 +250,27 @@ def _pr_unit_context_block(*, pr_index: str | None, pr_title: str, workdir: Path
     findings rather than a full omission hunt; in either case the block
     still names the unit and worktree, just without the prose to
     cross-check against.
+
+    `files` is the manifest's OWN `files:` list (`plan_compile.PRUnit.files`)
+    -- printed explicitly and separately from `section`'s prose, because the
+    manifest entry lives in the plan's YAML frontmatter, not necessarily
+    repeated inside the `## PR <N>:` prose body a role reads. A role that has
+    to re-derive "what is this unit even allowed to touch" from prose alone
+    can miss it; a real incident did (a diff edited a file declared by a
+    DIFFERENT unit's manifest entry, and internal review/scan never flagged
+    it -- `compliance.md`'s poc-scope check item consumes this list).
     """
     lines = [
         "\n\n---",
         f"[Current PR unit]: PR {pr_index or '?'} -- {pr_title}",
         f"[Worktree]: {workdir}",
     ]
+    if files:
+        lines.append(
+            "\n[Manifest files for this PR unit] (ONLY these are in scope -- a diff file "
+            "outside this list belongs to a DIFFERENT unit's manifest entry, not this one):"
+        )
+        lines.extend(f"- {f}" for f in files)
     if section and section.strip():
         lines.append(
             "\nThe plan's own `## PR " + (pr_index or "<N>") + ":` section for THIS unit "
@@ -674,7 +692,9 @@ def run_pr_cycle(
     # intersects -- so a fresh repo and an unrelated PR both get an unchanged
     # prompt rather than a growing preamble.
     memory_block = memory.render_for_prompt(memory.select(log_workdir, files or []))
-    pr_context_block = _pr_unit_context_block(pr_index=pr_index, pr_title=pr_title, workdir=workdir, section=pr_section)
+    pr_context_block = _pr_unit_context_block(
+        pr_index=pr_index, pr_title=pr_title, workdir=workdir, section=pr_section, files=files,
+    )
 
     review_profile_prompt = resolve_prompt("review", profile=profile, workdir=workdir)
     if review_profile_prompt is None:

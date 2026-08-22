@@ -394,9 +394,33 @@ def _compliance_verdict(body: str) -> str | None:
 
 
 def parse_compliance_review(issue_comments: list[dict]) -> dict:
-    """Find the latest TAS PR Compliance Review comment. Matching order:
-    bot-authored from the known login set -> login-only -> body-marker
-    fallback. Returns {state, comment_id, body, created_at}."""
+    """Find the latest TAS PR Compliance Review comment that actually
+    carries a parseable verdict. Matching order: bot-authored from the
+    known login set -> login-only -> body-marker fallback -- same bucketing
+    as before; what changed is that "latest" now means the latest
+    VERDICT-bearing match, not merely the latest marker-matching one.
+
+    **Why this changed.** TAS's own re-review workflow (`.github/workflows/
+    review.yaml`) posts a `## TAS PR Compliance Review -- round N in
+    progress` placeholder comment -- which still matches
+    `COMPLIANCE_MARKER_RE` -- BEFORE that round's own result exists.
+    Picking the literal latest match meant: the instant a new round starts,
+    the last REAL verdict (e.g. a still-unaddressed `FAIL`) was replaced by
+    `state: "missing"`, discarding a live signal for as long as the new
+    round takes to finish -- or forever, if it stalls (rate limit, the
+    workflow's own 8-round cap, an infra failure). A real incident hit
+    exactly this: PR #1264 (2026-08-22) posted `VERDICT: FAIL` at round 1;
+    round 2's placeholder posted afterward with no verdict of its own, and
+    the FAIL verdict silently vanished from this function's output.
+
+    Returns `{state, comment_id, body, created_at, round_in_progress}` --
+    `round_in_progress` is True when a marker-matching comment newer than
+    the resolved verdict exists but has not posted its own verdict yet, so
+    a caller can tell "no compliance signal has ever posted" (`state:
+    "missing"`, `round_in_progress: False`) apart from "a re-review is
+    already running; the verdict below is the last one known" (`state:
+    "pass"/"fail"`, `round_in_progress: True`).
+    """
     bot_authored = []
     login_only = []
     body_only = []
@@ -415,23 +439,29 @@ def parse_compliance_review(issue_comments: list[dict]) -> dict:
 
     matched = bot_authored or login_only or body_only
     if not matched:
-        return {"state": "missing", "comment_id": None, "body": "", "created_at": None}
+        return {"state": "missing", "comment_id": None, "body": "", "created_at": None, "round_in_progress": False}
 
     matched.sort(key=lambda c: c.get("createdAt") or "")
-    latest = matched[-1]
-    body = latest.get("body") or ""
-    verdict = _compliance_verdict(body)
-    if verdict is None:
-        state = "missing"
-    elif verdict == "PASS":
-        state = "pass"
-    else:
-        state = "fail"
+
+    verdict_comment = None
+    verdict = None
+    for c in reversed(matched):
+        v = _compliance_verdict(c.get("body") or "")
+        if v is not None:
+            verdict_comment, verdict = c, v
+            break
+
+    if verdict_comment is None:
+        return {"state": "missing", "comment_id": None, "body": "", "created_at": None, "round_in_progress": False}
+
+    state = "pass" if verdict == "PASS" else "fail"
+    body = verdict_comment.get("body") or ""
     return {
         "state": state,
-        "comment_id": latest.get("databaseId"),
+        "comment_id": verdict_comment.get("databaseId"),
         "body": body if state == "fail" else "",
-        "created_at": latest.get("createdAt"),
+        "created_at": verdict_comment.get("createdAt"),
+        "round_in_progress": matched[-1] is not verdict_comment,
     }
 
 

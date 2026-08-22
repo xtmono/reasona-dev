@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reasona_dev import _shell, ci_gate, config_file, final_phase, ledger
+from reasona_dev.model_config import ResolvedModel
 from reasona_dev.plan_compile import PRUnit
 
 MAX_PR_REPAIR_ATTEMPTS = 3
@@ -105,28 +106,134 @@ def build_pr_title(unit_type: str, subject: str) -> str:
     return f"{cc_type}: {subject}"
 
 
-def build_pr_body(*, issue_num: int, plan_name: str, unit: PRUnit) -> str:
+_SUMMARY_LABEL_RE = re.compile(r"(?im)^\s*(CHANGES|WHY|TEST)\s*:\s*")
+
+
+def _pr_summary_prompt(*, unit: PRUnit, plan_name: str) -> str:
+    """Asks the dispatched role to describe what this unit's diff ACTUALLY
+    did, not what the plan originally intended -- the two can diverge (a
+    fix made mid-review, a scope correction), and the plan's own prose is
+    only the starting intent, not necessarily the final shape of the
+    change. See `generate_pr_summary()`'s docstring for why this exists."""
+    return (
+        "You are writing the description for a pull request this pipeline "
+        "is about to open. Look at the ACTUAL change in the current "
+        "worktree -- `git log <base>..HEAD --oneline` and `git diff "
+        "<base>...HEAD` (against this repo's default base branch) -- to see "
+        "what this PR really did. If it diverged from the plan's original "
+        "intent below, describe what actually happened, not the original "
+        "plan.\n\n"
+        f"The plan's own `## PR {unit.index}:` section for this unit "
+        "(starting intent, for reference only):\n\n"
+        f"{unit.section.strip() or '(no plan section)'}\n\n"
+        "Write exactly three labeled sections, plain prose, concise (a "
+        "sentence or two to a short paragraph each) -- output ONLY this, "
+        "nothing before or after:\n\n"
+        "CHANGES: <what this PR actually changed, in your own words, based "
+        "on the diff/commits you just read>\n"
+        "WHY: <why this change is needed>\n"
+        "TEST: <how this change was verified -- cite the actual test/review "
+        "evidence you find (test files, CI config, review artifacts), not a "
+        "generic claim>"
+    )
+
+
+def _parse_pr_summary(text: str) -> dict[str, str] | None:
+    """Split on `CHANGES:`/`WHY:`/`TEST:` labels, in any order, tolerating
+    extra prose around them -- real LLM output is not guaranteed to match a
+    single rigid template. `None` (not a partial dict) when any of the
+    three is missing or empty, so the caller has one unambiguous fallback
+    condition rather than three."""
+    matches = list(_SUMMARY_LABEL_RE.finditer(text))
+    if not matches:
+        return None
+    sections: dict[str, str] = {}
+    for i, m in enumerate(matches):
+        label = m.group(1).upper()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        sections[label] = text[start:end].strip()
+    changes, why, test = sections.get("CHANGES"), sections.get("WHY"), sections.get("TEST")
+    if not (changes and why and test):
+        return None
+    return {"changes": changes, "why": why, "test": test}
+
+
+def generate_pr_summary(
+    *, workdir: Path, unit: PRUnit, plan_name: str, model: ResolvedModel,
+    rundir: str | Path, port: int = 8052, run_role_fn=None,
+) -> dict[str, str] | None:
+    """Dispatch a role against THIS unit's own worktree to summarize what
+    its diff/commits actually did, for the issue/PR bodies about to be
+    created -- instead of dumping the plan's own pre-development prose
+    verbatim (`build_pr_body()`'s old, and still fallback, behavior).
+
+    **Why this exists.** A static template can only ever describe the
+    plan's original INTENT (`unit.section`), never what the unit's diff
+    actually ended up doing -- and the two are not guaranteed to match (a
+    fix made mid-review can change scope, correct an approach, or touch
+    something the plan didn't anticipate). dev-ralf's own worker used an
+    agent to write this summary at PR-creation time for exactly this
+    reason; this restores that behavior for reasona-dev's static-template
+    replacement (`docs/ARCHITECTURE.md` -- gh-pr body generation).
+
+    Reuses the `"backend"` Bernstein role (already whitelisted in every
+    `bernstein.yaml` this project ships/consumes) rather than a new role
+    name of its own -- introducing a new role would require every target
+    repo's `bernstein-template.yaml` (this project's own, AND every
+    consumer repo's, e.g. TAS's hand-authored union template) to add an
+    entry before task creation would even succeed, for what is a
+    text-summarization task well within `"backend"`'s existing remit.
+    `label="pr_body"` still keeps this dispatch's raw-output filename and
+    `cycles_log` entry distinct from any other `"backend"` dispatch in the
+    same cycle.
+
+    Returns `None` -- never raises -- on any dispatch failure or unparsable
+    output; `run_gh_pr()` falls back to `build_pr_body()`'s deterministic
+    plan-section dump in that case, so a flaky/exhausted model never blocks
+    PR creation outright.
+    """
+    if run_role_fn is None:
+        from reasona_dev.pr_cycle import run_role as run_role_fn
+    try:
+        result = run_role_fn(
+            workdir=workdir, role="backend", label="pr_body",
+            title=f"pr-body summary: {unit.title}",
+            prompt=_pr_summary_prompt(unit=unit, plan_name=plan_name),
+            model=model, rundir=Path(rundir), cycle=1, port=port,
+        )
+    except Exception:
+        return None
+    if result.error_detail or not result.raw_output_path.is_file():
+        return None
+    text = result.raw_output_path.read_text(encoding="utf-8")
+    return _parse_pr_summary(text)
+
+
+def build_pr_body(*, issue_num: int, plan_name: str, unit: PRUnit, summary: dict[str, str] | None = None) -> str:
     """The three sections `/gh-pr` SKILL.md §8 requires (`## Changes`,
     `## Why we need this`, `## Test`) plus the `Closes #N` line P4 checks
-    for. "Why"/"Test" are filled with what this pipeline actually knows,
-    not fabricated detail: this unit's plan section is the change
-    description, and the only test evidence that exists at this point is
-    that review/scan/ship_gate's acceptance axis already passed (§ this
-    module's caller).
+    for.
+
+    `summary`, when given (`generate_pr_summary()`'s parsed output), fills
+    all three sections with the actual-diff description an LLM wrote.
+    Omitted (or `None`, e.g. the dispatch failed or wasn't configured),
+    "Why"/"Test" fall back to what this pipeline knows without a model
+    call: this unit's plan section as the change description, and the fact
+    that review/scan/ship_gate's acceptance axis already passed.
     """
-    changes = unit.section.strip() or f"See PR {unit.index} of plan `{plan_name}`."
-    return "\n\n".join(
-        [
-            f"Closes #{issue_num}",
-            "## Changes",
-            changes,
-            "## Why we need this",
-            f"Implements PR {unit.index} of plan `{plan_name}`.",
-            "## Test",
+    if summary:
+        changes, why, test = summary["changes"], summary["why"], summary["test"]
+    else:
+        changes = unit.section.strip() or f"See PR {unit.index} of plan `{plan_name}`."
+        why = f"Implements PR {unit.index} of plan `{plan_name}`."
+        test = (
             "Verified by this pipeline's review/scan cycle and the plan's "
             "own executable acceptance criteria (ship_gate) before this PR "
-            "was opened.",
-        ]
+            "was opened."
+        )
+    return "\n\n".join(
+        [f"Closes #{issue_num}", "## Changes", changes, "## Why we need this", why, "## Test", test]
     )
 
 
@@ -271,9 +378,13 @@ def run_gh_pr(
     unit: PRUnit,
     plan_name: str | None,
     base: str = "origin/main",
+    resolved: dict[str, ResolvedModel] | None = None,
+    rundir: str | Path | None = None,
+    port: int = 8052,
+    run_role_fn=None,
 ) -> GhPrResult:
-    """`duplicate check -> create issue -> rename branch -> push + create PR
-    -> validate/repair`.
+    """`duplicate check -> summarize actual diff -> create issue -> rename
+    branch -> push + create PR -> validate/repair`.
 
     `plan_name`, when given, is the same resume flag `final_phase.py`
     already threads through: a known issue number from an earlier,
@@ -281,6 +392,16 @@ def run_gh_pr(
     for the same unit), and a newly created issue's number is recorded back
     for the next resume, mirroring `ledger.known_pr_url()`/
     `mark_pr_created()`'s existing pattern for the PR itself.
+
+    `resolved`/`rundir`, when both given, drive one `generate_pr_summary()`
+    dispatch -- reused for BOTH the issue body and the PR body, since by
+    the time this function runs (after review/scan/dev cycles already
+    completed), the same actual-diff summary describes what a freshly
+    created issue is documenting and what the PR that closes it changed.
+    Omitted (either is `None`, e.g. an older caller/test not yet passing
+    them), both bodies fall back to `build_pr_body()`'s deterministic
+    plan-section dump -- unchanged from this function's behavior before
+    LLM-generated bodies existed.
 
     **Not ported: worker.md's OTHER guard** ("Pre-/gh-pr guard": before
     creating anything, check whether this unit's OWN temp branch already
@@ -306,14 +427,23 @@ def run_gh_pr(
             pr_url=dup_url, pr_num=dup_num, duplicate=True,
         )
 
+    summary = None
+    if resolved is not None and rundir is not None:
+        summary = generate_pr_summary(
+            workdir=workdir, unit=unit, plan_name=plan_name or "", model=resolved["dev"],
+            rundir=rundir, port=port, run_role_fn=run_role_fn,
+        )
+
     known_issue = ledger.known_issue_number(workdir, plan_name, stage_name) if plan_name else None
     if known_issue is not None:
         issue_num = known_issue
     else:
         issue_title = f"{unit_type}: {subject}"
-        issue_num, issue_reason = create_issue(
-            workdir, title=issue_title, body=unit.section.strip() or issue_title,
-        )
+        if summary:
+            issue_body = f"{summary['changes']}\n\n{summary['why']}"
+        else:
+            issue_body = unit.section.strip() or issue_title
+        issue_num, issue_reason = create_issue(workdir, title=issue_title, body=issue_body)
         if issue_num is None:
             return GhPrResult(passed=False, reason=issue_reason)
         if plan_name:
@@ -323,7 +453,7 @@ def run_gh_pr(
     if branch is None:
         return GhPrResult(passed=False, reason=branch_reason, issue_num=issue_num)
 
-    body = build_pr_body(issue_num=issue_num, plan_name=plan_name or "", unit=unit)
+    body = build_pr_body(issue_num=issue_num, plan_name=plan_name or "", unit=unit, summary=summary)
 
     # B-5: the full CI gate, worker.md §4's placement -- once, right before
     # a PR is created, never per fix cycle (that is `ci.fast`'s job, inside

@@ -2722,6 +2722,60 @@ append mode, and POSIX guarantees that is atomic for a normal-sized line. `memor
 racing across threads is an accepted, self-correcting staleness (a full recomputation, not a merge)
 -- see `orchestrate._run_units_concurrently()`'s own docstring for the full argument.
 
+## 3.19 Three gaps found running the real TAS plan 49 PR1 pilot: static PR/issue bodies, no poc-scope check, and a lost compliance FAIL verdict
+
+Found and reported by a peer session that ran `reasona-dev` against a real target repo
+(`thaki-agent-security`, plan 49 PR1, PR #1264) rather than the test suite's injected fakes —
+independently re-verified against the actual repo/PR state before any fix here.
+
+**1. `gh_pr.build_pr_body()`/`create_issue()` dumped the plan's own prose verbatim, unconditionally.**
+`unit.section.strip()` (the plan's `## PR <N>:` text, written BEFORE development) went straight into
+`## Changes`, and "Why"/"Test" were fixed boilerplate — regardless of whether the unit's actual diff
+matched that original intent. dev-ralf's own worker used an agent to write this summary from the real
+diff/commits at PR-creation time; the static-template replacement never restored that. Fixed by
+`gh_pr.generate_pr_summary()` — dispatches the existing `"backend"` Bernstein role (never a new role
+name: that would require every target repo's `bernstein-template.yaml`, including a consumer's own
+hand-authored union template, to add an entry before task creation would even succeed) with a prompt
+asking it to read `git log`/`git diff` against base and write `CHANGES:`/`WHY:`/`TEST:` sections
+describing what actually happened. `_parse_pr_summary()` splits on those labels (any order, tolerant
+of prose around them); `build_pr_body()` takes the parsed result as an optional `summary` argument and
+falls back to the old deterministic dump on any dispatch/parse failure — a flaky or exhausted model
+never blocks PR creation. `run_gh_pr()` generates the summary once (after the duplicate check, before
+issue creation) and reuses it for both the issue body and the PR body, since both are created in the
+same call, after review/scan/dev cycles already produced the real diff this describes.
+
+**2. Internal `bugbot`/`compliance` had no check that the diff stays inside the unit's own manifest
+`files:` list.** A real MUST_FIX fix (the OCR reviewer asked for an error-type change) touched
+`crates/tas-plan/src/error.rs` — a file PR 1's manifest never declared, and PR 8's manifest DOES
+declare (`files:` is the only thing that keeps concurrent units from editing the same file). Neither
+internal review nor scan flagged it; TAS's own separate GitHub Actions bot (`/tas-review`, an external
+CI check, not this pipeline) caught it after the PR was already open. Fixed two ways: (a)
+`pr_cycle._pr_unit_context_block()` now takes a `files` argument and prints
+`[Manifest files for this PR unit]` explicitly and separately from `section`'s prose — the manifest
+entry lives in the plan's YAML frontmatter, not necessarily repeated in the prose body a role reads,
+so a role re-deriving scope from prose alone can miss it exactly like this incident did; (b)
+`.reasona/prompts/rust-dev/compliance.md` gained a `poc-scope` check item instructing the role to
+cross-check every diff file against that list and report anything outside it as MUST_FIX [CRITICAL].
+
+**3. `gh_review_watch.parse_compliance_review()` picked the literal LATEST marker-matching comment,
+which could be a re-review placeholder with no verdict of its own — silently discarding a real,
+still-unaddressed FAIL.** TAS's `review.yaml` workflow posts a `## TAS PR Compliance Review -- round N
+in progress` comment (matches `COMPLIANCE_MARKER_RE`) before that round's own result exists. Sorting
+matched comments by `createdAt` and taking the last one meant: the instant a new round starts, the
+prior round's real verdict — e.g. `VERDICT: FAIL`, exactly what happened on PR #1264 (round 1 posted
+`FAIL` at 02:08:01Z; round 2's placeholder posted at 02:45:25Z with no verdict) — became
+`state: "missing"` in this function's output for as long as the new round takes, or forever if it
+stalls (the workflow's own 8-round cap, a rate limit, an infra failure). `classify()`'s `"missing" ->
+"continue"` branch meant this was not silently treated as PASS, but it did mean a live FAIL could sit
+unseen indefinitely rather than driving the actionable fix loop `gh_review.run_gh_review()` exists to
+run. Fixed by walking matched comments newest-first and taking the first one that actually parses a
+verdict, skipping placeholders — `parse_compliance_review()` now returns an added `round_in_progress`
+key (True when a marker-matching comment newer than the resolved verdict exists but hasn't posted its
+own verdict yet) so a caller can distinguish "no compliance signal has ever posted" from "a re-review
+is already running; the verdict below is still the most current one" — `classify()` itself is
+unchanged (it only reads `state`), so the immediate fix is minimal; `round_in_progress` is there for a
+future caller that wants to avoid double-dispatching a fix while a round it triggered is still running.
+
 ## 4. Directory structure
 
 ```

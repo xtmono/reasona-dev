@@ -905,6 +905,7 @@ def run_final_stage(
 
     gh_pr_result = gh_pr.run_gh_pr(
         workdir=workdir, stage_name=stage_name, unit=unit, plan_name=plan_name, base=base,
+        resolved=resolved, rundir=rundir, port=port, run_role_fn=run_role_fn,
     )
     if not gh_pr_result.passed:
         return _blocked(gh_pr_result.reason, pr_url=gh_pr_result.pr_url, role_results=dispatches)

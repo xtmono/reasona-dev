@@ -7,6 +7,16 @@ conventions, banned dependencies or APIs, license headers, required
 docs/changelog updates, secrets-handling policy) rather than general code
 correctness -- bug-finding is a different role's job.
 
+**poc-scope** -- compare every file the diff touches against
+`[Manifest files for this PR unit]` at the end of this prompt. Any changed
+file NOT in that list is out of scope for this unit: it may be a file a
+DIFFERENT PR unit's manifest declares (the `files:` list is what keeps
+concurrent units from editing the same file), so touching it here is a
+policy violation regardless of whether the change itself is otherwise
+correct. Report it as MUST_FIX [CRITICAL], citing the manifest list and the
+offending file; the fix is either to add the file to THIS unit's manifest
+entry (if it genuinely belongs here) or to revert the out-of-scope edit.
+
 This profile has no project-specific compliance skill configured (see
 `.reasona/prompts/<profile>/compliance.md` to add one, e.g. one that
 dispatches to a policy-aware skill this project already has). Analyze

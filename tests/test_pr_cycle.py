@@ -315,6 +315,32 @@ def test_pr_section_is_appended_to_the_review_prompt(tmp_path, rust_dev_prompts)
     assert str(tmp_path) in review_prompt  # the worktree identity is also present
 
 
+def test_manifest_files_are_listed_in_the_compliance_prompt(tmp_path, rust_dev_prompts):
+    """Real incident (TAS plan 49 PR1): the diff edited a file declared by a
+    DIFFERENT unit's manifest entry, and internal compliance review never
+    flagged it because it had no way to see this unit's own `files:` list.
+    `run_pr_cycle(files=...)` must make that list explicit to compliance
+    (`compliance.md`'s poc-scope check consumes it)."""
+    seen = {}
+
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+        seen.setdefault(label or role, prompt)
+        return RoleRunResult(
+            role=label or role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
+            raw_output_path=Path("/dev/null"),
+        )
+
+    files = ["crates/tas-plan/src/scaling_fixture.rs", "crates/tas-plan/src/lib.rs"]
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="rust-dev", run_role_fn=fn, files=files, pr_index="1", pr_section="prose",
+    )
+    assert result.verdict == "PASS"
+    assert "crates/tas-plan/src/scaling_fixture.rs" in seen["compliance"]
+    assert "crates/tas-plan/src/lib.rs" in seen["compliance"]
+    assert "[Manifest files for this PR unit]" in seen["compliance"]
+
+
 # --- B-5: local CI gate ------------------------------------------------------
 
 def _git_repo(tmp_path):

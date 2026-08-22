@@ -50,6 +50,83 @@ def test_build_pr_body_has_the_required_sections_and_closing_ref():
     assert "## Test" in body
 
 
+def test_build_pr_body_uses_the_summary_when_given():
+    summary = {"changes": "reverted the error.rs edit", "why": "poc-scope violation", "test": "533 tests pass"}
+    body = gh_pr.build_pr_body(issue_num=7, plan_name="myplan", unit=UNIT, summary=summary)
+    assert "reverted the error.rs edit" in body
+    assert "poc-scope violation" in body
+    assert "533 tests pass" in body
+    assert UNIT.section not in body
+
+
+def test_build_pr_body_falls_back_to_plan_section_without_a_summary():
+    body = gh_pr.build_pr_body(issue_num=7, plan_name="myplan", unit=UNIT)
+    assert "implement it" in body  # from UNIT.section
+
+
+# --- _parse_pr_summary / generate_pr_summary ------------------------------------
+
+def test_parse_pr_summary_extracts_all_three_labeled_sections():
+    text = "CHANGES: did the thing\nWHY: because reasons\nTEST: ran pytest, 12 passed"
+    summary = gh_pr._parse_pr_summary(text)
+    assert summary == {"changes": "did the thing", "why": "because reasons", "test": "ran pytest, 12 passed"}
+
+
+def test_parse_pr_summary_tolerates_leading_prose_and_reordering():
+    text = "Sure, here it is:\n\nWHY: because reasons\nTEST: ran pytest\nCHANGES: did the thing"
+    summary = gh_pr._parse_pr_summary(text)
+    assert summary == {"changes": "did the thing", "why": "because reasons", "test": "ran pytest"}
+
+
+def test_parse_pr_summary_none_when_a_section_is_missing():
+    assert gh_pr._parse_pr_summary("CHANGES: x\nWHY: y") is None
+
+
+def test_parse_pr_summary_none_for_unrelated_text():
+    assert gh_pr._parse_pr_summary("just some random output") is None
+
+
+def test_generate_pr_summary_returns_none_on_dispatch_error(tmp_path):
+    from reasona_dev.finding_adapter import ReviewResult, RoleStatus
+    from reasona_dev.model_config import ResolvedModel
+    from reasona_dev.pr_cycle import RoleRunResult
+
+    def failing_run_role_fn(**kw):
+        return RoleRunResult(
+            role="backend", cycle=1, review_result=ReviewResult(role_status=RoleStatus.ERROR),
+            raw_output_path=tmp_path / "missing.raw.txt", error_detail="no output",
+        )
+
+    summary = gh_pr.generate_pr_summary(
+        workdir=tmp_path, unit=UNIT, plan_name="myplan",
+        model=ResolvedModel("dev", "sonnet", "claude", "high", "default"),
+        rundir=tmp_path / "run", run_role_fn=failing_run_role_fn,
+    )
+    assert summary is None
+
+
+def test_generate_pr_summary_parses_the_dispatched_roles_output(tmp_path):
+    from reasona_dev.finding_adapter import ReviewResult, RoleStatus
+    from reasona_dev.model_config import ResolvedModel
+    from reasona_dev.pr_cycle import RoleRunResult
+
+    def fake_run_role_fn(*, workdir, role, title, prompt, model, rundir, cycle, port, label=None):
+        out = rundir / "pr_body-c1.raw.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("CHANGES: did x\nWHY: needed for y\nTEST: 5 tests pass", encoding="utf-8")
+        return RoleRunResult(
+            role=label or role, cycle=cycle,
+            review_result=ReviewResult(role_status=RoleStatus.COMPLETE), raw_output_path=out,
+        )
+
+    summary = gh_pr.generate_pr_summary(
+        workdir=tmp_path, unit=UNIT, plan_name="myplan",
+        model=ResolvedModel("dev", "sonnet", "claude", "high", "default"),
+        rundir=tmp_path / "run", run_role_fn=fake_run_role_fn,
+    )
+    assert summary == {"changes": "did x", "why": "needed for y", "test": "5 tests pass"}
+
+
 # --- validate_pr_meta (P1-P7) --------------------------------------------------
 
 def _valid_body(issue_num=1):
