@@ -1889,17 +1889,27 @@ consequence of the per-unit worktree isolation §3.11 already built, not new loc
 genuinely shared between threads is the scheduler's own in-memory `by_index`/port pool, guarded by
 a plain `threading.Lock`.
 
-**Port-collision safety at the Bernstein layer was NOT live-verified.** Tracing the installed
-Bernstein 3.15.1 source (`core/server/server_launch.py`'s `_start_server()`) shows `--port` IS
-threaded to the actual server subprocess's bind — contradicting `bernstein_dispatch.py`'s own
-`stop_leftovers()` docstring, which may be stale for this version — but this was not exercised with
-a real concurrent `bernstein run` dispatch (a live agent spawn was out of scope for this change; see
-the test suite's own "never let a test trigger a real `bernstein run`" rule, §3.8.7's leftover-
-process incident). Run the smallest real case (`--job 2` against a two-independent-unit plan) once
-before relying on `--job` for anything larger.
+**Port-collision safety at the Bernstein layer, re-verified against the currently installed
+3.16.0 (this note originally flagged it as not live-verified against 3.15.1 -- since resolved).**
+Traced end to end through the ACTUAL installed source, not just `_start_server()` in isolation:
+`cli/run_bootstrap.py`'s `run()` (the real `bernstein run` CLI command) receives `--port` and
+passes it as `bootstrap_from_seed(port=port)` -> `_start_spawner(workdir, port, ...)` /
+`_start_server(workdir, port, ...)` -> the actual `uvicorn bernstein.core.server:app --port <port>`
+subprocess bind. `bernstein_dispatch.py`'s own `stop_leftovers()` docstring used to claim `--port`
+gets silently dropped in favor of a hardcoded 8052 -- true of 3.15.1, confirmed NOT true of 3.16.0,
+and corrected there. PID files (`.sdd/runtime/server.pid`/`spawner.pid`) are workdir-relative, and
+`bernstein stop` (`cli/commands/stop_cmd.py`) explicitly filters candidates by `process_cwd(pid) ==
+workdir` before touching anything -- a unit's own cleanup cannot reach a sibling's still-running
+server. This is a source-level trace, not a live concurrent dispatch (a real agent spawn is still
+out of scope for this kind of change; see the test suite's own "never let a test trigger a real
+`bernstein run`" rule, §3.8.7's leftover-process incident) -- run the smallest real case (`--job 2`
+against a two-independent-unit plan) once before trusting a larger `--job` on a repo that matters,
+same as any newly-adopted default.
 
-`--job K` (default 1) is the new `run-plan` flag; `result.outcomes`' order always matches the
-plan's topological order regardless of which unit's `bernstein run` actually finishes first.
+`--job K` (default 4, matching dev-ralf's own default -- see `cli.py`'s own `--job` help) is the
+`run-plan` flag; `result.outcomes`' order always matches the plan's topological order regardless of
+which unit's `bernstein run` actually finishes first. `--job 1` still selects the original
+strictly-sequential path unchanged.
 
 ### 3.14.4 Mechanical vs. substantive sync-conflict resolution
 

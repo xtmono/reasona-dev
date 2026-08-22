@@ -184,6 +184,43 @@ def test_run_plan_without_from_pr_passes_none(tmp_path, monkeypatch):
     assert rc == 0
 
 
+def test_run_plan_job_defaults_to_4(tmp_path, monkeypatch):
+    """Matches dev-ralf's own default -- see docs/ARCHITECTURE.md §3.14.3
+    for the port-isolation trace this relies on. `--job 1` still selects
+    the original strictly-sequential path."""
+    from reasona_dev import orchestrate
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["job"] = kw["job"]
+        return _shipped_result()
+
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir)])
+    assert rc == 0
+    assert seen == {"job": 4}
+
+
+def test_run_plan_job_flag_reaches_orchestrate(tmp_path, monkeypatch):
+    from reasona_dev import orchestrate
+
+    plan, workdir = _plan(tmp_path)
+    seen = {}
+
+    def _fake_run_plan(**kw):
+        seen["job"] = kw["job"]
+        return _shipped_result()
+
+    monkeypatch.setattr(orchestrate, "run_plan", _fake_run_plan)
+
+    rc = main(["run-plan", str(plan), "--workdir", str(workdir), "--job", "1"])
+    assert rc == 0
+    assert seen == {"job": 1}
+
+
 def test_run_plan_gh_review_max_wait_defaults_to_900(tmp_path, monkeypatch):
     from reasona_dev import orchestrate
 

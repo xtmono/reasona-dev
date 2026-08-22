@@ -649,9 +649,11 @@ def test_job_greater_than_one_runs_independent_units_concurrently(tmp_path):
 
 
 def test_job_one_keeps_units_strictly_sequential(tmp_path):
-    """Sanity check for the test above: with the default `job=1`, pr-2 and
-    pr-3 do NOT run concurrently -- proving the barrier test actually
-    distinguishes the two cases rather than passing regardless."""
+    """Sanity check for the test above: with `job=1` (the original
+    strictly-sequential behavior, still available via `--job 1` even
+    though the CLI's own default is now 4), pr-2 and pr-3 do NOT run
+    concurrently -- proving the barrier test actually distinguishes the
+    two cases rather than passing regardless."""
     import threading
 
     barrier = threading.Barrier(2, timeout=0.3)

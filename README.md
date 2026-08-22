@@ -129,8 +129,10 @@ global config > default`.
 to run multiple independent reviewers, merged via `finding_adapter.merge()`;
 appending `,ocr` to any one of them (e.g. `--review claude:opus:high,ocr`)
 also dispatches the OCR co-reviewer once alongside them. `run-plan --job K`
-(default 1) runs up to `K` independent PR units concurrently, each on its
-own port — see `docs/ARCHITECTURE.md` §3.14.
+(default 4, matching dev-ralf's own default) runs up to `K` independent PR
+units concurrently, each on its own port — see `docs/ARCHITECTURE.md`
+§3.14.3 for the port-isolation trace this relies on; `--job 1` forces the
+original strictly-sequential behavior.
 
 ## `bernstein.yaml`
 

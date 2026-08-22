@@ -295,9 +295,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--rundir", default=None, help="Where role outputs and the ledger land (default: <workdir>/.reasona/dev/<plan>)")
     p_run.add_argument("--port", type=int, default=8052, help="Port each `bernstein run` dispatch binds (reused sequentially, or the first of `--job` consecutive ports when running concurrently)")
     p_run.add_argument(
-        "--job", type=int, default=1,
-        help="Max PR units to run at once (default: 1, sequential -- unchanged from before this flag existed). "
-             "job>1 runs independent units concurrently, each on its own port (--port through --port+job-1).",
+        "--job", type=int, default=4,
+        help="Max PR units to run at once (default: 4, matching dev-ralf's own default -- see "
+             "docs/ARCHITECTURE.md §3.14.3 for the source-level port-isolation trace this default "
+             "relies on). Each concurrent unit gets its own port (--port through --port+job-1); "
+             "--job 1 forces the original strictly-sequential behavior.",
     )
     p_run.add_argument("--base", default="origin/main")
     p_run.add_argument("--head", default="HEAD")

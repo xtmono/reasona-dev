@@ -154,22 +154,33 @@ def stop_leftovers(workdir: Path) -> None:
     """`bernstein stop` between dispatches -- required, not hygiene.
 
     `bernstein run` detaches its task server and watchdog and does NOT reap
-    them on exit. It also does not propagate `--port` to the orchestrator
-    subprocess, which re-derives the 8052 default regardless of what the CLI
-    was given (the same class of bug as the seed-path propagation gap in
-    `bernstein_config`). Both together mean every dispatch after the first
-    finds a previous run's server still listening on the port it wanted,
-    holding a different auth token.
-
-    Observed live on the second scan cycle:
+    them on exit. A driver that issues one `bernstein run` per role dispatch
+    -- six or more per PR unit -- has to reap between them or the next
+    dispatch in the SAME workdir finds a previous run's server still
+    listening, holding a different auth token:
 
         bernstein run exit=1
         Client error '401 Unauthorized' for url 'http://127.0.0.1:8052/tasks'
 
     with three leftover uvicorn/watchdog processes still alive in the
-    workdir. A driver that issues one `bernstein run` per role dispatch --
-    six or more per PR unit -- has to reap between them or the run is only
-    reliable the first time.
+    workdir. `bernstein stop`, called with `cwd=workdir`, only targets
+    processes whose OWN cwd matches (confirmed against the installed
+    package's `cli/commands/stop_cmd.py`: `process_cwd(pid) != workdir` is
+    filtered out before anything is touched) -- so this is scoped per unit
+    worktree, never cross-unit.
+
+    **Port propagation was re-verified against the currently installed
+    Bernstein (3.16.0) and is correct.** An earlier note here claimed
+    `bernstein run` "does not propagate `--port` to the orchestrator
+    subprocess, which re-derives the 8052 default regardless of what the
+    CLI was given" -- true of 3.15.1, no longer true: `run_bootstrap.run()`
+    -> `bootstrap_from_seed(port=port)` -> `_start_spawner(workdir, port,
+    ...)`/`_start_server(workdir, port, ...)` all thread the CLI's own
+    `--port` value through to the actual `uvicorn ... --port <port>` bind,
+    traced end to end (`docs/ARCHITECTURE.md` §3.14.3). `run-plan --job K`
+    (K concurrent units, one port each) is safe on this version for
+    exactly the reason this function's docstring already argued it needed
+    to be.
     """
     subprocess.run(
         ["bernstein", "stop"], cwd=str(workdir),

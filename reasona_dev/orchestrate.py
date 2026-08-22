@@ -775,8 +775,10 @@ def run_plan(
     """dev-0 -> review -> scan -> ship, per unit, in dependency order, each
     in its own git worktree (see module docstring).
 
-    **`job`** (default 1, sequential -- unchanged from before this
-    parameter existed) bounds how many PR units run AT ONCE. `job>1` uses
+    **`job`** (default 1 here -- a conservative library default for a bare
+    Python call; `cli.py`'s own `--job` flag defaults to 4 instead, matching
+    dev-ralf, since the CLI is the ergonomic entry point most operators
+    actually use) bounds how many PR units run AT ONCE. `job>1` uses
     `_run_units_concurrently()`: a topological scheduler that dispatches a
     unit the moment its dependencies are known, not in synchronized rounds,
     each on its own TCP port so concurrent `bernstein run` dispatches never
