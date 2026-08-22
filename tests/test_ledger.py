@@ -74,14 +74,35 @@ def test_progress_is_none_by_default(tmp_path):
     assert ledger.load_progress(tmp_path, PLAN, "pr-1") is None
 
 
-def test_marking_a_unit_terminal_clears_its_progress(tmp_path):
-    """A shipped/failed unit has nothing left to resume -- a stale
-    in-progress checkpoint left behind would outlive its meaning."""
+def test_marking_a_unit_shipped_clears_its_progress(tmp_path):
+    """A shipped unit is the only outcome `run_plan()` ever skips outright
+    on resume -- its `progress` is never read again, so a stale
+    in-progress checkpoint left behind would just outlive its meaning."""
     ledger.save_progress(tmp_path, PLAN, "pr-1", {"phase": "review", "review_cycle": 1})
     ledger.mark_unit_terminal(tmp_path, PLAN, "pr-1", status="shipped", reason="merged")
     assert ledger.load_progress(tmp_path, PLAN, "pr-1") is None
     # the terminal status itself must survive that same write
     assert ledger.unit_status(tmp_path, PLAN, "pr-1") == "shipped"
+
+
+def test_marking_a_unit_blocked_or_failed_preserves_its_progress(tmp_path):
+    """Real incident (TAS plan 49 PR2, 2026-08-22, docs/ARCHITECTURE.md
+    §3.24): unlike `shipped`, a `blocked`/`failed` unit IS reprocessed on
+    the next resume (`run_plan()`'s skip check is `== "shipped"` only) --
+    so clearing `progress` for these discards a resumed unit's actual
+    review/scan checkpoint (cycle counts, route, budget, recurrence) for
+    no reason, forcing a full re-review even when nothing about the code
+    changed since the block/failure."""
+    progress = {"phase": "scan", "review_cycle": 2, "scan_cycle": 1}
+    ledger.save_progress(tmp_path, PLAN, "pr-1", progress)
+    ledger.mark_unit_terminal(tmp_path, PLAN, "pr-1", status="blocked", reason="gh-review timeout")
+    assert ledger.load_progress(tmp_path, PLAN, "pr-1") == progress
+    assert ledger.unit_status(tmp_path, PLAN, "pr-1") == "blocked"
+
+    ledger.save_progress(tmp_path, PLAN, "pr-2", progress)
+    ledger.mark_unit_terminal(tmp_path, PLAN, "pr-2", status="failed", reason="review did not converge")
+    assert ledger.load_progress(tmp_path, PLAN, "pr-2") == progress
+    assert ledger.unit_status(tmp_path, PLAN, "pr-2") == "failed"
 
 
 def test_clear_progress_leaves_the_terminal_status_alone(tmp_path):

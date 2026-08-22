@@ -487,7 +487,31 @@ def _process_unit(
             port=port,
         )
 
-    cycle = _dispatch_cycle()
+    # RESUME-MERGE MODE (dev-ralf's own term, worker.md: "this PR already
+    # passed all pre-ship gates -- that's why an open PR exists. SKIP
+    # develop/review/scan/gh-pr entirely; START at /gh-review"). A known
+    # `pr_url` in the ledger can only exist if `gh_pr.run_gh_pr()` already
+    # succeeded in an earlier run of this exact command -- meaning review,
+    # scan, and gh-pr all already passed on THIS unit's diff. Re-running
+    # `_dispatch_cycle()` from scratch (the previous default -- every
+    # non-"shipped" resume, including a `--ship`-only unit whose PR merely
+    # sat open, or a `blocked` unit whose only problem was gh-review's own
+    # wall-clock or an unrelated infra hiccup) redid a full review+scan
+    # pass for no reason: the PR's own diff had not changed at all. This
+    # closes that gap for the case dev-ralf itself names explicitly; a
+    # `carried_budget=None` synthetic PASS is safe here because nothing
+    # downstream re-reads `review_cycles`/`scan_cycles` off a resume-merge
+    # cycle result -- `final_stage_fn`'s own pre-ship sync independently
+    # re-verifies the diff is still mergeable and still catches a
+    # substantive conflict if main moved since, same as any other run.
+    known_pr_url = ledger.known_pr_url(workdir, plan_name, up.stage_name) if (resume and ship) else None
+    if known_pr_url:
+        cycle = CycleResult(
+            verdict="PASS", stage="review",
+            reason=f"resume-merge: PR already open ({known_pr_url}), pre-ship gates already passed",
+        )
+    else:
+        cycle = _dispatch_cycle()
     outcome: UnitOutcome | None = None
     while outcome is None:
         if cycle.verdict not in ("PASS", "PASS_WITH_NOTES"):

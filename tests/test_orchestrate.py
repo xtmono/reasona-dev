@@ -428,6 +428,40 @@ def test_ship_runs_the_tail_for_every_passing_unit(tmp_path):
 
 # --- item 5: mechanical/substantive sync-conflict resync ---------------------
 
+def test_resume_merge_mode_skips_review_scan_when_a_pr_already_exists(tmp_path):
+    """dev-ralf's own RESUME-MERGE MODE (worker.md: "this PR already passed
+    all pre-ship gates -- that's why an open PR exists. SKIP develop/
+    review/scan/gh-pr entirely; START at /gh-review"). A known `pr_url` in
+    the ledger can only exist if `gh_pr.run_gh_pr()` already succeeded in
+    an earlier run of this exact unit -- `_dispatch_cycle()` (a full fresh
+    review+scan pass) must not run again for it. docs/ARCHITECTURE.md
+    §3.24."""
+    from reasona_dev import ledger
+
+    repo = _repo(tmp_path)
+    ledger.mark_pr_created(repo, "testplan", "pr-1", "https://github.com/x/y/pull/1")
+
+    cycle_calls = []
+
+    def cycle_fn(**kw):
+        cycle_calls.append(kw["stage_name"])
+        return _pass_cycle()
+
+    def ship_fn(workdir, stage_name, **kw):
+        return _pass_ship()
+
+    def tail_fn(**kw):
+        return _tail_ok(kw["stage_name"])
+
+    result = _run(
+        tmp_path, cycle_fn, ship_fn, workdir_override=repo, ship=True, resume=True,
+        final_stage_fn=tail_fn,
+    )
+    assert result.passed
+    assert "pr-1" not in cycle_calls  # never re-dispatched review/scan for it
+    assert "pr-2" in cycle_calls and "pr-3" in cycle_calls  # units with no known PR still run normally
+
+
 def test_a_substantive_sync_conflict_re_runs_review_before_the_final_stage_retries(tmp_path):
     """`final_stage_fn` reporting `NEEDS_REVIEW` (sync resolved a
     substantive merge conflict) must trigger a fresh `run_pr_cycle_fn`

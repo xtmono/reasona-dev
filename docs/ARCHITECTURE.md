@@ -3019,6 +3019,51 @@ primitive).
    unconditional -- `tail.status == NEEDS_REVIEW` is always retried, never falls through to it) was
    removed along with it.
 
+## 3.24 A `blocked` resume redid a full review from scratch -- dev-ralf's own resume state never does that
+
+Found live, watching the real TAS plan 49 PR2 pilot resume after a gh-review wall-clock timeout
+(§3.20-§3.23): review/scan/gh-pr/CI had all already passed -- the unit was `blocked` purely on
+gh-review's own 900s budget (§3.22) -- yet resuming the exact same command redid review from
+cycle 1. Traced to two independent gaps, both closed here; checked against dev-ralf's own design
+for each before writing a fix, not guessed.
+
+**Gap 1: `ledger.mark_unit_terminal()` cleared `progress` for EVERY status, not just the one that
+is actually final.** `run_plan()`'s own resume-skip check is `unit_status(...) == "shipped"` --
+the ONLY status that causes a unit to be skipped outright on the next resume. `"blocked"` and
+`"failed"` are NOT skipped; both get fully reprocessed. Clearing `progress` (review/scan cycle
+counts, route, budget, recurrence -- everything `pr_cycle.run_pr_cycle()` needs to resume mid-flight)
+for a status that WILL be revisited discards real, already-paid-for work for no reason.
+Ironically, a raw `kill -9` mid-run resumes correctly (no terminal write ever happens, the last
+`_snapshot()` checkpoint survives untouched) -- it was specifically the unit's OWN clean
+"I'm done, for now" conclusion that threw the checkpoint away. Checked against dev-ralf: its own
+`BUDGET_STATE`/`state.json` files are explicitly "never reset mid-PR" (§3.23) -- the same
+invariant this closes. Fixed: `mark_unit_terminal()` now only clears `progress` when
+`status == "shipped"`; `"blocked"`/`"failed"` preserve it, so a resumed `run_pr_cycle()` picks up
+review/scan from wherever it actually left off instead of cycle 1.
+
+**Gap 2: no equivalent of dev-ralf's own RESUME-MERGE MODE.** dev-ralf's `worker.md` states it in
+one line: *"this PR already passed all pre-ship gates -- that's why an open PR exists. SKIP
+develop/review/scan/gh-pr entirely; START at /gh-review."* reasona-dev's `orchestrate.py` had no
+equivalent shortcut at all -- ANY non-`"shipped"` resume, including a unit whose PR was already
+successfully opened (`gh_pr.run_gh_pr()` already succeeded; `ledger.known_pr_url()` is non-`None`)
+and only failed to merge because of something entirely downstream (gh-review's wall clock, an
+unrelated infra hiccup), still ran a full fresh `_dispatch_cycle()` -- review AND scan from
+scratch -- on a diff that had not changed at all since it already passed. Fixed:
+`_process_unit()` now checks `ledger.known_pr_url()` before dispatching (`resume and ship` only --
+matches dev-ralf's own trigger, an already-open PR is the ENTIRE signal); when present, it
+synthesizes a `CycleResult(verdict="PASS", ...)` in place of `_dispatch_cycle()` and proceeds
+straight to `final_stage_fn` (gh-pr re-verify -> gh-review -> final phase -> merge attempt) --
+exactly dev-ralf's own "SKIP ... START at /gh-review." This is safe even if the diff's context DID
+change since the PR opened (main moved): `final_stage_fn`'s own pre-ship sync independently
+re-verifies mergeability every time regardless of how it was entered, and still routes a genuinely
+substantive conflict through the normal re-review path (§3.23) -- resume-merge only skips the
+REDUNDANT full pass when nothing downstream will find anything new to say.
+
+Both fixes are orthogonal and compose: gap 1 helps a `blocked` unit that never got as far as
+opening a PR (still redoes review/scan, but at least resumes mid-cycle instead of from scratch);
+gap 2 skips review/scan entirely once a PR genuinely already exists, regardless of which prior
+attempt's `progress` gap-1 did or didn't preserve.
+
 ## 3.25 PR title and the squash-merge commit title are LLM-generated too, matching the body
 
 §3.19 made the PR/issue BODY describe the unit's actual diff instead of a static plan-section

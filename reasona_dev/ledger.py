@@ -154,11 +154,30 @@ def unit_status(workdir: str | Path, plan_name: str, stage_name: str) -> str | N
 
 
 def mark_unit_terminal(workdir: str | Path, plan_name: str, stage_name: str, *, status: str, reason: str) -> None:
+    """`status="shipped"` is the only outcome `run_plan()` ever skips
+    outright on a later resume (`unit_status(...) == "shipped"`) -- once
+    written, this unit's `progress` is never read again, so clearing it is
+    inert (tidiness, per the historical docstring on why: a stale
+    checkpoint outliving its meaning if the same `stage_name` is ever
+    reused). `"blocked"`/`"failed"` are NOT skipped on resume -- both get
+    reprocessed -- so clearing `progress` for them discarded real,
+    already-paid-for work (every completed review/scan cycle, its budget,
+    its recurrence history) for no reason: a real incident hit this
+    directly (TAS plan 49 PR2, 2026-08-22) -- a unit `blocked` purely by
+    gh-review's own wall-clock budget, with review/scan/gh-pr/CI already
+    fully green, had to redo review from cycle 1 on resume because this
+    function had thrown that state away. Preserving `progress` for these
+    two lets a resumed unit pick back up from wherever it actually was --
+    dev-ralf's own equivalent state file has the same invariant (`docs/
+    ARCHITECTURE.md` §3.24: `BUDGET_STATE`/`state.json` "never reset
+    mid-PR" for exactly this reason).
+    """
     path = _unit_ledger_path(workdir, plan_name, stage_name)
     data = _read(path)
     data["status"] = status
     data["reason"] = reason
-    data.pop("progress", None)  # terminal -- nothing left to resume
+    if status == "shipped":
+        data.pop("progress", None)
     _write(path, data)
 
 
