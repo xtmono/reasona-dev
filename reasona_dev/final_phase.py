@@ -955,7 +955,21 @@ def run_final_stage(
         if status != "passed":
             return _blocked(reason, pr_url=url, final_audit=audit, role_results=dispatches, ship_decision=decision)
 
-        msg, msg_reason = build_squash_message(unit_type=unit_type, title=pr_title)
+        # `gh_pr_result.title` is the SAME title the PR itself carries --
+        # LLM-generated (`generate_pr_summary()`'s own `TITLE:` line) when
+        # available, else `build_pr_title()`'s deterministic fallback,
+        # already in `type: subject` form. `build_squash_message()`'s own
+        # `title` param is actually just the SUBJECT half (`squash.build()`
+        # re-prepends a type prefix itself) -- split it back apart here so
+        # the squash-merge commit that lands on the default branch carries
+        # the exact same type+subject the PR does, not the plan's own
+        # possibly-stale `unit_type`/`pr_title` pair.
+        squash_type, squash_subject = unit_type, pr_title
+        if gh_pr_result.title and ":" in gh_pr_result.title:
+            _t, _, _s = gh_pr_result.title.partition(":")
+            if _s.strip():
+                squash_type, squash_subject = _t.strip(), _s.strip()
+        msg, msg_reason = build_squash_message(unit_type=squash_type, title=squash_subject)
         if msg is None:
             return _blocked(msg_reason, pr_url=url, final_audit=audit,
                             role_results=dispatches, ship_decision=decision)

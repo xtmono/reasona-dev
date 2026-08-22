@@ -3019,6 +3019,45 @@ primitive).
    unconditional -- `tail.status == NEEDS_REVIEW` is always retried, never falls through to it) was
    removed along with it.
 
+## 3.25 PR title and the squash-merge commit title are LLM-generated too, matching the body
+
+§3.19 made the PR/issue BODY describe the unit's actual diff instead of a static plan-section
+dump. Asked directly after noticing an awkward commit message: title generation was still fully
+split -- the PR body was LLM-generated, but the PR title, the issue title, AND the final
+squash-merge commit title that actually lands on the default branch were all still
+`build_pr_title()`'s deterministic construction from the plan's own `## PR <N>: <title>` heading
+and `type:` line, unrelated to what the diff ended up being (the same class of staleness §3.19
+closed for the body).
+
+**One extra labeled section, not a second dispatch.** `generate_pr_summary()`'s existing prompt
+(one `"backend"` dispatch per unit, already reused for the issue+PR body) now also asks for a
+`TITLE:` line -- a Conventional Commits `type: subject` reflecting what the diff actually did,
+type constrained to this project's own known set (`_CC_TYPES`). `_parse_pr_summary()` treats it as
+OPTIONAL: `changes`/`why`/`test` still gate whether the summary is usable at all (unchanged from
+§3.19), so a missing or malformed `TITLE:` line degrades gracefully to the deterministic title
+rather than discarding an otherwise-good body summary.
+
+**The LLM title still goes through the SAME structural safety net every other title source in
+this module already does.** `gh_pr._title_from_summary()` splits `TITLE:`'s `type: subject` and
+re-sanitizes it through `build_pr_title()` itself (strip a stray `#N` prefix, a trailing period,
+fall back to `feat` for an unrecognized type) -- no separate sanitization logic to drift from the
+deterministic path's. `run_gh_pr()`'s existing `validate_pr_meta()`/`repair_pr()` P1-P3 checks
+still re-verify the FINAL title independently after the fact, same as always -- an LLM producing a
+malformed title is caught exactly like a human-authored plan heading producing one always was.
+The duplicate-PR search (`find_duplicate_pr()`) still runs on the deterministic title, BEFORE the
+summary dispatch -- an early-exit duplicate never pays for an LLM call that would have been
+thrown away.
+
+**The squash-merge title is not a third independent source -- it reuses the SAME title the PR
+itself carries.** `GhPrResult` gained a `title` field (the actual title used, LLM or fallback);
+`final_phase.py`'s `run_ship_and_merge_tail()` splits `gh_pr_result.title` back into type+subject
+(`build_squash_message()`'s own `title` parameter is actually just the subject half --
+`squash.build()` re-prepends the type itself) instead of the plan's own `unit_type`/`pr_title`
+pair it used before. This closes a gap that existed independent of whether the PR title was
+LLM-generated or not: the squash commit landing on the default branch could ALREADY diverge from
+the PR's own title in either case, since they were built from two separate deterministic sources
+that happened to usually agree -- reusing one value for both makes them provably the same PR ID.
+
 ## 4. Directory structure
 
 ```

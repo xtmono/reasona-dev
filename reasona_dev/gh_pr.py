@@ -78,6 +78,12 @@ class GhPrResult:
     issue_num: int | None = None
     branch: str | None = None
     duplicate: bool = False
+    # The title actually used for the PR -- LLM-generated (from `generate_pr_summary()`'s
+    # `title` key) when available and structurally valid, else `build_pr_title()`'s
+    # deterministic fallback. Exposed so `final_phase.py`'s squash-merge message uses
+    # the SAME title the PR itself carries, rather than the plan's own possibly-stale
+    # one -- see `docs/ARCHITECTURE.md` on why both are LLM-generated now.
+    title: str | None = None
 
 
 def _kebab(text: str) -> str:
@@ -106,44 +112,58 @@ def build_pr_title(unit_type: str, subject: str) -> str:
     return f"{cc_type}: {subject}"
 
 
-_SUMMARY_LABEL_RE = re.compile(r"(?im)^\s*(CHANGES|WHY|TEST)\s*:\s*")
+_SUMMARY_LABEL_RE = re.compile(r"(?im)^\s*(TITLE|CHANGES|WHY|TEST)\s*:\s*")
 
 
-def _pr_summary_prompt(*, unit: PRUnit, plan_name: str) -> str:
+def _pr_summary_prompt(*, unit: PRUnit, plan_name: str, cc_types: frozenset[str]) -> str:
     """Asks the dispatched role to describe what this unit's diff ACTUALLY
     did, not what the plan originally intended -- the two can diverge (a
     fix made mid-review, a scope correction), and the plan's own prose is
     only the starting intent, not necessarily the final shape of the
     change. See `generate_pr_summary()`'s docstring for why this exists."""
+    types = ", ".join(sorted(cc_types))
     return (
-        "You are writing the description for a pull request this pipeline "
-        "is about to open. Look at the ACTUAL change in the current "
-        "worktree -- `git log <base>..HEAD --oneline` and `git diff "
-        "<base>...HEAD` (against this repo's default base branch) -- to see "
-        "what this PR really did. If it diverged from the plan's original "
-        "intent below, describe what actually happened, not the original "
-        "plan.\n\n"
+        "You are writing the title and description for a pull request this "
+        "pipeline is about to open, AND the commit message it will squash "
+        "onto the default branch as (same title, one of the two carries a "
+        "short body too -- your TITLE line drives both). Look at the "
+        "ACTUAL change in the current worktree -- `git log <base>..HEAD "
+        "--oneline` and `git diff <base>...HEAD` (against this repo's "
+        "default base branch) -- to see what this PR really did. If it "
+        "diverged from the plan's original intent below, describe what "
+        "actually happened, not the original plan.\n\n"
         f"The plan's own `## PR {unit.index}:` section for this unit "
         "(starting intent, for reference only):\n\n"
         f"{unit.section.strip() or '(no plan section)'}\n\n"
-        "Write exactly three labeled sections, plain prose, concise (a "
-        "sentence or two to a short paragraph each) -- output ONLY this, "
-        "nothing before or after:\n\n"
+        "Write exactly four labeled sections, output ONLY this, nothing "
+        "before or after:\n\n"
+        f"TITLE: <a single Conventional Commits line, `type: subject` -- "
+        f"type must be exactly one of: {types}; subject imperative mood, "
+        "under 60 chars, no trailing period, no leading `#N`, no `Closes "
+        "#N` -- describing what this PR ACTUALLY did, based on the diff/"
+        "commits you just read, not the plan's original title if it "
+        "diverged>\n"
         "CHANGES: <what this PR actually changed, in your own words, based "
-        "on the diff/commits you just read>\n"
-        "WHY: <why this change is needed>\n"
+        "on the diff/commits you just read -- plain prose, concise>\n"
+        "WHY: <why this change is needed -- plain prose, concise>\n"
         "TEST: <how this change was verified -- cite the actual test/review "
         "evidence you find (test files, CI config, review artifacts), not a "
-        "generic claim>"
+        "generic claim -- plain prose, concise>"
     )
 
 
 def _parse_pr_summary(text: str) -> dict[str, str] | None:
-    """Split on `CHANGES:`/`WHY:`/`TEST:` labels, in any order, tolerating
-    extra prose around them -- real LLM output is not guaranteed to match a
-    single rigid template. `None` (not a partial dict) when any of the
-    three is missing or empty, so the caller has one unambiguous fallback
-    condition rather than three."""
+    """Split on `TITLE:`/`CHANGES:`/`WHY:`/`TEST:` labels, in any order,
+    tolerating extra prose around them -- real LLM output is not guaranteed
+    to match a single rigid template. `None` (not a partial dict) when any
+    of `changes`/`why`/`test` is missing or empty, so the caller has one
+    unambiguous fallback condition rather than three. `title` is optional --
+    its own structural validity (Conventional Commits form) is re-checked
+    independently by `validate_pr_meta()`/`repair_pr()` downstream, the same
+    build/guard split every other title source in this module already goes
+    through, so a malformed or missing `TITLE:` here just falls back to the
+    deterministic `build_pr_title()` rather than invalidating the whole
+    summary."""
     matches = list(_SUMMARY_LABEL_RE.finditer(text))
     if not matches:
         return None
@@ -156,7 +176,10 @@ def _parse_pr_summary(text: str) -> dict[str, str] | None:
     changes, why, test = sections.get("CHANGES"), sections.get("WHY"), sections.get("TEST")
     if not (changes and why and test):
         return None
-    return {"changes": changes, "why": why, "test": test}
+    result = {"changes": changes, "why": why, "test": test}
+    if sections.get("TITLE"):
+        result["title"] = sections["TITLE"]
+    return result
 
 
 def generate_pr_summary(
@@ -191,7 +214,10 @@ def generate_pr_summary(
     Returns `None` -- never raises -- on any dispatch failure or unparsable
     output; `run_gh_pr()` falls back to `build_pr_body()`'s deterministic
     plan-section dump in that case, so a flaky/exhausted model never blocks
-    PR creation outright.
+    PR creation outright. The optional `title` key in the returned dict (see
+    `_parse_pr_summary()`) similarly falls back to `build_pr_title()` when
+    absent or structurally invalid -- `validate_pr_meta()`/`repair_pr()`
+    catch that the same way they already catch any other title violation.
     """
     if run_role_fn is None:
         from reasona_dev.pr_cycle import run_role as run_role_fn
@@ -199,7 +225,7 @@ def generate_pr_summary(
         result = run_role_fn(
             workdir=workdir, role="backend", label="pr_body",
             title=f"pr-body summary: {unit.title}",
-            prompt=_pr_summary_prompt(unit=unit, plan_name=plan_name),
+            prompt=_pr_summary_prompt(unit=unit, plan_name=plan_name, cc_types=_CC_TYPES),
             model=model, rundir=Path(rundir), cycle=1, port=port,
         )
     except Exception:
@@ -235,6 +261,26 @@ def build_pr_body(*, issue_num: int, plan_name: str, unit: PRUnit, summary: dict
     return "\n\n".join(
         [f"Closes #{issue_num}", "## Changes", changes, "## Why we need this", why, "## Test", test]
     )
+
+
+def _title_from_summary(summary: dict[str, str] | None) -> str | None:
+    """Extract and sanitize an LLM-proposed `TITLE:` line, splitting `type:
+    subject` the same way a caller building one by hand would, then reusing
+    `build_pr_title()`'s own sanitization (strip a stray `#N` prefix, a
+    trailing period, an unrecognized type) rather than duplicating it.
+    Returns `None` -- the caller's cue to keep the deterministic
+    `build_pr_title()` title -- when `summary` has no title, or the line
+    has no `:` to split into type/subject at all."""
+    if not summary or not summary.get("title"):
+        return None
+    raw = summary["title"].strip()
+    if ":" not in raw:
+        return None
+    cc_type, _, subject = raw.partition(":")
+    subject = subject.strip()
+    if not subject:
+        return None
+    return build_pr_title(cc_type.strip().lower(), subject)
 
 
 def validate_pr_meta(*, title: str, body: str, issue_num: int) -> list[str]:
@@ -433,12 +479,15 @@ def run_gh_pr(
             workdir=workdir, unit=unit, plan_name=plan_name or "", model=resolved["dev"],
             rundir=rundir, port=port, run_role_fn=run_role_fn,
         )
+        llm_title = _title_from_summary(summary)
+        if llm_title:
+            title = llm_title
 
     known_issue = ledger.known_issue_number(workdir, plan_name, stage_name) if plan_name else None
     if known_issue is not None:
         issue_num = known_issue
     else:
-        issue_title = f"{unit_type}: {subject}"
+        issue_title = title  # same title the PR itself will carry (LLM-generated when available)
         if summary:
             issue_body = f"{summary['changes']}\n\n{summary['why']}"
         else:
@@ -491,4 +540,5 @@ def run_gh_pr(
 
     return GhPrResult(
         passed=True, reason=pr_reason, pr_url=url, pr_num=pr_num, issue_num=issue_num, branch=branch,
+        title=title,
     )

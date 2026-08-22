@@ -180,7 +180,8 @@ def test_audit_findings_spend_the_final_stage_budget(tmp_path, rust_dev_prompts)
 
 def _stub(monkeypatch, *, gh=None, sync=(True, "ok"), up=(True, "ok"),
           pr=("https://gh/pr/1", "PR created"), merged=(True, "squash-merged"),
-          gh_pr_passed=True, gh_pr_reason="ok", gh_review_passed=True, gh_review_reason="ok"):
+          gh_pr_passed=True, gh_pr_reason="ok", gh_review_passed=True, gh_review_reason="ok",
+          gh_pr_title=None):
     monkeypatch.setattr(final_phase, "gh_available", lambda w: gh)
     monkeypatch.setattr(final_phase, "sync_main", lambda w, *, base: sync)
     monkeypatch.setattr(final_phase, "is_up_to_date", lambda w, *, base: up)
@@ -190,6 +191,7 @@ def _stub(monkeypatch, *, gh=None, sync=(True, "ok"), up=(True, "ok"),
         lambda **kw: gh_pr.GhPrResult(
             passed=gh_pr_passed, reason=gh_pr_reason,
             pr_url=pr[0] if gh_pr_passed else None, pr_num=1, issue_num=1, branch="issue/1-x",
+            title=gh_pr_title,
         ),
     )
     monkeypatch.setattr(
@@ -358,6 +360,17 @@ def test_merge_true_squash_merges(tmp_path, monkeypatch):
     _stub(monkeypatch)
     r = _tail(tmp_path, merge=True)
     assert r.status == MERGED and r.squash_message.title == "feat: add subtract()"
+
+
+def test_squash_message_uses_the_llm_generated_pr_title_when_available(tmp_path, monkeypatch):
+    """`gh_pr_result.title` (LLM-generated via `generate_pr_summary()`, see
+    docs/ARCHITECTURE.md) drives the squash-merge commit title too -- the
+    plan's own `unit_type`/`pr_title` (`_stub`'s "feat"/"add subtract()")
+    are only the fallback when no PR-title summary was produced."""
+    _stub(monkeypatch, gh_pr_title="fix: correct the actual bug")
+    r = _tail(tmp_path, merge=True)
+    assert r.status == MERGED
+    assert r.squash_message.title == "fix: correct the actual bug"
 
 
 def test_up_to_date_is_rechecked_immediately_before_merging(tmp_path, monkeypatch):

@@ -40,6 +40,23 @@ def test_build_pr_title_falls_back_to_feat_for_an_unrecognized_type():
     assert gh_pr.build_pr_title("bogus", "x").startswith("feat: ")
 
 
+# --- _title_from_summary (LLM-proposed title, sanitized via build_pr_title) ---
+
+def test_title_from_summary_splits_and_sanitizes_the_llm_title():
+    summary = {"changes": "x", "why": "y", "test": "z", "title": "fix: correct the thing."}
+    assert gh_pr._title_from_summary(summary) == "fix: correct the thing"  # trailing period stripped
+
+
+def test_title_from_summary_none_when_summary_has_no_title():
+    assert gh_pr._title_from_summary({"changes": "x", "why": "y", "test": "z"}) is None
+    assert gh_pr._title_from_summary(None) is None
+
+
+def test_title_from_summary_none_when_the_title_has_no_colon():
+    summary = {"changes": "x", "why": "y", "test": "z", "title": "just a subject with no type"}
+    assert gh_pr._title_from_summary(summary) is None
+
+
 # --- build_pr_body -------------------------------------------------------------
 
 def test_build_pr_body_has_the_required_sections_and_closing_ref():
@@ -84,6 +101,22 @@ def test_parse_pr_summary_none_when_a_section_is_missing():
 
 def test_parse_pr_summary_none_for_unrelated_text():
     assert gh_pr._parse_pr_summary("just some random output") is None
+
+
+def test_parse_pr_summary_extracts_the_optional_title():
+    text = "TITLE: fix: correct the thing\nCHANGES: did it\nWHY: because\nTEST: ran it"
+    summary = gh_pr._parse_pr_summary(text)
+    assert summary["title"] == "fix: correct the thing"
+
+
+def test_parse_pr_summary_valid_without_a_title():
+    """`title` is optional -- a missing/malformed TITLE: line must not
+    invalidate an otherwise-complete summary (falls back to
+    build_pr_title() instead)."""
+    text = "CHANGES: did it\nWHY: because\nTEST: ran it"
+    summary = gh_pr._parse_pr_summary(text)
+    assert summary is not None
+    assert "title" not in summary
 
 
 def test_generate_pr_summary_returns_none_on_dispatch_error(tmp_path):
@@ -351,6 +384,56 @@ def test_run_gh_pr_creates_issue_renames_branch_and_creates_pr(tmp_path, monkeyp
     assert seen["head"] == "issue/42-add-subtract"
     assert seen["base"] == "main"
     assert seen["title"] == "feat: add subtract()"
+
+
+def test_run_gh_pr_uses_the_llm_title_for_issue_pr_and_the_result(tmp_path, monkeypatch):
+    """`generate_pr_summary()`'s own `TITLE:` line, when it parses cleanly,
+    drives the issue title, the PR title, AND `GhPrResult.title` (which
+    `final_phase.py` then reuses for the squash-merge commit) -- not the
+    plan's deterministic `build_pr_title()` output."""
+    from reasona_dev.finding_adapter import ReviewResult, RoleStatus
+    from reasona_dev.model_config import ResolvedModel
+    from reasona_dev.pr_cycle import RoleRunResult
+
+    _stub_shell(monkeypatch)
+    seen = {}
+
+    def _fake_create_pr(workdir, *, title, body, head, base, known_pr_url):
+        seen["pr_title"] = title
+        return "https://github.com/o/r/pull/7", "PR created"
+
+    monkeypatch.setattr(final_phase, "create_pr", _fake_create_pr)
+
+    issue_titles = []
+    real_shell_run = gh_pr._shell.run
+
+    def _shell_with_issue_capture(cmd, workdir, **kw):
+        if cmd[:3] == ["gh", "issue", "create"]:
+            issue_titles.append(cmd[cmd.index("--title") + 1])
+        return real_shell_run(cmd, workdir, **kw)
+
+    monkeypatch.setattr(gh_pr._shell, "run", _shell_with_issue_capture)
+
+    def fake_run_role_fn(*, workdir, role, title, prompt, model, rundir, cycle, port, label=None, files=None):
+        out = rundir / "pr_body-c1.raw.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            "TITLE: fix: correct the actual bug\nCHANGES: x\nWHY: y\nTEST: z", encoding="utf-8",
+        )
+        return RoleRunResult(
+            role=label or role, cycle=cycle,
+            review_result=ReviewResult(role_status=RoleStatus.COMPLETE), raw_output_path=out,
+        )
+
+    resolved = {"dev": ResolvedModel("dev", "sonnet", "claude", "high", "default")}
+    result = gh_pr.run_gh_pr(
+        workdir=tmp_path, stage_name="pr-1", unit=UNIT, plan_name=None,
+        resolved=resolved, rundir=tmp_path / "run", run_role_fn=fake_run_role_fn,
+    )
+    assert result.passed
+    assert result.title == "fix: correct the actual bug"
+    assert seen["pr_title"] == "fix: correct the actual bug"
+    assert issue_titles == ["fix: correct the actual bug"]
 
 
 def test_run_gh_pr_refuses_to_create_a_pr_when_full_ci_fails(tmp_path, monkeypatch):
