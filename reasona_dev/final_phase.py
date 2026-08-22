@@ -969,7 +969,16 @@ def run_final_stage(
             _t, _, _s = gh_pr_result.title.partition(":")
             if _s.strip():
                 squash_type, squash_subject = _t.strip(), _s.strip()
-        msg, msg_reason = build_squash_message(unit_type=squash_type, title=squash_subject)
+        # `gh_pr_result.body_lines` is the same LLM-written `CHANGES` section
+        # the PR body carries. Without it `build_squash_message()`'s
+        # `body_lines` stays empty, `squash.build()` returns an empty body,
+        # and `squash_merge()` omits `--body` entirely -- `gh pr merge`
+        # then falls back to its OWN default squash body (every squashed
+        # commit's subject line concatenated verbatim, dev-fix/bugbot noise
+        # included), which is what actually landed on main before this.
+        msg, msg_reason = build_squash_message(
+            unit_type=squash_type, title=squash_subject, body_lines=gh_pr_result.body_lines,
+        )
         if msg is None:
             return _blocked(msg_reason, pr_url=url, final_audit=audit,
                             role_results=dispatches, ship_decision=decision)

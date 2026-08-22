@@ -434,6 +434,21 @@ def test_run_gh_pr_uses_the_llm_title_for_issue_pr_and_the_result(tmp_path, monk
     assert result.title == "fix: correct the actual bug"
     assert seen["pr_title"] == "fix: correct the actual bug"
     assert issue_titles == ["fix: correct the actual bug"]
+    assert result.body_lines == ["x"]
+
+
+def test_run_gh_pr_leaves_body_lines_none_without_a_summary(tmp_path, monkeypatch):
+    """No `resolved`/`rundir` given -- `run_gh_pr()` never dispatches
+    `generate_pr_summary()`, so `GhPrResult.body_lines` stays `None` rather
+    than an empty list (the caller's cue there is nothing LLM-written to
+    fold into the squash-merge body)."""
+    _stub_shell(monkeypatch)
+    monkeypatch.setattr(
+        final_phase, "create_pr", lambda *a, **kw: ("https://github.com/o/r/pull/9", "PR created"),
+    )
+    result = gh_pr.run_gh_pr(workdir=tmp_path, stage_name="pr-1", unit=UNIT, plan_name=None)
+    assert result.passed
+    assert result.body_lines is None
 
 
 def test_run_gh_pr_refuses_to_create_a_pr_when_full_ci_fails(tmp_path, monkeypatch):

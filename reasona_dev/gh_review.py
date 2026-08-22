@@ -37,8 +37,13 @@ prose replies to compliance/bugbot comments after reading their content),
 this dispatches `reasona_dev.pr_cycle.run_role`'s `backend` role to make
 the actual fix, then pushes deterministically itself -- the same split
 `reasona_dev.final_phase`'s sync-conflict/ship-gate fix loops already use.
-Reply bullets are not fabricated from a summary this deterministic layer
-does not actually have; the posted reply names the fixing commit only.
+The reply's bullets are not a second, separate dispatch: the SAME fixing
+agent is asked (`_FIXED_BULLETS_INSTRUCTION`) to end its output with one
+`FIXED:` line per distinct change, which `_parse_fixed_bullets()` lifts
+straight out of the raw output already written for `pr_cycle`'s own
+file-handoff convention. No `FIXED:` line (a flaky/truncated dispatch) --
+`_post_reply()` falls back to its bare "fixed in <sha>" line, same as
+before this existed.
 """
 
 from __future__ import annotations
@@ -124,12 +129,36 @@ def _bugbot_fix_prompt(body: str) -> str:
     )
 
 
+_FIXED_LINE_RE = re.compile(r"(?im)^\s*FIXED:\s*(.+)$")
+
+# Appended once to the combined fix prompt (never per-signal -- one dispatch,
+# one push, matches the module's own "one push per cycle" rule above) so the
+# same fixing agent that already writes the commit message freely also
+# writes what becomes the bot-reply bullets, instead of `_post_reply()`
+# posting a bare "fixed in <sha>" line with no description of the fix.
+_FIXED_BULLETS_INSTRUCTION = (
+    "\n\n---\n\nAfter making the fix(es) above, end your output with one "
+    "`FIXED: <what you changed and why, one line>` line per distinct fix -- "
+    "these become the reply comment posted back to the bot(s) above."
+)
+
+
+def _parse_fixed_bullets(text: str) -> list[str]:
+    """Extract `FIXED:` lines the fixing dispatch wrote per
+    `_FIXED_BULLETS_INSTRUCTION`. Returns `[]` -- never raises -- when the
+    output has none, `_post_reply()`'s cue to fall back to its bare
+    "fixed in <sha>" line rather than posting an empty bullet list."""
+    return [m.group(1).strip() for m in _FIXED_LINE_RE.finditer(text) if m.group(1).strip()]
+
+
 def _post_reply(
     workdir: Path, *, owner_repo: tuple[str, str], pr_num: int, label: str,
-    anchor: str, short_sha: str,
+    anchor: str, short_sha: str, bullets: list[str] | None = None,
 ) -> None:
     owner, repo = owner_repo
     body = f"Re: [{label}](https://github.com/{owner}/{repo}/pull/{pr_num}#{anchor}) -- fixed in {short_sha}"
+    if bullets:
+        body += ":\n\n" + "\n".join(f"- {b}" for b in bullets)
     # Best-effort -- a failed reply does not undo the fix that was already
     # pushed, and is not worth blocking the unit over.
     _shell.run(
@@ -222,10 +251,15 @@ def run_gh_review(
 
         result = run_role_fn(
             workdir=workdir, role="backend", title=f"{pr_title} -- gh-review fix c{cycle}",
-            prompt="\n\n---\n\n".join(prompts), model=resolved["dev"], rundir=rundir, cycle=cycle,
-            port=port,
+            prompt="\n\n---\n\n".join(prompts) + _FIXED_BULLETS_INSTRUCTION,
+            model=resolved["dev"], rundir=rundir, cycle=cycle, port=port,
         )
         dispatches.append(result)
+        fixed_bullets = (
+            _parse_fixed_bullets(result.raw_output_path.read_text(encoding="utf-8"))
+            if not result.error_detail and result.raw_output_path.is_file()
+            else []
+        )
 
         code, _, err = _shell.run(["git", "push", "origin", "HEAD"], workdir, timeout=180)
         if code != 0:
@@ -250,10 +284,12 @@ def run_gh_review(
             _post_reply(
                 workdir, owner_repo=owner_repo, pr_num=pr_num, label="Compliance Review",
                 anchor=f"issuecomment-{snap['compliance']['comment_id']}", short_sha=short_sha,
+                bullets=fixed_bullets,
             )
         if snap["bugbot"]["state"] == "found" and snap["bugbot"]["review_id"] is not None:
             _post_reply(
                 workdir, owner_repo=owner_repo, pr_num=pr_num, label="Claude BugBot Analysis",
                 anchor=f"pullrequestreview-{snap['bugbot']['review_id']}", short_sha=short_sha,
+                bullets=fixed_bullets,
             )
         # Loop -- the push above produced a new head SHA, re-poll from scratch.

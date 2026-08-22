@@ -84,6 +84,13 @@ class GhPrResult:
     # the SAME title the PR itself carries, rather than the plan's own possibly-stale
     # one -- see `docs/ARCHITECTURE.md` on why both are LLM-generated now.
     title: str | None = None
+    # The LLM-written `CHANGES` section from `generate_pr_summary()`, split into
+    # lines -- `final_phase.py`'s squash-merge message reuses this as its
+    # `body_lines` so the squash commit describes what actually changed instead
+    # of `gh pr merge`'s own default (every squashed commit's subject line
+    # concatenated verbatim, dev-fix noise included). `None` when no summary was
+    # generated -- the caller keeps the squash body empty, same as before.
+    body_lines: list[str] | None = None
 
 
 def _kebab(text: str) -> str:
@@ -540,5 +547,5 @@ def run_gh_pr(
 
     return GhPrResult(
         passed=True, reason=pr_reason, pr_url=url, pr_num=pr_num, issue_num=issue_num, branch=branch,
-        title=title,
+        title=title, body_lines=summary["changes"].splitlines() if summary else None,
     )

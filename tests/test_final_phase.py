@@ -181,7 +181,7 @@ def test_audit_findings_spend_the_final_stage_budget(tmp_path, rust_dev_prompts)
 def _stub(monkeypatch, *, gh=None, sync=(True, "ok"), up=(True, "ok"),
           pr=("https://gh/pr/1", "PR created"), merged=(True, "squash-merged"),
           gh_pr_passed=True, gh_pr_reason="ok", gh_review_passed=True, gh_review_reason="ok",
-          gh_pr_title=None):
+          gh_pr_title=None, gh_pr_body_lines=None):
     monkeypatch.setattr(final_phase, "gh_available", lambda w: gh)
     monkeypatch.setattr(final_phase, "sync_main", lambda w, *, base: sync)
     monkeypatch.setattr(final_phase, "is_up_to_date", lambda w, *, base: up)
@@ -191,7 +191,7 @@ def _stub(monkeypatch, *, gh=None, sync=(True, "ok"), up=(True, "ok"),
         lambda **kw: gh_pr.GhPrResult(
             passed=gh_pr_passed, reason=gh_pr_reason,
             pr_url=pr[0] if gh_pr_passed else None, pr_num=1, issue_num=1, branch="issue/1-x",
-            title=gh_pr_title,
+            title=gh_pr_title, body_lines=gh_pr_body_lines,
         ),
     )
     monkeypatch.setattr(
@@ -371,6 +371,28 @@ def test_squash_message_uses_the_llm_generated_pr_title_when_available(tmp_path,
     r = _tail(tmp_path, merge=True)
     assert r.status == MERGED
     assert r.squash_message.title == "fix: correct the actual bug"
+
+
+def test_squash_message_uses_the_llm_generated_pr_body_when_available(tmp_path, monkeypatch):
+    """`gh_pr_result.body_lines` (the PR's own LLM-written `CHANGES` section)
+    drives the squash-merge commit body. Without it the body stays empty and
+    `squash_merge()` omits `--body`, letting `gh pr merge` fall back to its
+    own default (every squashed commit's subject concatenated verbatim)."""
+    _stub(monkeypatch, gh_pr_body_lines=["Adds the subtract() helper.", "Covers the zero case."])
+    r = _tail(tmp_path, merge=True)
+    assert r.status == MERGED
+    assert "Adds the subtract() helper." in r.squash_message.body
+    assert "Covers the zero case." in r.squash_message.body
+
+
+def test_squash_message_body_stays_empty_without_a_pr_summary(tmp_path, monkeypatch):
+    """No LLM summary was produced (`gh_pr_body_lines` unset, the same as
+    `_stub`'s default) -- the squash body stays empty rather than inventing
+    content, same as before body_lines existed."""
+    _stub(monkeypatch)
+    r = _tail(tmp_path, merge=True)
+    assert r.status == MERGED
+    assert r.squash_message.body == ""
 
 
 def test_up_to_date_is_rechecked_immediately_before_merging(tmp_path, monkeypatch):

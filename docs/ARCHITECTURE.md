@@ -3058,6 +3058,44 @@ LLM-generated or not: the squash commit landing on the default branch could ALRE
 the PR's own title in either case, since they were built from two separate deterministic sources
 that happened to usually agree -- reusing one value for both makes them provably the same PR ID.
 
+**Follow-up found while checking three already-shipped commits against this fix.** The title
+reuse above closed only half the gap: `build_squash_message()` was (and, in the version above,
+still was) always called with no `body_lines` at all. `squash.build()` then returns an empty
+body, `squash_merge()`'s `if msg.body:` guard omits `--body` from the `gh pr merge --squash`
+call entirely, and `gh pr merge` falls back to ITS OWN default squash body -- every squashed
+commit's subject line concatenated verbatim, dev-fix/bugbot-review noise included. This is what
+three real TAS commits (checked directly against this section) actually looked like on the
+default branch, independent of whether their titles were LLM-generated. `GhPrResult` gained a
+`body_lines` field (`summary["changes"].splitlines()` when a summary was generated, `None`
+otherwise -- same "no summary, no invented content" fallback the title path already uses), and
+`run_ship_and_merge_tail()` now passes `gh_pr_result.body_lines` into `build_squash_message()`.
+The squash commit body is now the same LLM-written `CHANGES` section the PR body itself carries,
+run through `squash.build()`'s own trailer-stripping/line-wrap exactly like any other body_lines
+caller.
+
+## 3.26 The compliance/bugbot reply comment's bullets are LLM-written too
+
+§3.25 closed the title/body/squash-body gaps for issues, PRs, and the squash-merge commit. One
+LLM-authorship gap remained: `gh_review.py`'s `_post_reply()` (the comment `/gh-review` posts back
+to a compliance-FAIL or bugbot-FOUND comment thread after pushing a fix, `gh-review/SKILL.md`
+§3.3.2/§3.3.3's own template) posted a bare `"Re: [<label>](<url>) -- fixed in <sha>"` line with no
+description of what the fix actually did -- the module's own docstring used to say so explicitly
+("Reply bullets are not fabricated from a summary this deterministic layer does not actually
+have").
+
+**No second dispatch -- the same fixing agent writes its own reply bullets.** The combined fix
+prompt (`_ci_fix_prompt`/`_compliance_fix_prompt`/`_bugbot_fix_prompt`, joined once per cycle, see
+the module's own "one push per cycle" rule) now carries `_FIXED_BULLETS_INSTRUCTION`: end the
+output with one `FIXED: <what changed and why>` line per distinct fix. `_parse_fixed_bullets()`
+lifts these straight out of the SAME raw-output file `pr_cycle`'s file-handoff convention already
+writes (`_build_role_description()`) -- no new role, no new dispatch, matching §3.19/§3.25's own
+"reuse the existing dispatch" pattern. `_post_reply()` folds them into the comment body as a
+bulleted list; no `FIXED:` line survives parsing (a flaky/truncated dispatch), it falls back to the
+original bare "fixed in `<sha>`" line, same as before this existed. Both the compliance and bugbot
+replies in the same cycle share the same bullet list -- this pipeline dispatches one fix covering
+every actionable signal in a cycle, not one per bot, so there is only one set of bullets to draw
+from.
+
 ## 4. Directory structure
 
 ```

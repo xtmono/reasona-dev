@@ -54,6 +54,15 @@ def _run(tmp_path, monkeypatch, snapshots, *, push_ok=True, budget=None, **kw):
     )
 
 
+def test_parse_fixed_bullets_extracts_every_fixed_line():
+    text = "report text\n\nFIXED: a\nnot a bullet\nFIXED:  b  \n"
+    assert gh_review._parse_fixed_bullets(text) == ["a", "b"]
+
+
+def test_parse_fixed_bullets_empty_when_none_present():
+    assert gh_review._parse_fixed_bullets("just a report, no FIXED lines") == []
+
+
 def test_owner_repo_from_pr_url_parses_the_standard_shape():
     assert gh_review.owner_repo_from_pr_url("https://github.com/o/r/pull/7") == ("o", "r")
 
@@ -121,6 +130,48 @@ def test_run_gh_review_dispatches_one_fix_covering_both_actionable_signals(tmp_p
     assert result.passed
     assert len(result.fix_commits) == 1
     assert len(result.dispatches) == 1
+
+
+def test_run_gh_review_posts_the_llm_written_fixed_bullets_in_the_bot_reply(tmp_path, monkeypatch):
+    """The fixing dispatch's own `FIXED:` lines (`_FIXED_BULLETS_INSTRUCTION`)
+    become the reply comment's bullets -- not a bare "fixed in <sha>" line
+    with no description of what was actually fixed."""
+    out = tmp_path / "raw.txt"
+    out.write_text(
+        "some markdown report\n\nFIXED: renamed the leaking helper\nFIXED: added a regression test\n",
+        encoding="utf-8",
+    )
+
+    def _fn_with_bullets(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
+        assert "FIXED:" in prompt
+        return RoleRunResult(role=role, cycle=cycle,
+                             review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
+                             raw_output_path=out)
+
+    posted = []
+
+    def _fake_shell_run(cmd, workdir, **kw2):
+        if cmd[:2] == ["git", "push"]:
+            return 0, "", ""
+        if cmd[:2] == ["git", "rev-parse"]:
+            return 0, "abc1234", ""
+        if cmd[:3] == ["gh", "api", "-X"]:
+            posted.append(cmd[-1])
+        return 0, "", ""
+
+    it = iter([_snap(compliance="fail", comp_body="fix this"), _snap()])
+    monkeypatch.setattr(watch, "take_snapshot", lambda owner, name, pr, work_dir: next(it))
+    monkeypatch.setattr(gh_review._shell, "run", _fake_shell_run)
+
+    result = gh_review.run_gh_review(
+        workdir=tmp_path, pr_url="https://github.com/o/r/pull/7", pr_num=7, pr_title="t",
+        resolved=_RESOLVED, rundir=tmp_path / "r", budget=FixBudget(),
+        poll_interval_seconds=0, run_role_fn=_fn_with_bullets,
+    )
+    assert result.passed
+    assert len(posted) == 1
+    assert "renamed the leaking helper" in posted[0]
+    assert "added a regression test" in posted[0]
 
 
 def test_run_gh_review_budget_exhausted_reports_blocked(tmp_path, monkeypatch):
