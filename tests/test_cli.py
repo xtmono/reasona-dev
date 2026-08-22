@@ -1,5 +1,3 @@
-import json
-
 import pytest
 import yaml
 
@@ -33,11 +31,6 @@ def test_compile_plan_dev_flag_reaches_generated_model(tmp_path):
 
     compiled = yaml.safe_load(out.read_text())
     assert compiled["stages"][0]["steps"][0]["model"] == "opus"
-
-    audit = json.loads((workdir / ".reasona" / "model_config.json").read_text())
-    assert audit["dev"]["source"] == "flag"
-    assert audit["dev"]["model"] == "opus"
-    assert audit["dev"]["adapter"] == "claude"
     assert compiled["cli"] == "claude"
 
 

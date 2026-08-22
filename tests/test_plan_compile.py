@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from reasona_dev import bernstein_config
 from reasona_dev.plan_compile import compile_to_bernstein_plan, parse_plan_units
 
@@ -29,7 +27,7 @@ def test_parses_two_units_with_dependency():
 def test_compiles_to_valid_stage_shape():
     plan = compile_to_bernstein_plan(
         PLAN, plan_name="sample", description="test plan",
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
     assert plan["name"] == "sample"
     assert len(plan["stages"]) == 2
@@ -55,7 +53,7 @@ def test_only_index_compiles_a_single_stage_plan():
     plan.yaml that dispatch needs."""
     plan = compile_to_bernstein_plan(
         PLAN, plan_name="sample", description="test plan", only_index="2",
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
     assert len(plan["stages"]) == 1
     assert plan["stages"][0]["name"] == "pr-2"
@@ -67,7 +65,7 @@ def test_only_index_drops_depends_on_even_when_the_unit_declares_one():
     enforced one level up, by `orchestrate.py` running units sequentially."""
     plan = compile_to_bernstein_plan(
         PLAN, plan_name="sample", description="test plan", only_index="2",
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
     assert "depends_on" not in plan["stages"][0]
 
@@ -79,7 +77,7 @@ def test_only_index_matching_nothing_raises():
     with pytest.raises(PlanError, match="only_index"):
         compile_to_bernstein_plan(
             PLAN, plan_name="sample", description="test plan", only_index="99",
-            write_audit_trail=False, write_bernstein_yaml=False,
+            write_bernstein_yaml=False,
         )
 
 
@@ -91,7 +89,6 @@ def test_dev_model_defaults_to_resolved_sonnet():
         plan_name="sample",
         description="test plan",
         dev_model=ResolvedModel("dev", "sonnet", "claude", "high", "default"),
-        write_audit_trail=False,
         write_bernstein_yaml=False,
     )
     assert plan["stages"][0]["steps"][0]["model"] == "sonnet"
@@ -107,7 +104,6 @@ def test_explicit_dev_model_overrides_default():
         plan_name="sample",
         description="test plan",
         dev_model=ResolvedModel("dev", "opus", "claude", "high", "flag"),
-        write_audit_trail=False,
         write_bernstein_yaml=False,
     )
     assert plan["stages"][0]["steps"][0]["model"] == "opus"
@@ -121,43 +117,6 @@ def test_no_pr_markers_falls_back_to_single_unit():
     assert units[0].index == "1"
 
 
-def test_audit_trail_anchors_to_workdir_not_caller_cwd(tmp_path):
-    # reasona-dev has no "home repo" once deployed (installed like
-    # `bernstein` itself) -- the only stable anchor is the TARGET repo
-    # (`workdir`), never wherever the compile step happens to be invoked
-    # from. This must hold regardless of the actual process CWD.
-    target_repo = tmp_path / "some-target-repo"
-    target_repo.mkdir()
-
-    compile_to_bernstein_plan(
-        PLAN, plan_name="sample", description="test plan", workdir=target_repo,
-        write_bernstein_yaml=False,
-    )
-
-    expected = target_repo / ".reasona" / "model_config.json"
-    assert expected.exists()
-    # Not "cwd/.reasona doesn't exist at all" -- this repo now commits its
-    # own .reasona/reasona.yaml (see README). The actual invariant is that
-    # THIS call's audit trail never lands there.
-    assert not (Path.cwd() / ".reasona" / "model_config.json").exists()
-
-
-def test_audit_trail_disabled_writes_nothing(tmp_path):
-    target_repo = tmp_path / "another-repo"
-    target_repo.mkdir()
-
-    compile_to_bernstein_plan(
-        PLAN,
-        plan_name="sample",
-        description="test plan",
-        workdir=target_repo,
-        write_audit_trail=False,
-        write_bernstein_yaml=False,
-    )
-
-    assert not (target_repo / ".reasona").exists()
-
-
 def test_bernstein_yaml_bootstrapped_from_global_template(tmp_path, monkeypatch):
     global_yaml = tmp_path / "global-bernstein.yaml"
     global_yaml.write_text("goal: from-global-template\n")
@@ -168,7 +127,6 @@ def test_bernstein_yaml_bootstrapped_from_global_template(tmp_path, monkeypatch)
 
     compile_to_bernstein_plan(
         PLAN, plan_name="sample", description="test plan", workdir=target_repo,
-        write_audit_trail=False,
     )
 
     assert (target_repo / ".bernstein" / "bernstein.yaml").read_text() == "goal: from-global-template\n"
@@ -186,7 +144,7 @@ def test_bernstein_yaml_disabled_writes_nothing(tmp_path, monkeypatch):
 
     compile_to_bernstein_plan(
         PLAN, plan_name="sample", description="test plan", workdir=target_repo,
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
 
     assert not (target_repo / "bernstein.yaml").exists()
@@ -208,7 +166,6 @@ def test_policy_flags_reach_role_model_policy_sync(tmp_path, monkeypatch):
 
     compile_to_bernstein_plan(
         PLAN, plan_name="sample", description="test plan", workdir=target_repo,
-        write_audit_trail=False,
         policy_flags={"bugbot": "codex:o1:max"},
     )
 
@@ -223,7 +180,7 @@ def test_dev_step_has_no_completion_signal(tmp_path):
     PR unit."""
     plan = compile_to_bernstein_plan(
         PLAN, plan_name="s", description="d", workdir=tmp_path,
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
     for stage in plan["stages"]:
         assert "completion_signals" not in stage["steps"][0]

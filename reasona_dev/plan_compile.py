@@ -45,7 +45,7 @@ from pathlib import Path
 import yaml
 
 from reasona_dev.acceptance import AcceptanceCriterion, parse_criteria
-from reasona_dev.model_config import ResolvedModel, resolve, write_resolved_config
+from reasona_dev.model_config import ResolvedModel, resolve
 
 _PR_HEADING_RE = re.compile(r"^## PR (?P<index>[\w.]+):\s*(?P<title>.+)$", re.MULTILINE)
 _TYPE_RE = re.compile(r"^type:\s*(\w+)\s*$", re.MULTILINE)
@@ -260,8 +260,6 @@ def compile_to_bernstein_plan(
     dev_model: ResolvedModel | None = None,
     dev_flag: str | None = None,
     workdir: str | Path | None = None,
-    write_audit_trail: bool = True,
-    audit_trail_path: str | None = None,
     write_bernstein_yaml: bool = True,
     policy_flags: dict[str, str] | None = None,
     write_acceptance: bool = True,
@@ -285,10 +283,10 @@ def compile_to_bernstein_plan(
     DAG to run unattended, which is what forced every unit's cycle-0 onto
     the SAME shared checkout before any unit-level worktree could exist
     (see docs/ARCHITECTURE.md §3.11 on why that was wrong). Every other
-    side effect of this function (acceptance files, the audit trail, the
-    `bernstein.yaml` bootstrap/sync) still runs for the filtered unit only,
-    anchored at `workdir` as always -- which the caller points at that
-    unit's own worktree, not the top-level repo.
+    side effect of this function (acceptance files, the `bernstein.yaml`
+    bootstrap/sync) still runs for the filtered unit only, anchored at
+    `workdir` as always -- which the caller points at that unit's own
+    worktree, not the top-level repo.
 
     `dev_model` defaults to `reasona_dev.model_config.resolve("dev")` --
     the same flag > env var (`REASONA_DEV_DEV_MODEL`) > default chain
@@ -296,9 +294,12 @@ def compile_to_bernstein_plan(
     dev-ralf-faithful `model:` (never left for BanditRouter to guess at --
     docs/ARCHITECTURE.md §3.1/§3.5). Passing a `ResolvedModel` explicitly
     is for tests; production callers should resolve once via
-    `model_config.resolve_all()` and pass the `"dev"` entry through, so the
-    CONDUCTOR-COLLAPSE audit trail reflects the same values actually used
-    everywhere else in the pipeline.
+    `model_config.resolve_all()` and pass the `"dev"` entry through, so
+    every generated plan step reflects the same values actually used
+    everywhere else in the pipeline (the CONDUCTOR-COLLAPSE guard --
+    tracking each resolution's `source` -- lives on `ResolvedModel` itself,
+    not in a separate persisted file; see `docs/ARCHITECTURE.md` §3.17 on
+    why `.reasona/model_config.json` was removed).
 
     `workdir` is the TARGET repository this plan runs against -- never
     reasona-dev's own install location. reasona-dev has no "home repo" once
@@ -308,16 +309,6 @@ def compile_to_bernstein_plan(
     Defaults to `Path.cwd()`, matching Bernstein's own convention (`bernstein
     run` with no `--workdir` uses the invoking CWD as the project root --
     `orch._workdir`).
-
-    `audit_trail_path`, when not given explicitly, resolves to
-    `<workdir>/.reasona/model_config.json` -- anchored to the SAME `workdir`
-    that Bernstein's janitor uses to evaluate `completion_signals`
-    (confirmed: `core/tasks/task_lifecycle.py`'s `_verify_via_janitor` runs
-    every `test_passes` check with `cwd=orch._workdir`, a single fixed
-    project root, not a per-task worktree). Anchoring both to the same
-    `workdir` is what keeps every `.reasona/` artifact -- this audit trail,
-    `acceptance-<stage>.json`, `cycles.jsonl` -- landing in the same place
-    regardless of where the compile step happens to be invoked from.
 
     `write_bernstein_yaml` (default True) does two things, both in
     `bernstein_config.py`: (1) copies a local-or-global template into
@@ -340,9 +331,6 @@ def compile_to_bernstein_plan(
     """
     workdir = Path(workdir) if workdir is not None else Path.cwd()
 
-    if audit_trail_path is None:
-        audit_trail_path = str(workdir / ".reasona" / "model_config.json")
-
     if dev_model is not None:
         resolved_dev = dev_model
     else:
@@ -354,8 +342,6 @@ def compile_to_bernstein_plan(
             project_cfg=config_file.load_project(workdir),
             global_cfg=config_file.load_global(),
         )
-    if write_audit_trail:
-        write_resolved_config({"dev": resolved_dev}, audit_trail_path)
 
     if write_bernstein_yaml:
         from reasona_dev.bernstein_config import ensure_bernstein_yaml, sync_role_model_policy

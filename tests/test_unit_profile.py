@@ -148,7 +148,7 @@ def test_compile_refuses_a_unit_spanning_two_profiles(tmp_path):
     with pytest.raises(PlanError) as exc:
         compile_to_bernstein_plan(
             _MIXED_PLAN, plan_name="s", description="d", workdir=repo,
-            write_audit_trail=False, write_bernstein_yaml=False,
+            write_bernstein_yaml=False,
         )
     assert "spans 2 profiles" in str(exc.value)
 
@@ -159,7 +159,7 @@ def test_compile_accepts_the_same_unit_once_profile_is_stated(tmp_path):
     repo = _repo_with_map(tmp_path)
     plan = compile_to_bernstein_plan(
         _RESOLVED_PLAN, plan_name="s", description="d", workdir=repo,
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
     assert len(plan["stages"]) == 1
 
@@ -177,6 +177,6 @@ def test_validation_can_be_disabled_deliberately(tmp_path):
     repo = _repo_with_map(tmp_path)
     plan = compile_to_bernstein_plan(
         _MIXED_PLAN, plan_name="s", description="d", workdir=repo,
-        write_audit_trail=False, write_bernstein_yaml=False, validate_profiles=False,
+        write_bernstein_yaml=False, validate_profiles=False,
     )
     assert len(plan["stages"]) == 1

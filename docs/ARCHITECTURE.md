@@ -34,7 +34,7 @@ to work by accident, but running it from anywhere else put the file in the wrong
 
 | File | Anchor | Timing |
 |---|---|---|
-| `.reasona/model_config.json` | `workdir` (explicit argument, default `Path.cwd()`) | at `compile_to_bernstein_plan()` call time (compile time) |
+| `.reasona/model_config.json` (removed later -- §3.17, kept here as the historical example) | `workdir` (explicit argument, default `Path.cwd()`) | at `compile_to_bernstein_plan()` call time (compile time) |
 | `.reasona/review-<stage>.json` | `orch._workdir` (Bernstein orchestrator's fixed project root) | when the janitor evaluates `completion_signals` (runtime) |
 
 **The key point is that these two must point at the same directory.** Like
@@ -251,9 +251,11 @@ still the target; re-check the doc is current before trusting a fix pins the rig
 
 **Guarding against CONDUCTOR-COLLAPSE**: every value `resolve_all()` returns carries not just
 `value` but also `source` (`flag`/`env:<VAR>`/`config:project:<role>`/`config:global:<role>`/
-`fallback:<role>`/`default`). `write_resolved_config()` records this into
-`.reasona/model_config.json`, so if the wrong model ran, it is possible after the fact to trace
-which layer diverged.
+`fallback:<role>`/`default`) directly on the `ResolvedModel` itself, so it is always possible to
+trace which layer produced a given run's model choice from the object already in hand -- no
+separate persisted snapshot needed (§3.17 removed the one that used to exist,
+`.reasona/model_config.json`, once `cycles.jsonl` was found to already cover the same ground with
+plan/PR/cycle tagging this file never had).
 
 Both `plan_compile.py` (the dev role) and `review_pipeline.py` (review/recheck/bugbot/compliance)
 determine their model only through this module — measured: with no environment variables set, both
@@ -2634,6 +2636,33 @@ bernstein.yaml` had been deleted by hand after cycle-0 already completed, and no
 path would have put it back. `_sync_reasona_config()` now also calls `ensure_bernstein_yaml(path)`
 itself, right after copying the template, so the derived file is regenerated every call too --
 not only when cycle-0 happens to run again.
+
+## 3.17 `.reasona/model_config.json` removed -- `cycles.jsonl` already covered its ground, better
+
+Found while an operator (via a peer session working on `thaki-agent-security`) actually read this
+file's contents and asked what plan/PR/cycle it corresponded to -- there was no way to tell.
+`write_resolved_config()`'s own docstring claimed it "persists model + adapter + effort + source
+for every role," but its one real call site (`plan_compile.write_plan_yaml()`) only ever passed
+`{"dev": resolved_dev}` -- a single role, never the multi-role picture the docstring described.
+Worse, `compile_to_bernstein_plan()` runs once per cycle-0 dispatch and overwrote the file whole
+each time, with no `plan_name`/`stage_name`/`cycle` tag anywhere in it -- a moment after any second
+unit's cycle-0 ran, the file no longer reflected the first unit at all, and there was never a way
+to tell which unit/cycle a given snapshot even belonged to. Grepped the entire package: nothing
+ever reads it back either -- a pure write-only artifact.
+
+`cycles_log.py`'s `cycles.jsonl` (§3.7.6) already does the job this file was trying to do, and does
+it correctly: `record_dispatch()` appends one row per role dispatch (`dev`, `review`, `bugbot`,
+whichever), each carrying `stage_name`/`stage`/`cycle`/`role`/`model`/`adapter`/`head_sha`/`gate` --
+genuinely traceable to a plan/PR/cycle, and append-only so history survives instead of being
+clobbered by the next compile. The CONDUCTOR-COLLAPSE guard this file was FOR (tracing which
+config layer produced a given model choice) lives on `ResolvedModel.source` itself regardless of
+whether anything persists it to disk -- removing the file loses no actual guard.
+
+**Fixed**: `model_config.write_resolved_config()` deleted outright (not deprecated -- nothing called
+it besides the one site being removed in the same change). `plan_compile.compile_to_bernstein_plan()`
+lost its `write_audit_trail`/`audit_trail_path` parameters and the write call between them; every
+test that passed `write_audit_trail=False` to suppress the old default had that argument dropped
+(the parameter no longer exists at all, not merely defaulted off).
 
 ## 4. Directory structure
 

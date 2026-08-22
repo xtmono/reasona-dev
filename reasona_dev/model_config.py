@@ -47,9 +47,8 @@ the pipeline.
 
 from __future__ import annotations
 
-import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from reasona_dev import config_file
@@ -307,10 +306,3 @@ def resolve_all(
     }
 
 
-def write_resolved_config(resolved: dict[str, ResolvedModel], path: str | Path) -> None:
-    """Persist model + adapter + effort + source for every role -- the CONDUCTOR-COLLAPSE audit trail."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({role: asdict(r) for role, r in resolved.items()}, indent=2, sort_keys=True)
-    )

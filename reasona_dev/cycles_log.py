@@ -68,9 +68,8 @@ def _head_sha(workdir: Path) -> str | None:
 
 def cycles_path(workdir: str | Path) -> Path:
     """`<workdir>/.reasona/cycles.jsonl` -- the same `.reasona/` convention
-    `model_config.json` / `review-<stage>.json` / `model_divergence.jsonl`
-    already use, anchored to the TARGET repo (never reasona-dev's own
-    install location).
+    `review-<stage>.json` / `model_divergence.jsonl` already use, anchored
+    to the TARGET repo (never reasona-dev's own install location).
     """
     return Path(workdir) / ".reasona" / "cycles.jsonl"
 

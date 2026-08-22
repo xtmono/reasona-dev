@@ -174,7 +174,7 @@ def test_compile_writes_acceptance_file_only_for_units_that_declare_criteria(tmp
     repo.mkdir()
     compile_to_bernstein_plan(
         MANIFEST_PLAN, plan_name="s", description="d", workdir=repo,
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
     written = plan_compile.acceptance_path(repo, "pr-1")
     assert json.loads(written.read_text())["criteria"][0]["id"] == "AC-1-1"
@@ -186,7 +186,7 @@ def test_removing_criteria_from_a_plan_removes_the_stale_gate_file(tmp_path):
     repo.mkdir()
     compile_to_bernstein_plan(
         MANIFEST_PLAN, plan_name="s", description="d", workdir=repo,
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
     assert plan_compile.acceptance_path(repo, "pr-1").exists()
 
@@ -203,7 +203,7 @@ def test_removing_criteria_from_a_plan_removes_the_stale_gate_file(tmp_path):
     )
     compile_to_bernstein_plan(
         stripped, plan_name="s", description="d", workdir=repo,
-        write_audit_trail=False, write_bernstein_yaml=False,
+        write_bernstein_yaml=False,
     )
     assert not plan_compile.acceptance_path(repo, "pr-1").exists()
 
@@ -213,7 +213,7 @@ def test_strict_plan_refuses_a_manifest_with_defects(tmp_path):
     with pytest.raises(PlanError, match="defect"):
         compile_to_bernstein_plan(
             bad, plan_name="s", description="d", workdir=tmp_path,
-            write_audit_trail=False, write_bernstein_yaml=False,
+            write_bernstein_yaml=False,
         )
 
 
