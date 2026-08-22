@@ -29,8 +29,13 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-DEFAULT_FAST_TIMEOUT = 600
-DEFAULT_FULL_TIMEOUT = 1800
+# Aligned with dev-ralf's own Bash-timeout guidance for these gates
+# (worker.md -- Setup: "legitimately long commands (`make ci`, `cargo
+# build`) -> explicit longer per-call Bash timeout"), agreed on and raised
+# to 300s/1200s across both projects during a timeout-parity survey
+# (`docs/ARCHITECTURE.md` §3.22).
+DEFAULT_FAST_TIMEOUT = 300
+DEFAULT_FULL_TIMEOUT = 1200
 
 
 def _run(command: str, workdir: Path, timeout: int) -> tuple[bool, str]:

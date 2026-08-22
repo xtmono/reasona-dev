@@ -215,6 +215,35 @@ def test_the_path_given_to_the_agent_is_absolute_and_carries_a_turn_budget(tmp_p
     assert r.review_result.gate() == "PASS"
 
 
+def test_run_role_passes_the_dev_ralf_aligned_timeout_per_role(tmp_path, monkeypatch):
+    """`run_role()` must thread `bernstein_dispatch.role_dispatch_timeout(role)`
+    into `run_plan_file()`'s `timeout=` -- backend (dev-shaped) gets 3600s,
+    every other role gets 900s, matching dev-ralf's own split."""
+    from reasona_dev import bernstein_dispatch, pr_cycle as pc
+
+    seen = {}
+
+    def fake_run(plan_path, workdir, *, port=8052, timeout=3600):
+        seen["timeout"] = timeout
+        Path(plan_path).parent.mkdir(parents=True, exist_ok=True)
+        return bernstein_dispatch.DispatchResult(returncode=1, stderr_tail="no output")
+
+    monkeypatch.setattr(pc, "write_role_plan", lambda **k: None)
+    monkeypatch.setattr(pc, "run_plan_file", fake_run)
+
+    pc.run_role(
+        workdir=tmp_path, role="backend", title="t", prompt="p",
+        model=_RESOLVED["dev"], rundir=tmp_path / "run", cycle=1,
+    )
+    assert seen["timeout"] == 3600
+
+    pc.run_role(
+        workdir=tmp_path, role="reviewer", title="t", prompt="p",
+        model=_RESOLVED["review"], rundir=tmp_path / "run", cycle=1,
+    )
+    assert seen["timeout"] == 900
+
+
 def test_a_missing_output_file_records_why_not_just_that(tmp_path, monkeypatch):
     """`cycle_gate` collapses every ERROR into the same abort string, so an
     agent that died on its turn budget and one whose adapter was

@@ -97,6 +97,29 @@ DEFAULT_ROLE_SCOPE = "large"
 # (`docs/ARCHITECTURE.md` §3.21).
 SINGLE_STEP_TASK_ID = "plan-0-0"
 
+# dev-ralf's own per-role dispatch timeouts (`reference/dispatch.md`:
+# "dev 3600s (60 min, also applies to an escalated dev dispatch -- it is a
+# dev-shaped fix cycle on a different executor, not a review); all other
+# roles (review/recheck/bugbot/compliance/final_audit) 900s (15 min)").
+# reasona-dev's dev/fix dispatches -- cycle-0, review-fix, scan-fix,
+# sync-conflict-fix, ship-gate-fix, final-audit-fix, gh-review's own
+# auto-fix, and the PR-body summary dispatch (`gh_pr.generate_pr_summary()`)
+# -- all go out under the Bernstein role string `"backend"`; every other
+# role this project dispatches (`reviewer`, `ocr_reviewer`, `bugbot`,
+# `compliance`, `final_audit`) is review-shaped in dev-ralf's own sense.
+# Previously this project used one flat 3600s for every role regardless --
+# found during a timeout survey against dev-ralf's own reference docs
+# (`docs/ARCHITECTURE.md` §3.22): a review/compliance/bugbot dispatch could
+# silently run up to four times longer than dev-ralf ever allowed it to.
+ROLE_DISPATCH_TIMEOUT_SECONDS = 900
+DEV_ROLE_DISPATCH_TIMEOUT_SECONDS = 3600
+DEV_SHAPED_ROLES = frozenset({"backend"})
+
+
+def role_dispatch_timeout(role: str) -> int:
+    """The per-role dispatch timeout `run_role()` passes to `run_plan_file()`."""
+    return DEV_ROLE_DISPATCH_TIMEOUT_SECONDS if role in DEV_SHAPED_ROLES else ROLE_DISPATCH_TIMEOUT_SECONDS
+
 
 @dataclass
 class DispatchResult:

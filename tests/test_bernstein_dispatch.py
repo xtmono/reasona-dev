@@ -7,6 +7,7 @@ from reasona_dev import bernstein_dispatch
 from reasona_dev.bernstein_dispatch import (
     DEFAULT_ROLE_SCOPE,
     DispatchResult,
+    role_dispatch_timeout,
     run_plan_file,
     write_role_plan,
 )
@@ -47,6 +48,15 @@ def test_files_becomes_the_steps_files_field_for_bernstein_owned_files(tmp_path)
 def test_no_files_key_at_all_when_files_is_omitted_or_empty(tmp_path):
     assert "files" not in _plan(tmp_path)["stages"][0]["steps"][0]
     assert "files" not in _plan(tmp_path, files=[])["stages"][0]["steps"][0]
+
+
+def test_role_dispatch_timeout_matches_dev_ralfs_own_split():
+    """dispatch.md: "dev 3600s (60 min ...); all other roles (review/
+    recheck/bugbot/compliance/final_audit) 900s (15 min)". reasona-dev's
+    dev/fix dispatches go out under the Bernstein role string "backend"."""
+    assert role_dispatch_timeout("backend") == 3600
+    for role in ("reviewer", "ocr_reviewer", "bugbot", "compliance", "final_audit"):
+        assert role_dispatch_timeout(role) == 900
 
 
 def test_the_default_scope_is_the_widest_multiplier_available():

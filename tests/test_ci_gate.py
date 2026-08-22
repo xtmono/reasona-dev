@@ -31,6 +31,13 @@ def _head(repo):
     ).stdout.strip()
 
 
+def test_default_timeouts_match_the_dev_ralf_parity_agreement():
+    """docs/ARCHITECTURE.md §3.22 -- fast/full CI gate timeouts agreed with
+    dev-ralf's own Bash-timeout guidance during a timeout-parity survey."""
+    assert ci_gate.DEFAULT_FAST_TIMEOUT == 300
+    assert ci_gate.DEFAULT_FULL_TIMEOUT == 1200
+
+
 def test_run_fast_is_a_noop_when_unconfigured(tmp_path):
     repo = _repo(tmp_path)
     ok, tail = ci_gate.run_fast(repo, None, pre_fix_head=_head(repo))

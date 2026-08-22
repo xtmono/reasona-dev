@@ -50,6 +50,7 @@ from reasona_dev import ci_gate, config_file, cycles_log, ledger, memory
 from reasona_dev.bernstein_dispatch import (
     DEFAULT_ROLE_SCOPE,
     SINGLE_STEP_TASK_ID,
+    role_dispatch_timeout,
     run_plan_file,
     write_role_plan,
 )
@@ -201,7 +202,7 @@ def run_role(
         model=model.model, effort=model.effort, cli=model.adapter,
         scope=scope, files=files,
     )
-    dispatch = run_plan_file(plan_path, workdir, port=port)
+    dispatch = run_plan_file(plan_path, workdir, port=port, timeout=role_dispatch_timeout(role))
 
     if not raw_output_path.is_file():
         return RoleRunResult(

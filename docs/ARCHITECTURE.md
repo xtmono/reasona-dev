@@ -2904,6 +2904,62 @@ behavior this project has -- see README's "Status" section); both are unit-teste
 this project's own code controls: `write_role_plan()` emits the `files:` step field correctly, and
 `_build_role_description()` emits the trailer instruction with the correct, hardcoded task id.
 
+## 3.22 Timeout/cycle-cap parity survey against dev-ralf, and two closed gaps
+
+Triggered by a real question during the TAS plan 49 PR2 live run: whether `gh_review.py`'s
+900-second timeout (§3.20/§3.21's incident) matched dev-ralf's own design or was a reasona-dev
+port artifact. Surveyed every cycle-count cap and wall-clock timeout across both projects'
+source (`reasona_dev/cycle_gate.py`, `gh_review.py`, `bernstein_dispatch.py`, `ci_gate.py` vs
+dev-ralf's `worker.md`, `reference/dispatch.md`, `tools/budget.py`, `tools/cycle_gate.py`).
+
+**Cycle-count caps -- confirmed identical.** `MAX_REVIEW_CYCLES`/`MAX_SCAN_CYCLES` (8/8),
+`MAX_FINAL_CYCLES`/`MAX_SYNC_CYCLES`/`MAX_SHIP_CYCLES` (3/3/3), the shared total pool
+`MAX_TOTAL_FIX_CYCLES`/`TOTAL_FIX_BUDGET` (16), `MAX_FINAL_PHASE_ROUNDS` (3),
+`MAX_INCONCLUSIVE_ATTEMPTS` (3), `GH_REVIEW_MAX_CYCLE`/`--max-cycle` (3) -- all match
+dev-ralf's `tools/budget.py`/`tools/cycle_gate.py` numbers exactly; reasona-dev ported them
+faithfully. `MAX_SUBSTANTIVE_RESYNC_ROUNDS = 2` (`orchestrate.py`) has no numbered dev-ralf
+counterpart -- worker.md's own substantive-conflict re-entry (§228, §277: "re-enter the review
+loop ... on PASS ... loop back to retry the merge") never states how many times that whole-unit
+re-review may repeat; this project added an explicit bound where dev-ralf left the question
+open.
+
+**gh-review's 900s wall-clock budget -- confirmed identical, and confirmed to be the real
+mechanism behind §3.20/§3.21's incident.** `gh-review/SKILL.md` §3.4: "Track cumulative
+wall-clock across watcher calls + fix work; cap at `$max_wait`" -- ONE budget for the whole
+watch-then-fix loop, not reset per CI round. `worker.md:22` calls `/gh-review` exactly once
+per PR (`--max-wait 900 --max-cycle 3`), and `worker.md:240`: "Result is authoritative (no
+second outer fix-loop)" -- a timeout there is terminal for that PR, no automatic re-invocation.
+reasona-dev's `gh_review.DEFAULT_MAX_WAIT_SECONDS = 900`/`POLL_INTERVAL_SECONDS = 30` match
+byte-for-byte. TAS PR2's real timeout traced to exact minute: PR opened 16:25:40 KST, compliance
+FAIL detected ~16:29:40, the auto-fix agent turn ran 16:29-16:35:45, the re-verification CI round
+ran 16:36:47-16:42:42 -- ~17 minutes total against the shared 900s (15 min) budget. Not a
+reasona-dev bug and not a port divergence; dev-ralf's own design is tight the same way whenever
+even one real fix-and-reverify cycle is needed inside gh-review.
+
+**Two real divergences found and closed by this survey:**
+
+1. **Per-role dispatch timeout was NOT split, unlike dev-ralf.** `dispatch.md`: "Timeouts: dev
+   3600s (60 min, also applies to an escalated dev dispatch...); all other roles (review/
+   recheck/bugbot/compliance/final_audit) 900s (15 min)". reasona-dev's `run_role()` passed a
+   single flat `timeout=3600` to `run_plan_file()` for every role, review/compliance/bugbot
+   included -- a hung or slow review-shaped dispatch could run up to four times longer than
+   dev-ralf ever allowed before this fix. Closed by `bernstein_dispatch.role_dispatch_timeout(role)`
+   (`DEV_SHAPED_ROLES = {"backend"}` -> 3600s, everything else -> 900s -- reasona-dev's dev/fix
+   dispatches, including `gh_pr.generate_pr_summary()`'s PR-body summary and `gh_review.py`'s own
+   auto-fix, all go out under the Bernstein role string `"backend"`), threaded into `run_role()`'s
+   `run_plan_file()` call.
+
+2. **CI fast/full gate timeouts had no dev-ralf-numbered equivalent at all -- and, once a shared
+   number was agreed, both projects' defaults changed together.** dev-ralf's `$CI_FAST`/full
+   `make ci` are plain Bash tool calls under worker.md's own GENERAL long-command guidance
+   ("legitimately long commands... -> explicit longer per-call Bash timeout (default 120s, max
+   600s)"), not a dedicated CI-gate constant -- `ci_gate.py`'s `DEFAULT_FAST_TIMEOUT`/
+   `DEFAULT_FULL_TIMEOUT` are reasona-dev's own invention (B-5, this project's module docstring),
+   previously 600s/1800s with no cross-project number to match against. Agreed and set to
+   **300s (fast) / 1200s (full)** on both sides of this survey -- `ci_gate.py`'s two constants
+   updated to match; dev-ralf's own general-Bash-timeout prose is a separate, wider-scoped
+   convention this project's own code does not own or edit.
+
 ## 4. Directory structure
 
 ```
