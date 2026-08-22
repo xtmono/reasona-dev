@@ -20,10 +20,10 @@
 # hardcoded fallback (kilo adapter / deepseek-v4-pro), which only applies
 # when nothing overrides it. This file is that override.
 dev-models:
-  dev: claude:sonnet:high
-  review: claude:opus:high,ocr
-  recheck: claude:sonnet:high,ocr
-  bugbot: claude:opus:high
-  compliance: claude:sonnet:high
-  final_audit: claude:opus:high
-  dev_escalation: claude:opus:high
+  dev: claude:claude-sonnet-5:high
+  review: claude:claude-opus-5:high,ocr
+  recheck: claude:claude-sonnet-5:high,ocr
+  bugbot: claude:claude-opus-5:high
+  compliance: claude:claude-sonnet-5:high
+  final_audit: claude:claude-opus-5:high
+  dev_escalation: claude:claude-opus-5:high
