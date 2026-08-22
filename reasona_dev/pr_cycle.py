@@ -615,6 +615,7 @@ def run_pr_cycle(
     resume: bool = False,
     pr_index: str | None = None,
     pr_section: str | None = None,
+    carried_budget: FixBudget | None = None,
     run_role_fn=run_role,
 ) -> CycleResult:
     """develop -> review -> bug+compliance scan, worker.md-faithful.
@@ -674,6 +675,22 @@ def run_pr_cycle(
     own failure catalog, rationale.md) exists to prevent structurally
     unenforceable: the review prompt asks a question no dispatched agent
     can answer.
+
+    **`carried_budget`** -- used ONLY when `progress` is `None` (a fresh
+    review/scan pass, not a resume). dev-ralf's own `BUDGET_STATE` file
+    "is never reset mid-PR" (worker.md's *Fix budget accounting* /
+    *Result block*: `sync_cycles`/`ship_cycles`/`final_phase_rounds` are
+    all "cumulative, never reset") -- a unit's total fix-cycle spend is a
+    hard ceiling for its ENTIRE life, not per substantive-resync attempt.
+    `orchestrate.py`'s substantive-resync path forces review/scan to
+    restart from scratch on a resolved conflict's new diff (a genuinely
+    fresh `progress`), but passes the just-finished cycle's own `budget`
+    back in here so the shared pool keeps draining across attempts instead
+    of refilling to 16 on every resync -- see `docs/ARCHITECTURE.md` §3.23
+    for the incident this closes (a reasona-dev-only divergence from
+    dev-ralf: clearing the whole ledger checkpoint to force a fresh review
+    also reset the budget as a side effect, which dev-ralf's design never
+    permits).
     """
     workdir = Path(workdir)
     log_workdir = Path(repo_workdir) if repo_workdir is not None else workdir
@@ -702,7 +719,7 @@ def run_pr_cycle(
     # pool spent, up to 24 -- and `final_phase.should_run_final_audit()`
     # read `scan_budget` alone, so a PR with review-only fixes and a clean
     # scan looked exactly like a PR with zero fixes anywhere).
-    budget = FixBudget.from_dict(progress["budget"]) if progress else FixBudget()
+    budget = FixBudget.from_dict(progress["budget"]) if progress else (carried_budget or FixBudget())
     review_convergence = (
         ConvergenceTracker.from_dict(progress["review_convergence"]) if progress else ConvergenceTracker()
     )

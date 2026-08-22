@@ -2960,6 +2960,65 @@ even one real fix-and-reverify cycle is needed inside gh-review.
    updated to match; dev-ralf's own general-Bash-timeout prose is a separate, wider-scoped
    convention this project's own code does not own or edit.
 
+## 3.23 A substantive-resync retry used to hand out a fresh 16-cycle budget instead of draining one
+
+Found during a follow-up question to §3.22's timeout-parity survey: does `MAX_SUBSTANTIVE_RESYNC_ROUNDS`
+(§3.20-era orchestrate.py: bounds how many times a unit's WHOLE final stage -- sync, gh-pr, gh-review,
+final phase, squash-merge attempt -- restarts from a fresh review/scan pass when sync resolves a
+SUBSTANTIVE merge conflict) count purely-local rounds, or does it include re-running gh-review (the
+GitHub Actions compliance/bugbot watch-and-fix loop) each time?
+
+**It includes gh-review, in full, every retry.** `_needs_review()` has two call sites in
+`final_phase.py`: one BEFORE `gh-pr`/`gh-review` ever run (the pre-ship sync), and one INSIDE the
+final-phase round loop -- AFTER `gh-pr`/`gh-review` already ran (`pr_url=url` is passed at that call
+site, proof a PR already exists). A retry re-enters `final_stage_fn` from its own top regardless of
+which site triggered it: sync again -> gh-pr again (idempotent, reuses the existing PR) -> **gh-review
+again, from a fresh 900s wall-clock budget, with its own up-to-`GH_REVIEW_MAX_CYCLE=3` compliance/bugbot
+auto-fix cycles** -> final phase again. So a unit that hits this path twice (the old cap) could spend
+up to `3 x 2 = 6` compliance/bugbot fix cycles across its lifetime through gh-review alone -- not
+counting each round's own fresh review/scan fix cycles.
+
+**Checked against dev-ralf, and found a real, unintended divergence.** dev-ralf's own `worker.md`
+states its `BUDGET_STATE` file (`tools/budget.py`'s single JSON state, one per PR) "is never reset
+mid-PR" -- `sync_cycles`/`ship_cycles`/`final_phase_rounds` are explicitly "cumulative, never reset
+per round." `gh_review_cap() = min(GH_REVIEW_MAX_CYCLE, MAX_TOTAL_FIX_CYCLES - total_used)`
+(`cycle_gate.py`) means dev-ralf's own design makes a repeated `3 x N` blowout structurally
+impossible: the SAME 16-cycle pool, never refilled, is what every stage (including gh-review) draws
+down for the unit's entire life. reasona-dev's own `orchestrate.py` broke this by accident: the
+resync path called `ledger.clear_progress()` -- a generic "wipe the whole checkpoint" utility whose
+ONLY other real use is a genuinely terminal unit -- to force review/scan to restart on the resolved
+diff. That checkpoint dict happens to ALSO carry the unit's `FixBudget`, so wiping it for "force a
+fresh review" had the side effect of "also refill the fix-cycle pool to 16" -- something dev-ralf's
+design never permits, and something reasona-dev never intended (there is no comment or test anywhere
+arguing FOR a per-resync-round budget refill; it was purely a side effect of reusing the wrong
+primitive).
+
+**Two changes, matching dev-ralf's actual design exactly (its own numbers, not new ones):**
+
+1. **The budget now carries across every substantive-resync retry.** `pr_cycle.run_pr_cycle()` gained
+   a `carried_budget: FixBudget | None` parameter, used only when there is no ledger checkpoint to
+   resume from (a genuinely fresh review/scan pass): `budget = ... if progress else (carried_budget or
+   FixBudget())`. `orchestrate.py`'s resync path now calls `_dispatch_cycle(carried_budget=cycle.budget)`
+   -- the just-finished cycle's own budget, already reflecting everything spent so far this unit's
+   whole life -- instead of letting the cleared checkpoint silently produce a fresh `FixBudget()`.
+   `recurrence`/`review_convergence`/`scan_convergence`/the phase/cycle bookkeeping are NOT carried
+   forward -- that state describes the OLD (pre-conflict-resolution) diff, and carrying it into a
+   review of a genuinely different diff would misattribute findings across two different code states;
+   only `budget` (a pure resource-spend counter, not diff-specific) is dev-ralf's own explicit
+   "never reset" invariant.
+
+2. **`MAX_SUBSTANTIVE_RESYNC_ROUNDS` is gone -- retries are unconditional now, matching dev-ralf
+   exactly.** dev-ralf's `worker.md` §228/§277 never state a numbered bound on how many times a
+   substantive conflict may force a re-review; the design's actual backstop against a target repo
+   whose base keeps moving faster than this pipeline can settle is the shared budget itself running
+   dry. With fix (1) in place, that backstop is real here too: `run_sync_cycle()` refuses a further
+   conflict-resolution dispatch once `can_spend("sync")` is `False` (`MAX_SYNC_CYCLES=3`, now a true
+   per-unit-lifetime cap, not per-round) and returns `blocked`, never another `needs_review` -- so
+   orchestrate.py's own retry loop naturally exits without needing a round counter of its own. The
+   now-dead "resync bound exhausted" fallback branch in `orchestrate.py` (unreachable once retries are
+   unconditional -- `tail.status == NEEDS_REVIEW` is always retried, never falls through to it) was
+   removed along with it.
+
 ## 4. Directory structure
 
 ```

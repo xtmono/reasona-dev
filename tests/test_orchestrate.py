@@ -432,15 +432,21 @@ def test_a_substantive_sync_conflict_re_runs_review_before_the_final_stage_retri
     """`final_stage_fn` reporting `NEEDS_REVIEW` (sync resolved a
     substantive merge conflict) must trigger a fresh `run_pr_cycle_fn`
     dispatch before the final stage is retried -- worker.md's mechanical/
-    substantive rule for conflict resolution."""
+    substantive rule for conflict resolution. The retry's `carried_budget`
+    must be the just-finished cycle's own `budget` -- dev-ralf's
+    `BUDGET_STATE` "is never reset mid-PR" (docs/ARCHITECTURE.md §3.23):
+    a substantive resync forces review/scan to restart fresh, but the
+    shared fix-cycle pool must keep draining, not refill."""
+    from reasona_dev.cycle_gate import FixBudget
     from reasona_dev.final_phase import NEEDS_REVIEW, TailResult
 
     cycle_calls = []
     tail_calls = []
+    spent_budget = FixBudget(review_cycles=3, total_used=3)
 
     def cycle_fn(**kw):
-        cycle_calls.append(kw["stage_name"])
-        return _pass_cycle()
+        cycle_calls.append(kw)
+        return CycleResult(verdict="PASS", stage="scan", reason="clean", budget=spent_budget)
 
     def ship_fn(workdir, stage_name, **kw):
         return _pass_ship()
@@ -455,19 +461,28 @@ def test_a_substantive_sync_conflict_re_runs_review_before_the_final_stage_retri
 
     result = _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn)
     assert result.passed
-    assert cycle_calls.count("pr-1") == 2  # re-reviewed once after the substantive resync
+    pr1_calls = [c for c in cycle_calls if c["stage_name"] == "pr-1"]
+    assert len(pr1_calls) == 2  # re-reviewed once after the substantive resync
     assert tail_calls.count("pr-1") == 2  # final stage retried once
+    assert pr1_calls[0]["carried_budget"] is None  # first dispatch, nothing to carry yet
+    assert pr1_calls[1]["carried_budget"] is spent_budget  # resync carries the prior cycle's own budget forward
 
 
-def test_a_persistently_substantive_sync_conflict_is_blocked_after_the_resync_cap(tmp_path):
-    from reasona_dev.cycle_gate import MAX_SUBSTANTIVE_RESYNC_ROUNDS
+def test_substantive_resync_retries_unconditionally_no_round_cap(tmp_path):
+    """Unlike the old `MAX_SUBSTANTIVE_RESYNC_ROUNDS`-bounded behavior,
+    orchestrate.py itself no longer caps substantive-resync retries --
+    matching dev-ralf, which has no numbered bound here either
+    (worker.md §228/§277). The real backstop is the shared fix-cycle
+    budget running out inside the REAL `run_sync_cycle()`/
+    `_run_conflict_fix()` (tested at that layer, not here) -- this test
+    only proves orchestrate.py's own loop keeps retrying past what the
+    old cap would have allowed, given a stub `final_stage_fn` that just
+    keeps reporting `NEEDS_REVIEW`."""
     from reasona_dev.final_phase import NEEDS_REVIEW, TailResult
 
-    cycle_calls = []
     tail_calls = []
 
     def cycle_fn(**kw):
-        cycle_calls.append(kw["stage_name"])
         return _pass_cycle()
 
     def ship_fn(workdir, stage_name, **kw):
@@ -476,20 +491,17 @@ def test_a_persistently_substantive_sync_conflict_is_blocked_after_the_resync_ca
     def tail_fn(**kw):
         stage = kw["stage_name"]
         tail_calls.append(stage)
-        if stage == "pr-1":
+        if stage == "pr-1" and tail_calls.count("pr-1") <= 5:
             return TailResult(stage_name=stage, status=NEEDS_REVIEW,
                               reason="sync resolved a substantive merge conflict")
         return _tail_ok(stage)
 
     result = _run(tmp_path, cycle_fn, ship_fn, ship=True, final_stage_fn=tail_fn)
     statuses = {o.stage_name: o.status for o in result.outcomes}
-    assert statuses["pr-1"] == "blocked"
-    pr1_outcome = next(o for o in result.outcomes if o.stage_name == "pr-1")
-    assert "exhausted" in pr1_outcome.reason
-    assert cycle_calls.count("pr-1") == MAX_SUBSTANTIVE_RESYNC_ROUNDS + 1
-    assert tail_calls.count("pr-1") == MAX_SUBSTANTIVE_RESYNC_ROUNDS + 1
-    # a unit blocked this way never shipped -- its dependents must not run
-    assert statuses["pr-2"] == "skipped" and statuses["pr-3"] == "skipped"
+    # 5 retries -- one more than the old MAX_SUBSTANTIVE_RESYNC_ROUNDS=2 cap
+    # would ever have allowed -- and the unit still converges to shipped.
+    assert statuses["pr-1"] == "shipped"
+    assert tail_calls.count("pr-1") == 6
 
 
 def test_a_failed_re_review_after_a_substantive_sync_conflict_reports_failed_not_blocked(tmp_path):

@@ -59,7 +59,7 @@ from reasona_dev.plan_compile import (
     parse_plan_units,
     write_plan_yaml,
 )
-from reasona_dev.cycle_gate import MAX_SUBSTANTIVE_RESYNC_ROUNDS, FixBudget, RecurrenceTracker
+from reasona_dev.cycle_gate import FixBudget, RecurrenceTracker
 from reasona_dev.final_phase import TailResult
 from reasona_dev.pr_cycle import CycleResult, run_pr_cycle
 from reasona_dev.prompt_profile import (
@@ -469,7 +469,7 @@ def _process_unit(
         if resume:
             ledger.mark_dev_dispatched(workdir, plan_name, up.stage_name)
 
-    def _dispatch_cycle() -> CycleResult:
+    def _dispatch_cycle(carried_budget: FixBudget | None = None) -> CycleResult:
         return run_pr_cycle_fn(
             workdir=unit_workdir,
             repo_workdir=workdir,
@@ -483,12 +483,12 @@ def _process_unit(
             files=up.unit.files,
             pr_index=up.index,
             pr_section=up.unit.section,
+            carried_budget=carried_budget,
             port=port,
         )
 
     cycle = _dispatch_cycle()
     outcome: UnitOutcome | None = None
-    resync_rounds = 0
     while outcome is None:
         if cycle.verdict not in ("PASS", "PASS_WITH_NOTES"):
             # ABORT (role/model unavailable, or an INCONCLUSIVE role's
@@ -522,21 +522,38 @@ def _process_unit(
                 gh_review_max_wait_seconds=gh_review_max_wait_seconds,
                 port=port,
             )
-            if tail.status == final_phase_mod.NEEDS_REVIEW and resync_rounds < MAX_SUBSTANTIVE_RESYNC_ROUNDS:
+            if tail.status == final_phase_mod.NEEDS_REVIEW:
                 # `run_sync_cycle()` resolved a SUBSTANTIVE conflict this
                 # unit's own review/scan never saw (worker.md's mechanical/
                 # substantive rule, docs/ARCHITECTURE.md §3.14.4) -- gh-pr/
-                # gh-review/squash-merge never ran. Re-review from scratch
-                # (clearing the stale checkpoint, so `run_pr_cycle_fn`
-                # cannot resume into an already-"passed" phase and skip the
-                # re-review this exists to force), then retry the final
-                # stage. Bounded: a target repo whose base keeps moving
-                # faster than this can settle is not something retrying
-                # indefinitely would fix.
-                resync_rounds += 1
+                # gh-review/squash-merge never ran (or, if this itself was a
+                # resync retry, ran again on a diff whose validity this
+                # sync just invalidated). Re-review from scratch (clearing
+                # the stale checkpoint, so `run_pr_cycle_fn` cannot resume
+                # into an already-"passed" phase and skip the re-review
+                # this exists to force), then retry the final stage.
+                #
+                # Unconditional, not round-capped -- dev-ralf itself has no
+                # numbered bound here (worker.md §228/§277 just say
+                # "re-enter ... loop back to retry"); reasona-dev used to
+                # cap this at `MAX_SUBSTANTIVE_RESYNC_ROUNDS` retries, but
+                # ALSO reset the shared fix-cycle budget on every retry via
+                # this same `clear_progress()` call -- a divergence from
+                # dev-ralf's own design (`BUDGET_STATE` "is never reset
+                # mid-PR", worker.md's *Result block*) that let a unit spend
+                # up to `MAX_SUBSTANTIVE_RESYNC_ROUNDS` full fresh 16-cycle
+                # budgets instead of one 16-cycle budget for its whole life.
+                # `carried_budget=cycle.budget` below closes that: the pool
+                # keeps draining across retries, so the real, dev-ralf-
+                # matching backstop against runaway retries is the shared
+                # budget itself running out (`run_sync_cycle()` refuses a
+                # conflict-fix dispatch once `can_spend("sync")` is False,
+                # returning `blocked` -- not `needs_review` -- which this
+                # loop's own `tail.blocked` branch below already handles;
+                # see `docs/ARCHITECTURE.md` §3.23 for the full incident).
                 if resume:
                     ledger.clear_progress(workdir, plan_name, up.stage_name)
-                cycle = _dispatch_cycle()
+                cycle = _dispatch_cycle(carried_budget=cycle.budget)
                 continue
             decision = tail.ship_decision
             if tail.status == final_phase_mod.MERGED:
@@ -552,14 +569,10 @@ def _process_unit(
             # post-sync/post-audit code), but a real signal costs
             # nothing extra here since nothing merges either way.
             decision = ship_gate_fn(unit_workdir, up.stage_name, cycle_verdict=cycle.verdict, log_workdir=workdir)
-        if tail is not None and tail.status == final_phase_mod.NEEDS_REVIEW:
-            # The resync bound above was exhausted and it is still
-            # substantive -- report it, don't silently proceed to
-            # gh-pr/gh-review/squash-merge on unreviewed code.
-            status, reason = "blocked", (
-                f"{tail.reason} (exhausted {MAX_SUBSTANTIVE_RESYNC_ROUNDS} re-review round(s))"
-            )
-        elif tail is not None and tail.blocked:
+        # `tail.status == NEEDS_REVIEW` never reaches here -- the branch
+        # above always retries unconditionally, so `tail` at this point is
+        # never that status (see its own comment for why that is safe).
+        if tail is not None and tail.blocked:
             # Every non-passing outcome inside the final phase (gh
             # unavailable, a sync conflict or ship-gate fix budget
             # exhausted, final_audit failing, non-convergence) is

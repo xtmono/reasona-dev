@@ -81,11 +81,21 @@ GH_REVIEW_MAX_CYCLE = 3
 # is allowed to proceed to gh-pr/gh-review/squash-merge (worker.md's own
 # mechanical/substantive distinction for conflict resolution -- a
 # MECHANICAL resolution, e.g. import order or formatting, does not earn
-# this; see `final_phase.NEEDS_REVIEW`). Bounded, same reasoning as
-# `MAX_FINAL_PHASE_ROUNDS`: a target repo whose base keeps moving faster
-# than this pipeline can settle is not something retrying indefinitely
-# would fix.
-MAX_SUBSTANTIVE_RESYNC_ROUNDS = 2
+# this; see `final_phase.NEEDS_REVIEW`).
+#
+# Unconditional, not round-capped -- matches dev-ralf exactly (worker.md
+# §228/§277 have no numbered bound here, just "re-enter ... loop back to
+# retry"). reasona-dev used to bound this at a `MAX_SUBSTANTIVE_RESYNC_ROUNDS`
+# retry count (removed) AND reset the whole shared fix-cycle budget on every
+# retry (also fixed -- `pr_cycle.run_pr_cycle()`'s `carried_budget` param) --
+# a double divergence from dev-ralf's design that let a unit spend multiple
+# fresh 16-cycle budgets instead of one 16-cycle budget for its whole life
+# (`BUDGET_STATE` "is never reset mid-PR", worker.md's *Result block*). The
+# real backstop against runaway retries is the same one dev-ralf relies on:
+# the shared budget itself running out (`run_sync_cycle()` refuses a
+# conflict-fix dispatch once `can_spend("sync")` is False, returning
+# `blocked`, never another `needs_review`) -- see `docs/ARCHITECTURE.md`
+# §3.23 for the full incident.
 
 # New rule agreed in this design track: a MUST_FIX key surviving one
 # completed fix earns exactly one bounded escalation of the dev role to a
