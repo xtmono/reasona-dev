@@ -29,23 +29,52 @@ named by the PR unit itself; `gh_pr.py` renames it in place
 (`git branch -m`) once the issue exists, the same "on a feature/temp
 branch: rename" path `/gh-pr` itself takes when it is not sitting on base.
 
-**`bernstein.yaml` needs to exist in the worktree too.** It is gitignored
-in every target repo (`docs/INSTALL.md` §4), so a fresh `git worktree add`
--- which only checks out tracked content -- never carries it across. This
-module does not handle that itself: `plan_compile.compile_to_bernstein_plan(
-..., workdir=<worktree>, write_bernstein_yaml=True)` (the default) already
-bootstraps/syncs it from the same project-or-global template cascade
-regardless of which directory `workdir` points at, so calling that against
-the worktree (which `orchestrate.py` does immediately after this module
-creates it, to dispatch cycle-0) is what actually closes this gap -- see
-that function's own docstring.
+**`bernstein.yaml`, `reasona.yaml`, and the prompt profile all need to
+exist in the worktree too -- `_sync_reasona_config()` below closes this.**
+Cycle-0 and every dispatch after it (review, scan, final-audit, sync-fix)
+all run with `workdir=<worktree>` (`orchestrate._process_unit()`), and
+`reasona_dev.bernstein_config.ensure_bernstein_yaml()`, `config_file.
+load_project()`, and `prompt_profile.resolve_prompt()` all resolve their
+project-local layer relative to WHATEVER `workdir` they are called with --
+never the top-level repo automatically. `.reasona/` is gitignored in every
+target repo (`docs/INSTALL.md` §4), so a fresh `git worktree add` -- which
+only checks out git-TRACKED content -- never carries a project-local
+`.reasona/bernstein-template.yaml`/`reasona.yaml`/`prompts/` across into
+the new worktree on its own. A real incident (`thaki-agent-security`, plan
+49): once an operator's global `~/.reasona/` fallback was retired in favor
+of project-local config, a resumed PR unit's review dispatch tried to run
+inside a worktree with NO `bernstein.yaml` anywhere it could find one at
+all -- `bernstein run` would FATAL with "no adapter configured" the same
+way an entirely unbootstrapped repo does (`bernstein_config.py`'s own
+module docstring). `_sync_reasona_config()` copies these three from the
+top-level `workdir` into the worktree, every call (not just on first
+creation -- a resumed run against an already-existing worktree gets the
+CURRENT top-level config too, the same "derived, not hand-maintained"
+treatment `bernstein_config.ensure_bernstein_yaml()`'s own template
+regeneration already gives `.bernstein/bernstein.yaml` one level up).
+Nothing is copied if the top-level `workdir` has none of these -- an
+operator relying purely on the global `~/.reasona/` layer (still supported,
+just not the recommended default any more) needs nothing copied, since
+`ensure_bernstein_yaml()`/`config_file`/`prompt_profile` all fall back to
+the SAME global paths regardless of which worktree they run in.
 """
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from reasona_dev import _shell
+
+# The project-local config `ensure_bernstein_yaml()`/`config_file.
+# load_project()`/`prompt_profile.resolve_prompt()` each look for relative
+# to whatever `workdir` they are called with -- copied into every unit
+# worktree so those lookups succeed there too, not just at the top level.
+_REASONA_CONFIG_ENTRIES: tuple[str, ...] = (
+    "bernstein-template.yaml",
+    "reasona.yaml",
+    "prompts",
+)
 
 
 def unit_worktree_path(workdir: str | Path, plan_name: str, stage_name: str) -> Path:
@@ -54,6 +83,29 @@ def unit_worktree_path(workdir: str | Path, plan_name: str, stage_name: str) -> 
 
 def unit_branch_name(plan_name: str, stage_name: str) -> str:
     return f"reasona/{plan_name}/{stage_name}"
+
+
+def _sync_reasona_config(workdir: Path, path: Path) -> None:
+    """Copy the project-local `.reasona/` config trio from `workdir` (the
+    top-level repo) into `path` (a unit's own worktree), overwriting
+    whatever is already there -- see this module's own docstring for why.
+    Silently skips any entry missing at the source (an operator relying on
+    the global `~/.reasona/` layer alone has nothing local to copy, and
+    that is a supported, not a broken, configuration).
+    """
+    src_root = workdir / ".reasona"
+    dst_root = path / ".reasona"
+    for entry in _REASONA_CONFIG_ENTRIES:
+        src = src_root / entry
+        if not src.exists():
+            continue
+        dst = dst_root / entry
+        if src.is_dir():
+            shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(src, dst)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(src, dst)
 
 
 def ensure_unit_worktree(
@@ -65,12 +117,17 @@ def ensure_unit_worktree(
     already exists, it is assumed to be a valid worktree left by an earlier,
     interrupted run of this same unit and is reused as-is -- `git worktree
     add` would fail on an existing path anyway, and recreating it would
-    throw away whatever cycle-0/review/fix work already landed there.
+    throw away whatever cycle-0/review/fix work already landed there. The
+    project-local `.reasona/` config is (re)synced into it either way, so a
+    resumed run against an already-existing worktree picks up whatever the
+    top-level repo's config currently is, not whatever it was when the
+    worktree was first created.
     """
     workdir = Path(workdir)
     path = unit_worktree_path(workdir, plan_name, stage_name)
     branch = unit_branch_name(plan_name, stage_name)
     if path.is_dir():
+        _sync_reasona_config(workdir, path)
         return path, branch
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +142,7 @@ def ensure_unit_worktree(
     )
     if code != 0:
         raise RuntimeError(f"git worktree add failed for {stage_name!r}: {(err or out).strip()[:300]}")
+    _sync_reasona_config(workdir, path)
     return path, branch
 
 

@@ -2582,6 +2582,36 @@ sections should win isn't this function's call to make; the repo's own combined 
 that decision belongs). `reasona_plan.bernstein_config` ports the identical function for reasona-plan's
 own role set (`dev`, `reviewer`) -- see reasona-plan's own `docs/ARCHITECTURE.md`.
 
+## 3.16 Per-unit worktrees need their own copy of the project-local `.reasona/` config
+
+§3.15 made `.bernstein/bernstein.yaml` regenerate from a project-local template on every run --
+but that template still has to be FOUND relative to whatever `workdir` `ensure_bernstein_yaml()` is
+called with, and `orchestrate._process_unit()` calls it with `workdir=<unit's own worktree>`, not
+the top-level repo (cycle-0 and every dispatch after it -- review, scan, final-audit, sync-fix --
+all run inside that worktree, `worktree.py` §3.11.1). `config_file.load_project()` and
+`prompt_profile.resolve_prompt()` have the identical shape: both resolve their project-local layer
+relative to whatever `workdir` they are handed, never automatically against the top-level repo.
+
+A real incident (`thaki-agent-security`, plan 49) found this the hard way: an operator's global
+`~/.reasona/` fallback (which happened to be visible identically from any worktree, since it lives
+outside any repo) was retired in favor of project-local config. The very next resumed PR unit's
+review dispatch ran inside a worktree with `.reasona/` gitignored and nothing to fall back to --
+`.reasona/bernstein-template.yaml` existed only in the top-level checkout's untracked working tree,
+and a plain `git worktree add` (`ensure_unit_worktree()`'s own implementation, confirmed -- no
+custom copy step existed) only ever checks out git-TRACKED content. `bernstein run` FATALs with "no
+adapter configured" the same way an entirely unbootstrapped repo does.
+
+**Fixed**: `worktree.ensure_unit_worktree()` now copies `.reasona/bernstein-template.yaml`,
+`.reasona/reasona.yaml`, and `.reasona/prompts/` from the top-level `workdir` into the unit's own
+worktree (`_sync_reasona_config()`) -- on first creation AND on every resumed reuse of an
+already-existing worktree, so a config change at the top level (a new role added to the template,
+say) reaches an in-flight unit's worktree too, the same "derived, not hand-maintained" treatment
+§3.15 already gives `.bernstein/bernstein.yaml` itself. Silently skips any entry missing at the
+source -- an operator who still relies on the global `~/.reasona/` layer alone has nothing
+project-local to copy, and every one of `ensure_bernstein_yaml()`/`config_file`/`prompt_profile`
+already falls back to that same global path regardless of which worktree it runs in, so nothing
+breaks for that configuration either.
+
 ## 4. Directory structure
 
 ```

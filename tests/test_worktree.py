@@ -67,6 +67,54 @@ def test_ensure_unit_worktree_reuses_an_existing_worktree_on_resume(tmp_path):
     assert (path2 / "mid-run.txt").is_file()  # not recreated -- in-progress work survives
 
 
+def test_ensure_unit_worktree_copies_the_project_local_reasona_config(tmp_path):
+    """The incident this closes: `bernstein_config.ensure_bernstein_yaml()`/
+    `config_file.load_project()`/`prompt_profile.resolve_prompt()` all
+    resolve relative to `workdir=<worktree>`, and `.reasona/` is gitignored
+    everywhere, so a plain `git worktree add` never carries the
+    project-local template/config/prompts across on its own."""
+    repo = _repo(tmp_path)
+    (repo / ".reasona" / "prompts" / "rust-dev").mkdir(parents=True)
+    (repo / ".reasona" / "bernstein-template.yaml").write_text("role_model_policy:\n  backend:\n    provider: claude\n")
+    (repo / ".reasona" / "reasona.yaml").write_text("dev-models:\n  dev: claude:sonnet:high\n")
+    (repo / ".reasona" / "prompts" / "rust-dev" / "review.md").write_text("review this\n")
+
+    path, _ = worktree.ensure_unit_worktree(repo, "plan", "pr-1", base="main")
+
+    assert (path / ".reasona" / "bernstein-template.yaml").read_text() == "role_model_policy:\n  backend:\n    provider: claude\n"
+    assert (path / ".reasona" / "reasona.yaml").read_text() == "dev-models:\n  dev: claude:sonnet:high\n"
+    assert (path / ".reasona" / "prompts" / "rust-dev" / "review.md").read_text() == "review this\n"
+
+
+def test_ensure_unit_worktree_skips_reasona_config_missing_at_the_source(tmp_path):
+    """An operator relying purely on the global `~/.reasona/` layer has
+    nothing project-local to copy -- that is a supported configuration,
+    not something to fail or warn about."""
+    repo = _repo(tmp_path)
+
+    path, _ = worktree.ensure_unit_worktree(repo, "plan", "pr-1", base="main")
+
+    assert not (path / ".reasona").exists()
+
+
+def test_ensure_unit_worktree_resyncs_reasona_config_on_resume_too(tmp_path):
+    """A resumed run against an already-existing worktree must pick up
+    whatever the top-level repo's config currently is, not a stale copy
+    from when the worktree was first created."""
+    repo = _repo(tmp_path)
+    (repo / ".reasona").mkdir()
+    (repo / ".reasona" / "bernstein-template.yaml").write_text("goal: v1\n")
+
+    path, _ = worktree.ensure_unit_worktree(repo, "plan", "pr-1", base="main")
+    assert (path / ".reasona" / "bernstein-template.yaml").read_text() == "goal: v1\n"
+
+    (repo / ".reasona" / "bernstein-template.yaml").write_text("goal: v2\n")
+    path2, _ = worktree.ensure_unit_worktree(repo, "plan", "pr-1", base="main")
+
+    assert path2 == path
+    assert (path / ".reasona" / "bernstein-template.yaml").read_text() == "goal: v2\n"
+
+
 def test_remove_unit_worktree_deletes_the_checkout_and_its_current_branch(tmp_path):
     repo = _repo(tmp_path)
     path, branch = worktree.ensure_unit_worktree(repo, "plan", "pr-1", base="main")
