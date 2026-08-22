@@ -29,10 +29,10 @@ MUST_FIX_TEXT = (
 def _recording_role_fn(script):
     calls = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         calls.append({
             "role": role, "title": title, "prompt": prompt, "model": model.model,
-            "cycle": cycle,
+            "cycle": cycle, "files": files,
         })
         idx = len(calls) - 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)
@@ -71,6 +71,29 @@ def test_bounded_route_uses_the_recheck_model_and_prompt(tmp_path, rust_dev_prom
     # the exact findings being confirmed, verbatim
     assert "BOUNDED recheck" in reviewer_calls[1]["prompt"]
     assert "|| contract: c" in reviewer_calls[1]["prompt"]
+
+
+def test_dev_fix_dispatch_carries_the_manifest_files_as_owned_files(tmp_path, rust_dev_prompts, monkeypatch):
+    """Real incident (TAS plan 49 PR2, 2026-08-22, docs/ARCHITECTURE.md
+    §3.21): Bernstein's own janitor attributes a completed task's work by
+    `git diff` scoped to `owned_files` when no commit matches by task id.
+    Passing `run_pr_cycle(files=...)` through to the dev-fix dispatch's
+    `run_role_fn(files=...)` (-> `write_role_plan`'s `files:` step field ->
+    Bernstein's `Task.owned_files`) is what gives that fallback real ground
+    to stand on."""
+    monkeypatch.setattr(pr_cycle, "_safe_recheck_route", lambda *a, **k: "BOUNDED")
+    fn = _recording_role_fn(_FIX_THEN_PASS)
+    manifest_files = ["src/a.rs", "src/b.rs"]
+
+    result = run_pr_cycle(
+        workdir=tmp_path, pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="rust-dev", run_role_fn=fn, files=manifest_files,
+    )
+
+    assert result.verdict == "PASS"
+    dev_calls = [c for c in fn.calls if c["role"] == "backend"]
+    assert len(dev_calls) == 1
+    assert dev_calls[0]["files"] == manifest_files
 
 
 def test_full_route_keeps_the_expensive_review_model(tmp_path, rust_dev_prompts, monkeypatch):
@@ -167,7 +190,7 @@ def test_the_path_given_to_the_agent_is_absolute_and_carries_a_turn_budget(tmp_p
 
     seen = {}
 
-    def fake_write_plan(*, path, role, title, description, model, effort, cli, scope):
+    def fake_write_plan(*, path, role, title, description, model, effort, cli, scope, files=None):
         seen["description"] = description
         seen["scope"] = scope
 

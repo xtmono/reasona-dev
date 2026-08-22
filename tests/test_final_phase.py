@@ -116,7 +116,7 @@ def test_audit_blocks_when_the_profile_defines_no_prompt(tmp_path):
 def test_audit_runs_on_the_final_audit_model(tmp_path, rust_dev_prompts):
     seen = {}
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         seen["model"] = model.model
         seen["role"] = role
         return RoleRunResult(role=role, cycle=cycle,
@@ -138,7 +138,7 @@ def test_audit_prompt_carries_the_pr_and_worktree_identity(tmp_path, rust_dev_pr
     which now get it via pr_cycle._pr_unit_context_block()."""
     seen = {}
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         seen["prompt"] = prompt
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=parse_text_contract(PASS_TEXT),
@@ -158,7 +158,7 @@ def test_audit_findings_spend_the_final_stage_budget(tmp_path, rust_dev_prompts)
     the audit's own fix loop."""
     budget = FixBudget()
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         result = (
             parse_text_contract(MUST_FIX_TEXT) if role == "compliance"
             else ReviewResult(role_status=RoleStatus.COMPLETE)
@@ -226,7 +226,7 @@ def test_a_failing_ship_gate_dispatches_a_bounded_fix_before_blocking(tmp_path, 
     _stub(monkeypatch)
     dispatched = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         dispatched.append(cycle)
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
@@ -248,7 +248,7 @@ def test_port_reaches_the_ship_fix_dispatch(tmp_path, monkeypatch):
     _stub(monkeypatch)
     seen_ports = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         seen_ports.append(port)
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
@@ -276,7 +276,7 @@ def test_run_ship_cycle_stops_dispatching_once_ship_gate_passes(tmp_path):
 
     budget = FixBudget()
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
                              raw_output_path=Path("/dev/null"))
@@ -486,7 +486,7 @@ def test_a_gh_review_fix_commit_is_re_verified_by_the_final_audit(tmp_path, monk
 
     audit_calls = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if role == "compliance":
             audit_calls.append(cycle)
         return RoleRunResult(role=role, cycle=cycle,
@@ -512,7 +512,7 @@ def test_a_failing_audit_blocks_the_squash_but_the_pr_already_exists(tmp_path, m
     budget = FixBudget()
     budget.spend("review")  # earns an audit
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.ERROR),
                              raw_output_path=Path("/dev/null"))
@@ -662,7 +662,7 @@ def test_sync_cycle_resolves_a_real_conflict_via_dev(tmp_path):
     work = _repo_with_conflicting_origin(tmp_path)
     budget = FixBudget()
 
-    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         (workdir / "a.txt").write_text("resolved\n")
         _git(["add", "a.txt"], workdir)
         _git(["commit", "-q", "--no-edit"], workdir)
@@ -706,7 +706,7 @@ def test_sync_cycle_captures_a_mechanical_self_report(tmp_path):
     raw = tmp_path / "raw.txt"
     raw.write_text("resolved via import reorder\nCONFLICT_KIND: mechanical\n")
 
-    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         (workdir / "a.txt").write_text("resolved\n")
         _git(["add", "a.txt"], workdir)
         _git(["commit", "-q", "--no-edit"], workdir)
@@ -728,7 +728,7 @@ def test_sync_cycle_captures_a_substantive_self_report(tmp_path):
     raw = tmp_path / "raw.txt"
     raw.write_text("combined both sides' logic\nCONFLICT_KIND: substantive\n")
 
-    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         (workdir / "a.txt").write_text("resolved\n")
         _git(["add", "a.txt"], workdir)
         _git(["commit", "-q", "--no-edit"], workdir)
@@ -759,7 +759,7 @@ def test_sync_cycle_retries_the_fix_when_ci_fast_fails_after_resolution(tmp_path
 
     monkeypatch.setattr(final_phase.ci_gate, "run_fast", _fake_run_fast)
 
-    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if "resolve merge conflict" in title:
             (workdir / "a.txt").write_text("resolved\n")
             _git(["add", "a.txt"], workdir)
@@ -784,7 +784,7 @@ def test_sync_cycle_blocks_when_ci_fast_never_passes_after_resolution(tmp_path, 
 
     monkeypatch.setattr(final_phase.ci_gate, "run_fast", lambda *a, **kw: (False, "still broken"))
 
-    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if "resolve merge conflict" in title:
             (workdir / "a.txt").write_text("resolved\n")
             _git(["add", "a.txt"], workdir)
@@ -809,7 +809,7 @@ def test_sync_cycle_gives_up_after_its_budget_is_exhausted(tmp_path):
     work = _repo_with_conflicting_origin(tmp_path)
     budget = FixBudget()
 
-    def _never_resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _never_resolve(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
                              raw_output_path=Path("/dev/null"))

@@ -85,6 +85,18 @@ import yaml
 # result rather than truncating it.
 DEFAULT_ROLE_SCOPE = "large"
 
+# Every plan.yaml `write_role_plan()` writes has exactly ONE stage and
+# exactly ONE step (one role, one dispatch -- module docstring). Bernstein's
+# own plan loader assigns a task id of `f"plan-{stage_index}-{step_index}"`
+# from a plain 0-based `enumerate()` over stages and steps (verified against
+# the currently installed 3.16.0 source, `core/planning/plan_loader.py`
+# `_parse_step()`/`_parse_stage()`) -- so this dispatch shape's task id is
+# ALWAYS exactly this string, knowable before the run even starts, with no
+# need to read it back from Bernstein. See `pr_cycle._build_role_description()`
+# for what this is used for and the incident that motivated it
+# (`docs/ARCHITECTURE.md` §3.21).
+SINGLE_STEP_TASK_ID = "plan-0-0"
+
 
 @dataclass
 class DispatchResult:
@@ -114,6 +126,7 @@ def write_role_plan(
     effort: str,
     cli: str,
     scope: str = DEFAULT_ROLE_SCOPE,
+    files: list[str] | None = None,
 ) -> None:
     """A one-step plan.yaml for a single role dispatch.
 
@@ -125,6 +138,30 @@ def write_role_plan(
     No `completion_signals`. They are evaluated at the project root BEFORE
     the agent's branch merges, so they cannot see the artifact they would be
     gating on; the driver checks the file itself after the run returns.
+
+    `files`, when given, becomes the step's `files:` field -- Bernstein's
+    own plan schema maps this to `Task.owned_files` (`core/planning/
+    plan_loader.py`). This is NOT for reasona-dev's own use (the driver
+    never reads it back); it exists so Bernstein's OWN internal janitor can
+    attribute a completed task's work to real changed files. A real
+    incident (TAS plan 49 PR2, 2026-08-22, `docs/ARCHITECTURE.md` §3.20/
+    §3.21) showed what happens without it: the janitor's attribution logic
+    (`core/quality/janitor.py`'s `_attribute_task_work()`) tries `git log
+    --grep=<task_id>` first (reasona-dev's own commit messages never
+    contain Bernstein's task id -- they follow this project's own
+    Conventional-Commits convention), then falls back to a `git diff`
+    scoped to `owned_files` -- and gives up entirely, attributing NOTHING,
+    when `owned_files` is empty too. With nothing attributed and no
+    `completion_signals` to fall back on either, the janitor's "empty-diff
+    guard" hard-rejects a task that genuinely did real, committed work,
+    Bernstein skips the merge-back of that commit onto the unit branch
+    entirely, and its own worktree-cleanup step (unconditional, does not
+    check whether the merge actually happened) deletes the only branch
+    that ever pointed at it -- the commit survives only as a dangling,
+    unreachable git object. Passing `files` (the unit's own manifest
+    `files:` list) gives the fallback attribution path real ground to
+    stand on even though reasona-dev still does not stamp task ids into
+    commit messages.
     """
     plan = {
         "name": f"reasona-dev-{role}",
@@ -141,6 +178,7 @@ def write_role_plan(
                         "model": model,
                         "effort": effort,
                         "scope": scope,
+                        **({"files": files} if files else {}),
                     }
                 ],
             }

@@ -42,7 +42,7 @@ def _recording_role_fn(script_by_role_key):
     """
     calls = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         key = label or role
         calls.append((role, label, model.adapter))
         result = script_by_role_key.get(key, parse_text_contract(PASS_TEXT))
@@ -180,7 +180,7 @@ def test_bounded_route_never_fans_out_to_multiple_reviewers_or_ocr(tmp_path, rus
     ]
     calls = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         calls.append((cycle, role, label))
         idx = len(calls) - 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)

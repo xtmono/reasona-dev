@@ -39,6 +39,16 @@ def test_scope_is_how_the_turn_budget_travels(tmp_path):
     assert _plan(tmp_path, scope="small")["stages"][0]["steps"][0]["scope"] == "small"
 
 
+def test_files_becomes_the_steps_files_field_for_bernstein_owned_files(tmp_path):
+    step = _plan(tmp_path, files=["src/a.rs", "src/b.rs"])["stages"][0]["steps"][0]
+    assert step["files"] == ["src/a.rs", "src/b.rs"]
+
+
+def test_no_files_key_at_all_when_files_is_omitted_or_empty(tmp_path):
+    assert "files" not in _plan(tmp_path)["stages"][0]["steps"][0]
+    assert "files" not in _plan(tmp_path, files=[])["stages"][0]["steps"][0]
+
+
 def test_the_default_scope_is_the_widest_multiplier_available():
     """`large` doubles the effort-derived base -- the widest the adapter
     offers without a per-task override this path cannot set. A step with no

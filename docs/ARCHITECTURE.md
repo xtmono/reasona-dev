@@ -2776,6 +2776,93 @@ is already running; the verdict below is still the most current one" — `classi
 unchanged (it only reads `state`), so the immediate fix is minimal; `round_in_progress` is there for a
 future caller that wants to avoid double-dispatching a fix while a round it triggered is still running.
 
+## 3.21 The §3.20 incident's actual root cause -- Bernstein's own janitor attributed zero work to the task and skipped the merge entirely
+
+§3.20 fixed `recheck_route()`'s symptom (an empty diff misrouted as BOUNDED) without explaining WHY
+`pre_fix_head..HEAD` came back empty in the first place. Traced to ground in the installed Bernstein
+3.16.0 source (`core/quality/janitor.py`, `core/tasks/task_lifecycle.py`, `core/agents/
+spawner_merge.py`) against the real TAS repo's on-disk evidence (`.sdd/metrics/merge_result_*.jsonl`,
+`.sdd/runtime` -- no such directory in this version, `.sdd/runs/*/journal.jsonl`, the dangling commit
+`d2c0669` itself), not guessed.
+
+**The mechanism.** `task_lifecycle._evaluate_approval_gate()` returns `skip_merge=True` the instant
+`janitor_passed` is `False`, before ever consulting an approval-gate config (TAS's `bernstein.yaml`
+has none). `skip_merge=True` means `spawner_merge._do_merge()` is never even called -- confirmed by
+the TOTAL ABSENCE of any entry for this session in both `.sdd/metrics/merge_result_2026-08-22.jsonl`
+(written unconditionally whenever a merge is actually attempted) and `.sdd/runtime/refused_merges.jsonl`
+(written by the three NAMED refusal gates -- protected-branch, blast-radius, signed-file-scope; none
+of those fired here). The merge was not refused, it was never attempted.
+
+`janitor_passed` came from Bernstein's own "empty-diff guard" (`run_janitor()`,
+`_attribute_task_work()`), which tries to attribute the task's work to real changed files two ways:
+
+1. `git log --grep=<task_id>` (`--fixed-strings`) -- ANY commit whose message contains Bernstein's
+   own task id, regardless of which files it touched.
+2. Fallback: `git diff HEAD~1 -- <owned_files>` -- but ONLY if the task declared `owned_files`
+   (Bernstein's `Task.owned_files`, populated from a plan.yaml step's `files:` field). With no
+   `owned_files` at all, this fallback attributes nothing, by design (an unscoped last-commit diff
+   would misattribute a DIFFERENT task's landing commit to this one).
+
+`reasona_dev.bernstein_dispatch.write_role_plan()` set neither: no `completion_signals` (deliberate,
+its own docstring already explained why -- the driver checks the output artifact file itself) and no
+`files:` (never populated at all, until this fix). Attribution 1 failed because reasona-dev's dev-fix
+commits use plain Conventional-Commits messages, this project's own convention, with no Bernstein task
+id anywhere in them (confirmed: `git log -1 --format=%B d2c0669 | grep -c 8ef8580cabf1` -> `0`).
+Attribution 2 failed because `owned_files` was empty. With zero attributed files and zero
+`completion_signals` to fall back on as "nontrivial passing evidence" either
+(`_has_nontrivial_passing_signal()`), the guard could not downgrade to a warning -- it hard-rejected:
+`janitor REJECT (empty diff)`, `janitor_passed = False`.
+
+The agent's own commit was completely real (`STATUS: DONE`, `COMMIT: d2c0669` in its raw output,
+verified test/clippy runs) -- Bernstein's janitor was not wrong to demand SOME evidence before
+merging an agent's worktree onto the unit branch; reasona-dev simply never gave it any evidence in a
+form the janitor's attribution logic recognizes. And separately, `spawner_merge.
+merge_and_cleanup_worktree()`'s own cleanup step runs unconditionally once `skip_merge=True` short-
+circuits the merge (`_do_cleanup()`, not gated on `merge_result.success` at all unless the caller sets
+`defer_cleanup=True`, which the plain single-role dispatch path does not) -- so the agent's own
+worktree AND its branch were deleted regardless, and the one commit that held the real fix became a
+dangling, unreachable git object with no ref anywhere pointing at it. A legitimately-held "don't merge
+yet" verdict and a permanently-destroyed one are not the same outcome, and Bernstein's own cleanup
+step does not distinguish them here.
+
+**Two closing fixes, deliberately complementary, neither alone sufficient.**
+
+1. **`write_role_plan(files=...)`** -- threaded from `run_pr_cycle(files=...)` (the unit's own
+   manifest `files:` list, already available) through `run_role()`/`_run_dev_fix()` down to the
+   plan.yaml step's `files:` field, landing on `Task.owned_files`. Closes attribution path 2 for any
+   fix that stays within the unit's declared manifest -- the common case, and (very likely) what this
+   specific incident's rayon-comment fix actually was.
+
+   **Does not close the gap alone.** Attribution path 2 is ITSELF scoped to `owned_files` (`git diff
+   -- owned_files`); an agent that edits a file OUTSIDE the unit's declared manifest -- exactly the
+   poc-scope violation §3.19 already found and closed with a compliance-role check -- defeats this
+   fallback the identical way the original incident happened, no matter how accurately `owned_files`
+   was populated. `files` is threaded into `_run_dev_fix()`'s two `pr_cycle.py` call sites (review-fix,
+   scan-fix -- where the incident actually happened) and `final_phase._run_conflict_fix()` (using the
+   sync conflict's own `conflicted_files`, a strictly more precise list than the whole manifest for
+   that dispatch). NOT threaded into `final_phase.py`'s other three dev-fix call sites
+   (`_run_sync_ci_fix`, `run_final_audit`'s fix, `_run_ship_fix`) -- doing so would need `unit.files`
+   plumbed through several more layers (`run_final_phase` -> `run_final_stage` -> `orchestrate.py`)
+   for a benefit fix 2 below already provides those call sites regardless of `files`.
+
+2. **`SINGLE_STEP_TASK_ID` commit-trailer stamp** (`bernstein_dispatch.py`) -- every plan.yaml this
+   project writes has exactly one stage and one step, and Bernstein's task id is a plain 0-based
+   `f"plan-{stage_index}-{step_index}"` (`core/planning/plan_loader.py`, verified against the
+   installed 3.16.0 source) -- so it is ALWAYS the literal string `"plan-0-0"`, knowable before the
+   run even starts, with no round trip to Bernstein needed. `pr_cycle._build_role_description()` (the
+   shared instruction wrapper every `run_role()` dispatch already goes through) now tells the agent:
+   if this task involves a commit, add a `Bernstein-Task: plan-0-0` trailer line to the commit
+   message. This closes attribution path 1 -- the PRIMARY path, matched before path 2 is ever
+   consulted -- and it works regardless of which files the agent actually touched, in or out of the
+   declared manifest. This is the fix that actually closes the gap fix 1 cannot; fix 1 remains valuable
+   because it does not depend on the agent correctly following a prompt instruction every time.
+
+Neither fix can be verified end-to-end without a real `bernstein run` against a real agent (out of
+scope for this build's own test suite, same standing caveat as every other Bernstein-integration
+behavior this project has -- see README's "Status" section); both are unit-tested at the boundary
+this project's own code controls: `write_role_plan()` emits the `files:` step field correctly, and
+`_build_role_description()` emits the trailer instruction with the correct, hardcoded task id.
+
 ## 4. Directory structure
 
 ```

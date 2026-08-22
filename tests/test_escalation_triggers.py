@@ -45,7 +45,7 @@ def test_two_independent_reviewers_agreeing_escalates_on_the_first_cycle(tmp_pat
 
     fix_models = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if role == "backend":
             fix_models.append(model.model)
             return RoleRunResult(role=role, cycle=cycle,
@@ -74,7 +74,7 @@ def test_a_single_reviewer_finding_never_escalates_on_the_first_cycle(tmp_path, 
     agreement, not merely "a MUST_FIX exists"."""
     fix_models = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if role == "backend":
             fix_models.append(model.model)
             return RoleRunResult(role=role, cycle=cycle,
@@ -104,7 +104,7 @@ def test_scope_exceeded_escalates_when_the_full_route_follows_a_fix(tmp_path, ru
     fix_models = []
     calls = {"n": 0}
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if role == "backend":
             fix_models.append(model.model)
             return RoleRunResult(role=role, cycle=cycle,
@@ -156,7 +156,7 @@ def test_escalation_from_equals_escalation_to_still_fixes_on_a_convergence_trigg
 
     fix_calls = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if role == "backend":
             fix_calls.append(1)
             return RoleRunResult(role=role, cycle=cycle,

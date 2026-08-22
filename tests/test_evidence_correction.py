@@ -51,7 +51,7 @@ CORRECTION_CANNOT_SUPPLY_TEXT = "no evidence available\n"  # no MUST_FIX bullet 
 def _fn(script_by_key):
     calls = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         key = label or role
         calls.append(key)
         result = script_by_key.get(key, parse_text_contract(PASS_TEXT))
@@ -102,7 +102,7 @@ def test_a_successful_correction_fills_in_the_evidence_fields_sent_to_dev(tmp_pa
     })
     fix_prompts = []
 
-    def recording_fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def recording_fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if role == "backend":
             fix_prompts.append(prompt)
         return fn(workdir=workdir, role=role, title=title, prompt=prompt, model=model,
@@ -131,7 +131,7 @@ def test_the_finding_stays_must_fix_even_when_the_correction_cannot_supply_evide
     })
     fix_calls = []
 
-    def recording_fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def recording_fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if role == "backend":
             fix_calls.append(prompt)
         return fn(workdir=workdir, role=role, title=title, prompt=prompt, model=model,
@@ -184,7 +184,7 @@ def test_the_bounded_recheck_route_also_corrects_incomplete_findings(tmp_path, r
     ]
     calls = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         calls.append((cycle, role, label))
         idx = len(calls) - 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)

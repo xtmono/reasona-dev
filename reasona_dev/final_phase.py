@@ -236,6 +236,7 @@ def _run_conflict_fix(
         title=f"{pr_title} -- resolve merge conflict c{cycle}",
         prompt=_build_conflict_fix_prompt(base, conflicted_files),
         model=dev_model, rundir=rundir, cycle=cycle, port=port,
+        files=conflicted_files,
     )
 
 

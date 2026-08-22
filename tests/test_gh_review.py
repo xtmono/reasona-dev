@@ -17,7 +17,7 @@ def _snap(ci="passing", compliance="pass", bugbot="clean", comp_body="", bug_bod
     }
 
 
-def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
     return RoleRunResult(role=role, cycle=cycle,
                          review_result=ReviewResult(role_status=RoleStatus.COMPLETE),
                          raw_output_path=Path("/dev/null"))
@@ -89,7 +89,7 @@ def test_run_gh_review_dispatches_a_fix_on_ci_failure_then_passes(tmp_path, monk
 def test_port_reaches_the_fix_dispatch(tmp_path, monkeypatch):
     seen_ports = []
 
-    def _recording_fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _recording_fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         seen_ports.append(port)
         return RoleRunResult(role=role, cycle=cycle,
                              review_result=ReviewResult(role_status=RoleStatus.COMPLETE),

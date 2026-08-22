@@ -110,7 +110,7 @@ def test_generate_pr_summary_parses_the_dispatched_roles_output(tmp_path):
     from reasona_dev.model_config import ResolvedModel
     from reasona_dev.pr_cycle import RoleRunResult
 
-    def fake_run_role_fn(*, workdir, role, title, prompt, model, rundir, cycle, port, label=None):
+    def fake_run_role_fn(*, workdir, role, title, prompt, model, rundir, cycle, port, label=None, files=None):
         out = rundir / "pr_body-c1.raw.txt"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("CHANGES: did x\nWHY: needed for y\nTEST: 5 tests pass", encoding="utf-8")

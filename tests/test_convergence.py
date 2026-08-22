@@ -148,7 +148,7 @@ def test_pr_cycle_carries_the_inconclusive_count_across_cycles(tmp_path, rust_de
     }
     calls = []
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         calls.append(role)
         return RoleRunResult(
             role=role, cycle=cycle,

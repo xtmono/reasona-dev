@@ -47,7 +47,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from reasona_dev import ci_gate, config_file, cycles_log, ledger, memory
-from reasona_dev.bernstein_dispatch import DEFAULT_ROLE_SCOPE, run_plan_file, write_role_plan
+from reasona_dev.bernstein_dispatch import (
+    DEFAULT_ROLE_SCOPE,
+    SINGLE_STEP_TASK_ID,
+    run_plan_file,
+    write_role_plan,
+)
 from reasona_dev.cycle_gate import (
     ConvergenceTracker,
     FixBudget,
@@ -104,7 +109,24 @@ class CycleResult:
 def _build_role_description(prompt: str, raw_output_path: Path) -> str:
     """Appends the file-handoff instruction to a role's prompt -- unchanged
     from the old plan-step description, just no longer embedded in a YAML
-    file (see module docstring).
+    file (see module docstring) -- plus a commit-message stamp instruction
+    that closes a gap `owned_files` alone cannot (see `run_role()`'s
+    `files` parameter docstring and `docs/ARCHITECTURE.md` §3.21 for the
+    full incident).
+
+    **Why a commit-trailer stamp, on top of `owned_files`.** Bernstein's
+    janitor attributes a completed task's work FIRST by `git log
+    --grep=<task_id>` (any file, no scope restriction) and only falls back
+    to a `git diff` scoped to `owned_files` (restricted to those declared
+    paths) when no commit matches. `owned_files` only helps when the
+    agent's actual diff stays inside the unit's declared manifest files --
+    an agent that (incorrectly) edits a file outside that scope defeats the
+    fallback the exact same way the original incident happened, no matter
+    how accurately `owned_files` was populated. Stamping the task id
+    directly into the commit message makes attribution succeed via the
+    PRIMARY path instead, independent of which files were actually
+    touched -- the only fix that closes the gap regardless of whether the
+    agent stayed in scope.
     """
     return (
         f"{prompt}\n\n"
@@ -112,7 +134,11 @@ def _build_role_description(prompt: str, raw_output_path: Path) -> str:
         "When you are completely done, write your ENTIRE output above "
         "(the markdown report AND the RESULT block, verbatim, nothing "
         f"added or removed) to the file `{raw_output_path}` as your "
-        "final action, then stop."
+        "final action, then stop.\n\n"
+        "If this task involves making a git commit, add this exact line as "
+        "its own line in the commit message (a trailer, after the subject "
+        f"and body): `Bernstein-Task: {SINGLE_STEP_TASK_ID}` -- required so "
+        "this dispatch's work is correctly attributed and merged."
     )
 
 
@@ -128,6 +154,7 @@ def run_role(
     port: int = 8052,
     scope: str = DEFAULT_ROLE_SCOPE,
     label: str | None = None,
+    files: list[str] | None = None,
 ) -> RoleRunResult:
     """Dispatch one role once via `bernstein run` on a one-step plan.
 
@@ -172,7 +199,7 @@ def run_role(
         path=plan_path, role=role, title=title,
         description=_build_role_description(prompt, raw_output_path),
         model=model.model, effort=model.effort, cli=model.adapter,
-        scope=scope,
+        scope=scope, files=files,
     )
     dispatch = run_plan_file(plan_path, workdir, port=port)
 
@@ -486,6 +513,7 @@ def _run_dev_fix(
     port: int = 8052,
     pre_fix_head: str | None = None,
     ci_fast_command: str | None = None,
+    files: list[str] | None = None,
 ) -> RoleRunResult:
     """Dispatch one dev fix-cycle. `escalated_model` (from
     `GateDecision.escalated_model`) overrides `dev_model.model` for exactly
@@ -514,7 +542,7 @@ def _run_dev_fix(
     result = run_role_fn(
         workdir=workdir, role="backend", title=f"{pr_title} -- fix c{cycle}",
         prompt=_build_fix_prompt(pr_title, findings), model=model, rundir=rundir, cycle=cycle,
-        port=port,
+        port=port, files=files,
     )
     if ci_fast_command:
         ok, tail = ci_gate.run_fast(workdir, ci_fast_command, pre_fix_head=pre_fix_head)
@@ -885,7 +913,7 @@ def run_pr_cycle(
                 workdir=workdir, pr_title=pr_title, findings=pending_confirm,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
                 rundir=rundir, cycle=cycle, run_role_fn=run_role_fn, port=port,
-                pre_fix_head=pre_fix_head, ci_fast_command=ci_fast_command,
+                pre_fix_head=pre_fix_head, ci_fast_command=ci_fast_command, files=files,
             )
             role_results.append(fix_result)
             _log("review", cycle, fix_result, resolved["dev"])
@@ -1025,7 +1053,7 @@ def run_pr_cycle(
                 workdir=workdir, pr_title=pr_title, findings=merged.must_fix,
                 dev_model=resolved["dev"], escalated_model=decision.escalated_model,
                 rundir=rundir, cycle=cycle, run_role_fn=run_role_fn, port=port,
-                pre_fix_head=pre_fix_head, ci_fast_command=ci_fast_command,
+                pre_fix_head=pre_fix_head, ci_fast_command=ci_fast_command, files=files,
             )
             role_results.append(fix_result)
             _log("scan", cycle, fix_result, resolved["dev"])

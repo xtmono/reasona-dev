@@ -2,7 +2,8 @@ from pathlib import Path
 
 from reasona_dev.finding_adapter import ReviewResult, RoleStatus, parse_text_contract
 from reasona_dev.model_config import ResolvedModel
-from reasona_dev.pr_cycle import RoleRunResult, _is_docs_only, run_pr_cycle
+from reasona_dev.bernstein_dispatch import SINGLE_STEP_TASK_ID
+from reasona_dev.pr_cycle import RoleRunResult, _build_role_description, _is_docs_only, run_pr_cycle
 
 _RESOLVED = {
     "dev": ResolvedModel("dev", "sonnet", "claude", "high", "default"),
@@ -32,7 +33,7 @@ def _stub_role_fn(*, script):
     """
     calls = {"n": 0}
 
-    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def _fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         idx = calls["n"]
         calls["n"] += 1
         result = script[idx] if idx < len(script) else parse_text_contract(PASS_TEXT)
@@ -181,7 +182,7 @@ def test_docs_only_unit_skips_bugbot_but_still_runs_compliance(tmp_path, rust_de
     .md/.toml/.yaml/.json) skips it. compliance always runs regardless."""
     calls = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         calls.append(role)
         return RoleRunResult(role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
                              raw_output_path=Path("/dev/null"))
@@ -198,7 +199,7 @@ def test_docs_only_unit_skips_bugbot_but_still_runs_compliance(tmp_path, rust_de
 def test_a_unit_with_any_source_file_still_dispatches_bugbot(tmp_path, rust_dev_prompts):
     calls = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         calls.append(role)
         return RoleRunResult(role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
                              raw_output_path=Path("/dev/null"))
@@ -215,7 +216,7 @@ def test_no_declared_files_is_not_treated_as_docs_only(tmp_path, rust_dev_prompt
     docs-only -- bugbot still runs, the safe default."""
     calls = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         calls.append(role)
         return RoleRunResult(role=role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
                              raw_output_path=Path("/dev/null"))
@@ -239,7 +240,7 @@ def test_port_reaches_every_run_role_fn_dispatch(tmp_path, rust_dev_prompts):
     seen_ports = []
     calls = {"n": 0}
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         seen_ports.append(port)
         idx = calls["n"]
         calls["n"] += 1
@@ -298,7 +299,7 @@ def test_pr_section_is_appended_to_the_review_prompt(tmp_path, rust_dev_prompts)
     must thread that text into the review dispatch."""
     seen_prompts = []
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         seen_prompts.append(prompt)
         return RoleRunResult(role=label or role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT), raw_output_path=Path("/dev/null"))
 
@@ -323,7 +324,7 @@ def test_manifest_files_are_listed_in_the_compliance_prompt(tmp_path, rust_dev_p
     (`compliance.md`'s poc-scope check consumes it)."""
     seen = {}
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         seen.setdefault(label or role, prompt)
         return RoleRunResult(
             role=label or role, cycle=cycle, review_result=parse_text_contract(PASS_TEXT),
@@ -339,6 +340,20 @@ def test_manifest_files_are_listed_in_the_compliance_prompt(tmp_path, rust_dev_p
     assert "crates/tas-plan/src/scaling_fixture.rs" in seen["compliance"]
     assert "crates/tas-plan/src/lib.rs" in seen["compliance"]
     assert "[Manifest files for this PR unit]" in seen["compliance"]
+
+
+def test_role_description_instructs_stamping_the_deterministic_task_id():
+    """Real incident (TAS plan 49 PR2, 2026-08-22, docs/ARCHITECTURE.md
+    §3.21): Bernstein's janitor attributes work FIRST by `git log
+    --grep=<task_id>`, independent of which files were touched -- the only
+    attribution path that survives an agent straying outside its declared
+    `owned_files`. Every `write_role_plan()` call this project makes is a
+    single-stage, single-step plan, so Bernstein's own 0-based
+    `f"plan-{stage_index}-{step_index}"` task id is always exactly
+    `SINGLE_STEP_TASK_ID` -- knowable up front, no round trip needed."""
+    description = _build_role_description("do the thing", Path("/tmp/out.txt"))
+    assert f"Bernstein-Task: {SINGLE_STEP_TASK_ID}" in description
+    assert SINGLE_STEP_TASK_ID == "plan-0-0"
 
 
 # --- B-5: local CI gate ------------------------------------------------------
@@ -362,7 +377,7 @@ def test_ci_fast_failure_reverts_the_fix_and_records_it(tmp_path, rust_dev_promp
     _git_repo(tmp_path)
     (tmp_path / ".reasona" / "reasona.yaml").write_text("ci:\n  fast: exit 1\n")
 
-    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None):
+    def fn(*, workdir, role, title, prompt, model, rundir, cycle, label=None, port=None, files=None):
         if role == "backend":
             (tmp_path / "a.txt").write_text("v2 -- broken fix\n")
             import subprocess
