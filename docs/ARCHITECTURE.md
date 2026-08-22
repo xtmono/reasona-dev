@@ -2776,6 +2776,47 @@ is already running; the verdict below is still the most current one" — `classi
 unchanged (it only reads `state`), so the immediate fix is minimal; `round_in_progress` is there for a
 future caller that wants to avoid double-dispatching a fix while a round it triggered is still running.
 
+## 3.20 `recheck_route()`'s empty-set-is-a-subset gap — a dev-fix commit that never landed still routed BOUNDED
+
+Found and reported by a peer session running the real TAS plan 49 PR2 pilot, independently
+re-verified against the actual repo/PR state on this same machine before fixing (`git fsck
+--unreachable`, `git branch --all --contains`, the reflog — the fix commit really was dangling,
+with no ref reaching it, its parent the unit branch's HEAD from before the dev-fix dispatch).
+
+`cycle_gate.recheck_route(repo, pre_fix_head, finding_files)` decides BOUNDED (confirm a narrow
+fix landed, cheap re-check) vs FULL (something changed outside the finding set, full re-review)
+from `fix_files <= finding_files` — `fix_files` being `git diff --name-only pre_fix_head..HEAD`.
+The empty set is trivially a subset of any set, so when the diff came back completely empty —
+because the dev-fix dispatch's own agent committed inside its Bernstein-managed SUB-worktree, but
+Bernstein's own "spawn, execute, merge" sequence (`bernstein_dispatch.run_plan_file()`'s own
+docstring) never merged that commit back onto the unit branch this diff runs against — the
+function still said BOUNDED, exactly as if a real, correctly-scoped fix had landed. The next
+dispatch was a bounded recheck confirming a fix that was never actually applied: the reviewer
+would re-find the same MUST_FIX on genuinely unchanged code, misreadable as a recurrence (an
+agent that keeps failing to fix the same thing) rather than what it actually was (an infra
+failure with literally nothing to route on, narrow or broad). Fixed by requiring `fix_files` to
+be non-empty before BOUNDED is even considered — `_safe_recheck_route()` already returns FULL for
+an empty `finding_files`; this closes the exact same class of gap for an empty `fix_files`.
+
+**A second, independently-found gap in the same incident, one layer up.** `pr_cycle.run_role()`
+only ever inspected `bernstein run`'s own exit code (`DispatchResult.returncode`) when the
+dispatched role's output file was MISSING — when the file existed (as it did here: the agent's
+own turn genuinely wrote `STATUS: DONE, COMMIT: <sha>`), a non-zero exit from the SAME `bernstein
+run` invocation (plausibly its own merge-back step failing, a step that runs AFTER the agent's
+turn per the "spawn, execute, merge" sequence) was silently discarded — the exact failure this
+incident hit left no trace anywhere reasona-dev logs. Fixed by threading `dispatch.returncode`
+into `RoleRunResult.error_detail` whenever it is non-zero, regardless of whether the output file
+exists — diagnostic only, never reclassifying `role_status` or discarding the parsed
+`review_result`, since a merge-back failure does not necessarily mean the agent's own output text
+is untrustworthy.
+
+**Not (yet) fixed here: why Bernstein's own merge-back step didn't run.** That sequence is
+entirely internal to the `bernstein run` subprocess reasona-dev shells out to (`DispatchResult`'s
+own docstring: "The role's actual output is the artifact file, never this") — outside this
+repo's code, and the peer session's own local reproduction evidence (the dangling commit, the
+agent's raw output, the now-empty `.sdd/worktrees/` since Bernstein's own cleanup already ran)
+was the basis for confirming the SYMPTOM here, not for diagnosing Bernstein's own internal cause.
+
 ## 3.21 The §3.20 incident's actual root cause -- Bernstein's own janitor attributed zero work to the task and skipped the merge entirely
 
 §3.20 fixed `recheck_route()`'s symptom (an empty diff misrouted as BOUNDED) without explaining WHY

@@ -237,3 +237,59 @@ def test_a_missing_output_file_records_why_not_just_that(tmp_path, monkeypatch):
     assert r.review_result.role_status.value == "ERROR"
     assert "exit=1" in r.error_detail
     assert "turn budget" in r.error_detail
+
+
+def test_a_nonzero_exit_with_real_output_is_recorded_but_not_reclassified(tmp_path, monkeypatch):
+    """Real incident (TAS plan 49 PR2, 2026-08-22): `bernstein run`'s own
+    post-agent merge-back step can fail AFTER the agent already wrote a
+    legitimate output file -- `run_role()` used to only ever look at
+    `dispatch.returncode` when the output file was MISSING, so this kind
+    of failure left no trace at all. The parsed result must still be
+    returned as-is (the output text itself may be perfectly trustworthy);
+    only `error_detail` should surface the exit code as a diagnostic."""
+    from reasona_dev import bernstein_dispatch, pr_cycle as pc
+
+    def fake_write_plan(*, path, role, title, description, model, effort, cli, scope):
+        marker = "to the file `"
+        start = description.index(marker) + len(marker)
+        out_path = description[start:description.index("`", start)]
+        Path(out_path).write_text(PASS_TEXT)
+
+    monkeypatch.setattr(pc, "write_role_plan", fake_write_plan)
+    monkeypatch.setattr(
+        pc, "run_plan_file",
+        lambda *a, **k: bernstein_dispatch.DispatchResult(
+            returncode=1, stderr_tail="merge-back to unit branch failed"),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    r = pc.run_role(
+        workdir=Path("."), role="dev", title="t", prompt="p",
+        model=_RESOLVED["review"], rundir=Path("./run"), cycle=1,
+    )
+
+    assert r.review_result.gate() == "PASS"  # the parsed output is untouched
+    assert "exit=1" in r.error_detail
+    assert "merge-back" in r.error_detail
+
+
+def test_a_zero_exit_with_output_has_no_error_detail(tmp_path, monkeypatch):
+    from reasona_dev import bernstein_dispatch, pr_cycle as pc
+
+    monkeypatch.setattr(pc, "write_role_plan", lambda **k: None)
+    monkeypatch.setattr(
+        pc, "run_plan_file",
+        lambda plan_path, workdir, **k: (
+            plan_path.parent.mkdir(parents=True, exist_ok=True),
+            (tmp_path / "run" / "dev-c1.raw.txt").parent.mkdir(parents=True, exist_ok=True),
+            (tmp_path / "run" / "dev-c1.raw.txt").write_text(PASS_TEXT),
+            bernstein_dispatch.DispatchResult(returncode=0, stderr_tail=""),
+        )[-1],
+    )
+
+    r = pc.run_role(
+        workdir=tmp_path, role="dev", title="t", prompt="p",
+        model=_RESOLVED["review"], rundir=tmp_path / "run", cycle=1,
+    )
+
+    assert r.error_detail is None

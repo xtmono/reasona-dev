@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from reasona_dev.cycle_gate import (
@@ -13,8 +15,52 @@ from reasona_dev.cycle_gate import (
     FixBudget,
     RecurrenceTracker,
     evaluate,
+    recheck_route,
 )
 from reasona_dev.finding_adapter import Finding, ReviewResult, RoleStatus, Disposition, Severity
+
+
+def _git_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "src").mkdir()
+    (repo / "src" / "a.rs").write_text("fn a() {}\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return repo, head
+
+
+def test_recheck_route_empty_diff_is_full_not_bounded(tmp_path):
+    """Real incident (TAS plan 49 PR2, 2026-08-22): a dev-fix dispatch's
+    commit never landed on the unit branch (Bernstein's own merge-back
+    step did not run), so `pre_fix_head..HEAD` diffed completely empty.
+    The empty set is trivially a subset of any `finding_files`, so the old
+    `fix_files <= finding_files` check misrouted this as BOUNDED -- as if
+    a real, narrowly-scoped fix had landed. Must be FULL: there was no fix
+    to confirm at all."""
+    repo, head = _git_repo(tmp_path)
+    assert recheck_route(str(repo), head, {"src/a.rs"}) == "FULL"
+
+
+def test_recheck_route_bounded_when_fix_touches_only_finding_files(tmp_path):
+    repo, head = _git_repo(tmp_path)
+    (repo / "src" / "a.rs").write_text("fn a() { 1 }\n")
+    subprocess.run(["git", "commit", "-q", "-am", "fix"], cwd=repo, check=True)
+    assert recheck_route(str(repo), head, {"src/a.rs"}) == "BOUNDED"
+
+
+def test_recheck_route_full_when_fix_touches_a_file_outside_findings(tmp_path):
+    repo, head = _git_repo(tmp_path)
+    (repo / "src" / "b.rs").write_text("fn b() {}\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fix"], cwd=repo, check=True)
+    assert recheck_route(str(repo), head, {"src/a.rs"}) == "FULL"
 
 
 def test_every_stage_cap_matches_dev_ralfs_budget_py():

@@ -216,9 +216,29 @@ def run_role(
         )
 
     text = raw_output_path.read_text(encoding="utf-8")
+    # `dispatch.ok` is diagnostic-only here, deliberately not gating on it
+    # the way a missing output file does: `bernstein run`'s own "spawn,
+    # execute, merge" sequence (`bernstein_dispatch.run_plan_file()`'s
+    # docstring) can write the role's real output before a LATER step in
+    # that same run (the agent-worktree-to-unit-branch merge) fails, so a
+    # non-zero exit here does not necessarily mean the output text itself
+    # is untrustworthy -- but it is exactly the kind of signal a real
+    # incident showed gets silently discarded otherwise (TAS plan 49 PR2,
+    # 2026-08-22: the dev-fix agent's commit never reached the unit branch,
+    # `cycle_gate.recheck_route()`'s own fix closes the routing half of
+    # that incident; this half makes the underlying dispatch failure
+    # visible in `cycles_log` instead of a clean-looking dispatch that
+    # quietly produced no code change). Recorded, never raised or
+    # re-classified as ERROR -- the parsed `review_result` is still
+    # returned as-is.
+    error_detail = None if dispatch.ok else (
+        f"bernstein run exit={dispatch.returncode} despite producing output; "
+        f"stderr={dispatch.stderr_tail[:200]!r}"
+    )
     return RoleRunResult(
         role=file_key, cycle=cycle,
         review_result=parse_role_output(text), raw_output_path=raw_output_path,
+        error_detail=error_detail,
     )
 
 

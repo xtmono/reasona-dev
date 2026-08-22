@@ -358,13 +358,32 @@ def recheck_route(repo: str, pre_fix_head: str, finding_files: set[str]) -> str:
     pure function of `git diff --name-only`, unrelated to any model's
     self-reported severity -- deliberately not routed by severity
     self-classification (dev-ralf-renewal-claude.md §3.3).
+
+    **An EMPTY `fix_files` is never BOUNDED, even though the empty set is
+    trivially a subset of `finding_files`.** A real incident (TAS plan 49
+    PR2, 2026-08-22) hit exactly this: the dev-fix dispatch's own agent
+    committed inside its OWN Bernstein-managed sub-worktree, but that
+    commit never landed on the unit branch `pre_fix_head..HEAD` is
+    diffed against (Bernstein's own "spawn, execute, merge" sequence --
+    `bernstein_dispatch.run_plan_file()`'s docstring -- did not merge it
+    back; the commit was later found dangling via `git fsck
+    --unreachable`, unreachable from any ref). `fix_files <= finding_files`
+    is `True` for `fix_files = set()` regardless of WHY the diff is empty,
+    so this silently routed a completely unfixed PR to `"BOUNDED"` --
+    "confirm the narrow fix landed" on code that never changed at all,
+    which would have had the SAME reviewer re-confirm a finding that was
+    never addressed, misread as recurrence rather than as an infra failure
+    with nothing to route on either narrowly OR broadly. `finding_files`
+    itself being empty already returns `"FULL"` via `_safe_recheck_route()`
+    before this function is even called; this closes the analogous gap for
+    an empty `fix_files`.
     """
     out = subprocess.run(
         ["git", "-C", repo, "diff", "--name-only", f"{pre_fix_head}..HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout
     fix_files = {line.strip() for line in out.splitlines() if line.strip()}
-    return "BOUNDED" if fix_files <= finding_files else "FULL"
+    return "BOUNDED" if fix_files and fix_files <= finding_files else "FULL"
 
 
 @dataclass
