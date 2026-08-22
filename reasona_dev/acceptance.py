@@ -313,7 +313,7 @@ def main(argv: list[str]) -> int:
     **A unit with no declared criteria currently PASSES with a warning.**
     Refusing outright is the eventual target, but flipping it on today
     would block every plan written before the field existed. The warning is
-    counted in `.reasona/cycles.jsonl` by the driver, so the decision to
+    counted in `.reasona/log/cycles.jsonl` by the driver, so the decision to
     promote it to a refusal can be made from the measured coverage rate
     rather than by guess.
     """

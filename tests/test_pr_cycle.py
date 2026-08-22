@@ -56,6 +56,36 @@ def test_clean_pass_no_fix_cycles(tmp_path, rust_dev_prompts):
     assert result.scan_cycles == 1
 
 
+def test_cycles_and_memory_land_in_repo_workdir_not_the_units_own_worktree(tmp_path, rust_dev_prompts):
+    """The incident this closes: `orchestrate._process_unit()` calls
+    `run_pr_cycle(workdir=<unit's own worktree>, ...)`, and that worktree
+    is deleted outright by `worktree.remove_unit_worktree()` on a
+    successful merge -- cycles.jsonl/`.reasona/memory/` written there are
+    lost the moment that happens. `repo_workdir` (the TOP-LEVEL repo) is
+    where they must actually land."""
+    from reasona_dev import cycles_log
+
+    # `rust_dev_prompts` seeds prompts at `tmp_path/.reasona/prompts/`, so
+    # `workdir` (used for prompt resolution) stays `tmp_path` itself; the
+    # top-level "repo" the log must land in is a genuinely separate
+    # directory, standing in for the real top-level repo a unit's own
+    # worktree is never the same directory as.
+    unit_worktree = tmp_path
+    top_level_repo = tmp_path / "repo"
+    top_level_repo.mkdir()
+
+    script = [parse_text_contract(PASS_TEXT), parse_text_contract(PASS_TEXT), parse_text_contract(PASS_TEXT)]
+    run_pr_cycle(
+        workdir=unit_worktree, repo_workdir=top_level_repo,
+        pr_title="PR 1", resolved=_RESOLVED, rundir=tmp_path / "run",
+        profile="rust-dev", run_role_fn=_stub_role_fn(script=script),
+    )
+
+    assert not cycles_log.cycles_path(unit_worktree).exists()
+    assert cycles_log.cycles_path(top_level_repo).is_file()
+    assert len(cycles_log.read_records(top_level_repo)) > 0
+
+
 def test_review_fix_required_then_passes(tmp_path, rust_dev_prompts):
     script = [
         parse_text_contract(MUST_FIX_TEXT),  # review c1: FIX_REQUIRED

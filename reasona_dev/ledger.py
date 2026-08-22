@@ -2,16 +2,18 @@
 interruption (network failure, killed process) without redoing finished
 work, automatically, on a plain re-run of the same command.
 
-**Layout: `<workdir>/.reasona/dev/<plan_name>/<stage_name>/`, not a flat
-`.reasona/`.** (Named `dev/`, not `log/` -- a repo that runs both
-reasona-dev and reasona-plan against the same `--workdir` (e.g.
-`thaki-agent-security`) needs the two tools' runtime state to never
-collide even though they now share the same `.reasona/` root; reasona-plan
-keeps its own state under `.reasona/plan/<plan_name>/` -- see that
-project's `orchestrate.paths_for()`. Neither tool's root would collide
-with the other's even by accident, since the tool-name segment IS the
-disambiguator.) Every runtime artifact used to live directly under
-`.reasona/` keyed only by `stage_name` (`.reasona/runs/pr-1/...`,
+**Layout: `<workdir>/.reasona/log/dev/<plan_name>/<stage_name>/`, not a flat
+`.reasona/`.** `.reasona/log/` (§3.18) is the boundary for everything that
+must be anchored to the TOP-LEVEL repo and must never be copied into a
+unit's own worktree -- `cycles.jsonl` and `.reasona/log/memory/` live
+there too, for the identical reason. The `dev/` segment under it is the
+tool-name disambiguator: a repo that runs both reasona-dev and
+reasona-plan against the same `--workdir` (e.g. `thaki-agent-security`)
+needs the two tools' runtime state to never collide even though they
+share the same `.reasona/log/` root; reasona-plan keeps its own state
+under `.reasona/log/plan/<plan_name>/` -- see that project's
+`orchestrate.paths_for()`. Every runtime artifact used to live directly
+under `.reasona/` keyed only by `stage_name` (`.reasona/runs/pr-1/...`,
 `.reasona/ledger-pr-1.json`) -- fine for one plan at a time, but two
 different plans that both happen to name a unit `pr-1` (a common name,
 since `plan_compile._stage_name()` just does `f"pr-{index}"`) would
@@ -21,9 +23,9 @@ the same value `cli.py` already uses for `plan_name=` when compiling)
 makes every path plan-scoped, and namespacing by `stage_name` under that
 keeps every PR unit's own ledger/runs separate within a plan -- both
 levels double as a natural place to go look at what actually happened
-later (`.reasona/dev/<plan>/<pr-N>/*.raw.txt` is a real, browsable per-unit
-history sitting right next to that unit's own ledger, not a shared bucket
-a second plan can stomp on).
+later (`.reasona/log/dev/<plan>/<pr-N>/*.raw.txt` is a real, browsable
+per-unit history sitting right next to that unit's own ledger, not a
+shared bucket a second plan can stomp on).
 
 **Two kinds of state, both under the same directory:**
 
@@ -86,11 +88,11 @@ def _write(path: Path, data: dict) -> None:
 
 
 def run_dir(workdir: str | Path, plan_name: str) -> Path:
-    return Path(workdir) / ".reasona" / "dev" / plan_name
+    return Path(workdir) / ".reasona" / "log" / "dev" / plan_name
 
 
 def unit_dir(workdir: str | Path, plan_name: str, stage_name: str) -> Path:
-    """`<workdir>/.reasona/dev/<plan_name>/<stage_name>/` -- also where
+    """`<workdir>/.reasona/log/dev/<plan_name>/<stage_name>/` -- also where
     `pr_cycle.run_role()` writes each cycle's raw per-role output
     (`<role>-c<cycle>.raw.txt`) directly, alongside this unit's `ledger.json`;
     no further nesting, so `ls` on one PR unit's directory already shows

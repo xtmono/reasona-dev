@@ -85,7 +85,7 @@ def _ensure_root_link(workdir: Path) -> None:
     # && git commit`, and the merge-back then materialised the file in the
     # project root AFTER the driver had already looked for it and recorded
     # the role as ERROR.
-    for entry in (".reasona/runs/", ".reasona/cycles.jsonl", ".reasona/memory/", ".sdd/"):
+    for entry in (".reasona/runs/", ".reasona/log/", ".sdd/"):
         _ensure_gitignored(workdir, entry)
 
 

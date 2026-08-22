@@ -472,6 +472,7 @@ def _process_unit(
     def _dispatch_cycle() -> CycleResult:
         return run_pr_cycle_fn(
             workdir=unit_workdir,
+            repo_workdir=workdir,
             pr_title=f"PR {up.index}: {up.title}",
             resolved=resolved,
             rundir=log_base / up.stage_name,
@@ -509,7 +510,7 @@ def _process_unit(
             # final_phase.run_final_phase() on why it can no longer be
             # evaluated up front here.
             tail = final_stage_fn(
-                workdir=unit_workdir, stage_name=up.stage_name,
+                workdir=unit_workdir, repo_workdir=workdir, stage_name=up.stage_name,
                 pr_title=f"{up.title}", unit_type=up.unit.unit_type, unit=up.unit,
                 profile=up.profile, resolved=resolved,
                 rundir=log_base / up.stage_name,
@@ -550,7 +551,7 @@ def _process_unit(
             # check (that only exists inside the merge tail, on
             # post-sync/post-audit code), but a real signal costs
             # nothing extra here since nothing merges either way.
-            decision = ship_gate_fn(unit_workdir, up.stage_name, cycle_verdict=cycle.verdict)
+            decision = ship_gate_fn(unit_workdir, up.stage_name, cycle_verdict=cycle.verdict, log_workdir=workdir)
         if tail is not None and tail.status == final_phase_mod.NEEDS_REVIEW:
             # The resync bound above was exhausted and it is still
             # substantive -- report it, don't silently proceed to
@@ -617,14 +618,28 @@ def _run_units_concurrently(
     `known` set) -- not in a synchronized round, so a fast 2-cycle unit and
     a slow 6-cycle one never block each other.
 
-    Every reasona-dev file a unit touches during its own cycle (`cycles.
-    jsonl`, `ledger.json`, `.reasona/memory/`) already lives under that
-    UNIT'S OWN worktree or is namespaced by `stage_name` under the shared
-    log dir (`reasona_dev.ledger.unit_dir()`) -- two units never write the
-    same path, so no file lock is needed here. The only state genuinely
-    shared between threads is this function's own in-memory `by_index`
-    (read by `_blocking_dependency()` to decide what is ready next),
-    guarded by `_lock`.
+    `ledger.json` is namespaced by `stage_name` under the shared log dir
+    (`reasona_dev.ledger.unit_dir()`) -- two units never write the same
+    ledger path, so nothing to lock there. `cycles.jsonl` and `.reasona/
+    log/memory/*.md` are DIFFERENT: both are deliberately a single
+    repo-wide file/directory, not per-unit (§3.18 -- they have to survive
+    `worktree.remove_unit_worktree()` deleting a shipped unit's own
+    worktree, so they were moved OFF unit-scoped paths entirely). Under
+    `job>1`, multiple units' threads append to the SAME `cycles.jsonl`
+    concurrently. Still safe without a lock: `cycles_log.record_*()` opens
+    the file in append mode and writes each record as ONE `f.write()` call
+    -- POSIX guarantees an `O_APPEND`-mode write of that size is atomic, so
+    concurrent writers interleave whole lines, never partial ones.
+    `memory.regenerate()` recomputing `.reasona/log/memory/*.md` from
+    `cycles.jsonl` concurrently is a real, accepted race (two threads can
+    each read a slightly different snapshot and the last writer's version
+    wins) -- benign because it is a full, deterministic recomputation, not
+    a merge: the NEXT unit's `regenerate()` call (there is always a next
+    one, or the run is ending) recomputes from the by-then-complete file
+    and corrects any staleness, so nothing is ever silently wrong for long.
+    The only OTHER state genuinely shared between threads is this
+    function's own in-memory `by_index` (read by `_blocking_dependency()`
+    to decide what is ready next), guarded by `_lock`.
     """
     import threading
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -813,7 +828,7 @@ def run_plan(
     Useful when the ledger itself is unavailable or wrong.
 
     `plan_name` namespaces every ledger/run-output path under
-    `<workdir>/.reasona/dev/<plan_name>/<stage_name>/` (`reasona_dev.ledger`)
+    `<workdir>/.reasona/log/dev/<plan_name>/<stage_name>/` (`reasona_dev.ledger`)
     -- two plans that both happen to name a unit `pr-1` (a common name,
     since `plan_compile._stage_name()` is just `f"pr-{index}"`) do not
     share files or corrupt each other's resume state. `rundir` overrides

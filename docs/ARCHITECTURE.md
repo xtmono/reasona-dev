@@ -914,7 +914,7 @@ this is the one and only moment measurement can be built into the design from th
 original analysis itself noted in its final reservation that "running proposal 5 first could
 replace this analysis's own conclusions with actual measurement."
 
-One row per role dispatch and one row per gate decision are appended to `.reasona/cycles.jsonl`.
+One row per role dispatch and one row per gate decision are appended to `.reasona/log/cycles.jsonl` (renamed from `.reasona/cycles.jsonl`, §3.18).
 The join key is `Finding.key()`, which excludes the line number, so a fix that shifts line numbers
 does not cause the same finding to be mistaken for a new one. Since instrumentation must never be
 able to fail a PR cycle, it swallows every exception — a missed measurement is a cost, but a cycle
@@ -932,7 +932,7 @@ basis exist for deciding which role to cut.
 
 ### 3.7.7 Memory — a generated artifact, not authored content
 
-`.reasona/memory/*.md` is **generated** from `cycles.jsonl`. The constraint that it must never be
+`.reasona/log/memory/*.md` (renamed from `.reasona/memory/`, §3.18) is **generated** from `cycles.jsonl`. The constraint that it must never be
 hand-written is itself the design. The memory directory is the same kind of surface as skill
 documentation, and skill documentation bloats not because of its format but because adding an entry
 is easy while nobody is ever responsible for removing one — dev-ralf's own `SKILL.md` reached 472
@@ -1624,10 +1624,12 @@ issue is a gh-pr-stage artifact, §3.12). So the worktree/branch starts out name
 (`git branch -m`) once the issue exists — always the "on a feature/temp branch" path `/gh-pr` itself
 documents, never `checkout -b` (the worktree's branch can never literally be `base`).
 
-**`.reasona/dev/<plan_name>/<stage_name>/` (the ledger/raw-output layout, §3.11.3) is unaffected by
+**`.reasona/log/dev/<plan_name>/<stage_name>/` (the ledger/raw-output layout, §3.11.3) is unaffected by
 any of this** — only the actual git checkout moved to a per-unit worktree; logs and the ledger stay
 anchored to the top-level `workdir` exactly as before, so they remain readable/browsable after a
-unit's worktree is cleaned up.
+unit's worktree is cleaned up. (§3.18 later found and closed a real gap in that "exactly as before"
+claim for `cycles.jsonl`/`.reasona/log/memory/` specifically — the ledger itself was never affected,
+only two OTHER files this section does not cover.)
 
 ### 3.11.2 Compiling one unit's cycle-0 -- `plan_compile.compile_to_bernstein_plan(only_index=...)`
 
@@ -1650,21 +1652,22 @@ avoid in the first place -- a network drop, a killed process. Re-running the sam
 command needs to pick up where it left off, not redo units that already shipped, re-create a
 worktree that already exists, or re-dispatch cycle-0 against code that already exists.
 
-**Layout: `<workdir>/.reasona/dev/<plan_name>/<stage_name>/`, namespaced by plan first, then PR
-unit** -- not a flat `<workdir>/.reasona/`. (Renamed from `.reasona/log/` -- a repo that runs both
-reasona-dev and reasona-plan against the same `--workdir` (e.g. `thaki-agent-security`, once both
-tools' `bernstein.yaml` regeneration started sharing `.reasona/`, §3.15) needs the two tools'
-runtime state to never collide even though they share the same `.reasona/` root; the tool-name
-segment itself is the disambiguator -- reasona-plan keeps its own under `.reasona/plan/<plan_name>/`,
-never `.reasona/dev/`.) Two plans that both exist under the same workdir (or two
-different plans that both happen to name a unit `pr-1`, the common case since
+**Layout: `<workdir>/.reasona/log/dev/<plan_name>/<stage_name>/`, namespaced by plan first, then PR
+unit** -- not a flat `<workdir>/.reasona/`. (`dev/` is the tool-name disambiguator: a repo that runs
+both reasona-dev and reasona-plan against the same `--workdir` (e.g. `thaki-agent-security`, once
+both tools' `bernstein.yaml` regeneration started sharing `.reasona/`, §3.15) needs the two tools'
+runtime state to never collide even though they share the same `.reasona/log/` root; reasona-plan
+keeps its own under `.reasona/log/plan/<plan_name>/`, never `.reasona/log/dev/`. The `log/` segment
+itself was added later, §3.18, as the single named boundary for everything anchored to the
+top-level repo and never copied into a unit's worktree.) Two plans that both exist under the same
+workdir (or two different plans that both happen to name a unit `pr-1`, the common case since
 `plan_compile._stage_name()` is just `f"pr-{index}"`) must not share a ledger file or a compiled
 `plan.yaml`; the flat layout silently collided on both before this. `reasona_dev/ledger.py` is the
 single module owning this layout:
 
-    <workdir>/.reasona/dev/<plan_name>/<stage_name>/plan.yaml     this unit's compiled cycle-0 plan
-    <workdir>/.reasona/dev/<plan_name>/<stage_name>/ledger.json   dev-dispatched flag + progress + terminal outcome + PR-url/issue-number hints
-    <workdir>/.reasona/dev/<plan_name>/<stage_name>/<role>-c<cycle>.raw.txt  raw per-role output, same as before
+    <workdir>/.reasona/log/dev/<plan_name>/<stage_name>/plan.yaml     this unit's compiled cycle-0 plan
+    <workdir>/.reasona/log/dev/<plan_name>/<stage_name>/ledger.json   dev-dispatched flag + progress + terminal outcome + PR-url/issue-number hints
+    <workdir>/.reasona/log/dev/<plan_name>/<stage_name>/<role>-c<cycle>.raw.txt  raw per-role output, same as before
 
 **Cycle-0 dispatch is tracked per unit, not once for the whole plan.** `dev_already_dispatched()`/
 `mark_dev_dispatched()` used to be keyed by `plan_name` alone (one flag covering every unit, from
@@ -1883,13 +1886,17 @@ even considered ready — found and fixed via a `threading.Barrier`-based test
 (`test_job_greater_than_one_still_respects_dependency_order`) that failed before this guard existed
 (dependents were dispatched before their dependency's own cycle had returned).
 
-**No file lock needed for `cycles.jsonl`/`ledger.json`/`.reasona/memory/`.** Every one of these
-already lives under either the UNIT'S OWN worktree (`cycles_log.py`, `memory.py` — both called with
-`workdir=unit_workdir`) or a path namespaced by `stage_name` under the shared log dir
-(`ledger.unit_dir()`) — two concurrently running units never write the same path, so this is a
-consequence of the per-unit worktree isolation §3.11 already built, not new locking. The only state
-genuinely shared between threads is the scheduler's own in-memory `by_index`/port pool, guarded by
-a plain `threading.Lock`.
+**`ledger.json` needs no file lock** — namespaced by `stage_name` under the shared log dir
+(`ledger.unit_dir()`), so two concurrently running units never write the same path.
+**`cycles.jsonl`/`.reasona/log/memory/` are a different story, corrected by §3.18: they were
+originally (wrongly) unit-worktree-scoped, and are now deliberately a single repo-wide file/directory
+instead** — under `job>1`, multiple units' threads genuinely append to the SAME `cycles.jsonl`
+concurrently. Still safe without a lock: every `cycles_log.record_*()` call writes its row as ONE
+`f.write()` in append mode, which POSIX guarantees is atomic for a normal-sized line, so concurrent
+writers interleave whole lines, never partial ones. `memory.regenerate()` racing across threads is
+an accepted, self-correcting staleness (a full recomputation from `cycles.jsonl`, not a merge) — see
+§3.18's own full argument. The only OTHER state genuinely shared between threads is the scheduler's
+own in-memory `by_index`/port pool, guarded by a plain `threading.Lock`.
 
 **Port-collision safety at the Bernstein layer, re-verified against the currently installed
 3.16.0 (this note originally flagged it as not live-verified against 3.15.1 -- since resolved).**
@@ -2664,6 +2671,57 @@ lost its `write_audit_trail`/`audit_trail_path` parameters and the write call be
 test that passed `write_audit_trail=False` to suppress the old default had that argument dropped
 (the parameter no longer exists at all, not merely defaulted off).
 
+## 3.18 `cycles.jsonl` and `.reasona/memory/` moved off unit-scoped paths -- they were being deleted
+
+Found via a peer session relaying an operator's own observation on `thaki-agent-security`: reading
+`cycles.jsonl` on the target repo's TOP LEVEL found it either missing or reflecting only the
+in-flight unit, never a growing cross-PR history -- exactly backwards from what §3.7.6/`memory.py`'s
+own design promises ("patterns that have recurred across DISTINCT PR units").
+
+**Root cause.** `orchestrate._process_unit()` calls `pr_cycle.run_pr_cycle(workdir=unit_workdir,
+...)` -- the unit's OWN git worktree, correct for everything that has to run against that unit's
+actual code (role dispatch, `resolve_prompt()`, `config_file.load_project()`). But `run_pr_cycle()`
+also used that SAME `workdir` for `cycles_log.record_dispatch()`/`record_decision()` and
+`memory.select()`/`memory.regenerate()` -- so `cycles.jsonl` and `.reasona/memory/*.md` were written
+INSIDE the unit's own worktree. `worktree.remove_unit_worktree()` (§3.11.1) deletes that worktree
+outright, with `git worktree remove --force`, the moment a unit ships (`orchestrate.py`'s `MERGED`
+branch) -- no export step existed anywhere in that path. The exact case the design cares about most
+(learning from a SUCCESSFUL unit) was the one silently destroyed every time; a failed/blocked unit's
+worktree is deliberately left in place (its own docstring: "the evidence of what happened"), so
+those units' records happened to survive by accident, inverting the design's own intent. The same
+bug reached `ship_gate.evaluate()`'s `record_acceptance()`/`record_ship()` (both called with the
+unit's own `workdir` from `final_phase.py`'s tail) and `pr_cycle.py`'s own `ledger.load_progress()`/
+`save_progress()` mid-cycle checkpoint -- a THIRD, independent `ledger.json` living inside the
+worktree, disagreeing with the one `orchestrate.py` itself writes at the top level (§3.11.3).
+
+**Fixed.** Every function in this chain (`cycles_log.record_dispatch/record_decision/
+record_acceptance/record_ship`, `pr_cycle.run_pr_cycle`, `ship_gate.evaluate`,
+`final_phase.run_final_audit/run_ship_cycle/run_final_phase/run_final_stage`) now takes a SECOND,
+independent path parameter -- `log_workdir` on the `cycles_log` functions themselves, `repo_workdir`
+on everything upstream of them -- defaulting to the existing `workdir` when not given (so every
+caller that does not care about the distinction, mostly the existing test suite, keeps working
+unchanged), but `orchestrate._process_unit()` now passes the TOP-LEVEL `workdir` explicitly at
+every one of these call sites. `pr_cycle.py`'s own `ledger.load_progress()`/`save_progress()` calls
+were switched to the same top-level anchor too, so a unit's mid-cycle checkpoint and its
+dev-dispatched/terminal-status flags (`orchestrate.py`'s own direct ledger calls) are finally the
+SAME `ledger.json`, not two files that happened to share a relative path.
+
+**Renamed at the same time: `.reasona/dev/` -> `.reasona/log/dev/`, `.reasona/cycles.jsonl` ->
+`.reasona/log/cycles.jsonl`, `.reasona/memory/` -> `.reasona/log/memory/`** (reasona-plan's own
+`.reasona/plan/` -> `.reasona/log/plan/` the same way, see that project's own `docs/ARCHITECTURE.md`).
+`.reasona/log/` is now the single, named boundary for "everything that must be anchored to the
+top-level repo and must NEVER be copied into a unit's worktree" -- `worktree._sync_reasona_config()`
+(§3.16) already only ever copied `bernstein-template.yaml`/`reasona.yaml`/`prompts/` (an allowlist,
+never this directory), so the rename does not change what gets copied; it makes the boundary a name
+a reader can recognize on sight instead of a fact they have to already know.
+
+**Concurrency under `--job>1` (§3.14.3's own docstring corrected alongside this).** `cycles.jsonl`
+is now a genuinely shared file across concurrently-dispatched units' threads, not a per-worktree one
+-- still safe without a lock, because `record_*()` writes each row as one `f.write()` call in
+append mode, and POSIX guarantees that is atomic for a normal-sized line. `memory.regenerate()`
+racing across threads is an accepted, self-correcting staleness (a full recomputation, not a merge)
+-- see `orchestrate._run_units_concurrently()`'s own docstring for the full argument.
+
 ## 4. Directory structure
 
 ```
@@ -2686,7 +2744,7 @@ reasona-dev/
 │   ├── gh_pr.py               `/gh-pr` port — issue → branch rename → push+create PR → structural validate/repair (§3.12)
 │   ├── gh_review_watch.py     `/gh-review`'s watcher ported near-verbatim — CI/compliance/bugbot GraphQL snapshot + classify (§3.13)
 │   ├── gh_review.py           `/gh-review`'s auto-fix loop — dispatch dev against actionable signals, one push per cycle, budget-bounded (§3.13)
-│   ├── cycles_log.py         per-cycle finding measurement (.reasona/cycles.jsonl) — the basis for attribution measurement (§3.7.6)
+│   ├── cycles_log.py         per-cycle finding measurement (.reasona/log/cycles.jsonl) — the basis for attribution measurement (§3.7.6)
 │   ├── cycles_query.py       attribution/budget/AC-coverage queries — turns the log into judgment (§3.7.9)
 │   ├── memory.py             per-repo prior-observation notes generated from cycles.jsonl, file-scoped retrieval (§3.7.7)
 │   ├── prompt_profile.py     per-unit profile resolution + two-layer prompt lookup (§3.5.4, §3.7.10)

@@ -508,6 +508,7 @@ def should_run_final_audit(budget: FixBudget) -> bool:
 def run_final_audit(
     *,
     workdir: Path,
+    repo_workdir: Path | None = None,
     stage_name: str,
     pr_title: str,
     profile: str,
@@ -534,6 +535,7 @@ def run_final_audit(
     already passed, so a finding at this point is by definition something
     every earlier role missed.
     """
+    log_workdir = repo_workdir if repo_workdir is not None else workdir
     prompt = resolve_prompt("final_audit", profile=profile, workdir=workdir)
     if prompt is None:
         # B-7: this used to silently PASS a missing prompt ("the profile's
@@ -565,7 +567,7 @@ def run_final_audit(
         )
         dispatches.append(result)
         cycles_log.record_dispatch(
-            workdir=workdir, stage_name=stage_name, stage="final", cycle=cycle,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, stage="final", cycle=cycle,
             role="final_audit", model=resolved["final_audit"].model,
             adapter=resolved["final_audit"].adapter, result=result.review_result,
         )
@@ -581,7 +583,7 @@ def run_final_audit(
             dev_model=resolved["dev"].model,
         )
         cycles_log.record_decision(
-            workdir=workdir, stage_name=stage_name, stage="final", cycle=cycle,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, stage="final", cycle=cycle,
             action=decision.action, reason=decision.reason,
             escalated_model=decision.escalated_model,
             escalation_trigger=decision.escalation_trigger,
@@ -644,6 +646,7 @@ def _run_ship_fix(
 def run_ship_cycle(
     *,
     workdir: Path,
+    repo_workdir: Path | None = None,
     stage_name: str,
     pr_title: str,
     resolved: dict[str, ResolvedModel],
@@ -672,7 +675,10 @@ def run_ship_cycle(
     changed = False
     cycle = 0
     while True:
-        decision = ship_gate_fn(workdir, stage_name, cycle_verdict=cycle_verdict)
+        decision = ship_gate_fn(
+            workdir, stage_name, cycle_verdict=cycle_verdict,
+            log_workdir=repo_workdir if repo_workdir is not None else workdir,
+        )
         if decision.passed or not budget.can_spend("ship"):
             return decision, changed, dispatches
         budget.spend("ship")
@@ -689,6 +695,7 @@ def run_ship_cycle(
 def run_final_phase(
     *,
     workdir: Path,
+    repo_workdir: Path | None = None,
     stage_name: str,
     pr_title: str,
     profile: str,
@@ -742,7 +749,7 @@ def run_final_phase(
         audit_changed = False
         if should_run_final_audit(budget):
             passed, audit_reason, audit_dispatches = run_final_audit(
-                workdir=workdir, stage_name=stage_name, pr_title=pr_title,
+                workdir=workdir, repo_workdir=repo_workdir, stage_name=stage_name, pr_title=pr_title,
                 profile=profile, resolved=resolved, rundir=rundir, budget=budget,
                 recurrence=recurrence, port=port, run_role_fn=run_role_fn,
             )
@@ -752,7 +759,7 @@ def run_final_phase(
             audit_changed = len(audit_dispatches) > 1  # more than the clean first read means a fix ran
 
         decision, ship_changed, ship_dispatches = run_ship_cycle(
-            workdir=workdir, stage_name=stage_name, pr_title=pr_title, resolved=resolved,
+            workdir=workdir, repo_workdir=repo_workdir, stage_name=stage_name, pr_title=pr_title, resolved=resolved,
             rundir=rundir, budget=budget, cycle_verdict=cycle_verdict, ship_gate_fn=ship_gate_fn,
             port=port, run_role_fn=run_role_fn,
         )
@@ -773,6 +780,7 @@ def run_final_phase(
 def run_final_stage(
     *,
     workdir: str | Path,
+    repo_workdir: str | Path | None = None,
     stage_name: str,
     pr_title: str,
     unit_type: str | None,
@@ -838,12 +846,13 @@ def run_final_stage(
     available too.
     """
     workdir = Path(workdir)
+    log_workdir = Path(repo_workdir) if repo_workdir is not None else workdir
     rundir = Path(rundir)
 
     def _blocked(reason: str, **kw) -> TailResult:
         result = TailResult(stage_name=stage_name, status=BLOCKED, reason=reason, **kw)
         cycles_log.record_ship(
-            workdir=workdir, stage_name=stage_name, passed=False,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, passed=False,
             gates={"final_stage": False}, reason=reason,
         )
         return result
@@ -867,7 +876,7 @@ def run_final_stage(
             role_results=dispatches, ship_decision=decision, pr_url=pr_url,
         )
         cycles_log.record_ship(
-            workdir=workdir, stage_name=stage_name, passed=False,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, passed=False,
             gates={"final_stage": False}, reason=reason,
         )
         return result
@@ -932,7 +941,7 @@ def run_final_stage(
         # `budget.total_used > 0`, and gh_review.py spends the SAME shared
         # `budget` on its own fix dispatches).
         decision, status, phase_dispatches, reason = run_final_phase(
-            workdir=workdir, stage_name=stage_name, pr_title=pr_title, profile=profile,
+            workdir=workdir, repo_workdir=repo_workdir, stage_name=stage_name, pr_title=pr_title, profile=profile,
             resolved=resolved, rundir=rundir, budget=budget, recurrence=recurrence,
             cycle_verdict=cycle_verdict, ship_gate_fn=ship_gate_fn, base=base,
             port=port, run_role_fn=run_role_fn,
@@ -980,7 +989,7 @@ def run_final_stage(
                             final_audit=audit, role_results=dispatches, ship_decision=decision)
 
         cycles_log.record_ship(
-            workdir=workdir, stage_name=stage_name, passed=True,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, passed=True,
             gates={"final_stage": True}, reason=merge_reason,
         )
         return TailResult(

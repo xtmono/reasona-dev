@@ -201,7 +201,7 @@ def _stub(monkeypatch, *, gh=None, sync=(True, "ok"), up=(True, "ok"),
 def _ship_fn(*, passed=True, reason="ok"):
     outcome = GateOutcome("review", passed, reason)
 
-    def fn(workdir, stage_name, *, cycle_verdict):
+    def fn(workdir, stage_name, *, cycle_verdict, log_workdir=None):
         return ShipDecision(stage_name=stage_name, passed=passed, outcomes=[outcome])
 
     return fn
@@ -268,7 +268,7 @@ def test_run_ship_cycle_stops_dispatching_once_ship_gate_passes(tmp_path):
     `ship_gate_fn` after every fix and returns as soon as it passes."""
     calls = {"n": 0}
 
-    def flaky_ship_gate(workdir, stage_name, *, cycle_verdict):
+    def flaky_ship_gate(workdir, stage_name, *, cycle_verdict, log_workdir=None):
         calls["n"] += 1
         return _ship_fn(passed=calls["n"] > 1, reason="AC-1 failed")(
             workdir, stage_name, cycle_verdict=cycle_verdict
@@ -544,7 +544,7 @@ def test_final_phase_stops_immediately_on_a_substantive_sync_resolution(tmp_path
         lambda **kw: (audit_calls.append(1), (True, "ok", []))[1],
     )
 
-    def ship_fn(workdir, stage_name, *, cycle_verdict):
+    def ship_fn(workdir, stage_name, *, cycle_verdict, log_workdir=None):
         ship_calls.append(1)
         return _ship_fn()(workdir, stage_name, cycle_verdict=cycle_verdict)
 
@@ -569,7 +569,7 @@ def test_final_phase_reruns_from_sync_when_a_round_changed_something(tmp_path, m
         calls["sync"] += 1
         return "ok", "ok", [], calls["sync"] == 1, False  # only round 1 "changes" anything, never substantive
 
-    def ship_fn(workdir, stage_name, *, cycle_verdict):
+    def ship_fn(workdir, stage_name, *, cycle_verdict, log_workdir=None):
         calls["ship"] += 1
         return _ship_fn()(workdir, stage_name, cycle_verdict=cycle_verdict)
 
@@ -590,7 +590,7 @@ def test_final_phase_gives_up_if_it_never_settles(tmp_path, monkeypatch):
     monkeypatch.setattr(final_phase, "should_run_final_audit", lambda budget: False)
     ship_calls = []
 
-    def ship_fn(workdir, stage_name, *, cycle_verdict):
+    def ship_fn(workdir, stage_name, *, cycle_verdict, log_workdir=None):
         ship_calls.append(1)
         return _ship_fn()(workdir, stage_name, cycle_verdict=cycle_verdict)
 

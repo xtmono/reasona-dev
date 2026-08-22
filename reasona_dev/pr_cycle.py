@@ -536,6 +536,7 @@ def _slug(text: str) -> str:
 def run_pr_cycle(
     *,
     workdir: str | Path,
+    repo_workdir: str | Path | None = None,
     pr_title: str,
     resolved: dict[str, ResolvedModel],
     rundir: str | Path,
@@ -562,6 +563,20 @@ def run_pr_cycle(
 
     Each role dispatch is its own `bernstein run`, so there is no server
     lifetime to manage here and no cleanup path to get wrong.
+
+    **`workdir` vs `repo_workdir`.** `workdir` is this unit's own git
+    worktree -- everything that has to run AGAINST this unit's actual code
+    (role dispatch, `resolve_prompt()`, `config_file.load_project()`) uses
+    it. `repo_workdir` is the TOP-LEVEL target repo, used ONLY for
+    `cycles_log`/`memory` -- those are meant to accumulate across the
+    WHOLE repo's history, across every PR unit that ever ran, not reset
+    per unit, and `orchestrate.py` deletes a unit's worktree outright on a
+    successful merge (`worktree.remove_unit_worktree()`). Defaulting
+    `repo_workdir` to `workdir` when not given keeps every caller that does
+    not care about this distinction working exactly as before; production
+    callers (`orchestrate.py`) must pass the real top-level repo or the
+    exact loss this parameter exists to prevent happens again (see
+    `cycles_log.record_dispatch()`'s own docstring for the incident).
 
     **Resume (`resume=True`, `plan_name` given).** `FixBudget`/
     `RecurrenceTracker`/`ConvergenceTracker` are checkpointed to
@@ -594,6 +609,7 @@ def run_pr_cycle(
     can answer.
     """
     workdir = Path(workdir)
+    log_workdir = Path(repo_workdir) if repo_workdir is not None else workdir
     rundir = Path(rundir)
     stage_name = stage_name or _slug(pr_title)
 
@@ -604,7 +620,7 @@ def run_pr_cycle(
         "fast", config_file.load_project(workdir), config_file.load_global(),
     )
 
-    progress = ledger.load_progress(workdir, plan_name, stage_name) if (resume and plan_name) else None
+    progress = ledger.load_progress(log_workdir, plan_name, stage_name) if (resume and plan_name) else None
 
     recurrence = RecurrenceTracker.from_dict(progress["recurrence"]) if progress else RecurrenceTracker()
     # ONE shared pool across review, scan, final, sync and ship -- worker.md
@@ -635,18 +651,18 @@ def run_pr_cycle(
 
     def _checkpoint(**kw) -> None:
         if resume and plan_name:
-            ledger.save_progress(workdir, plan_name, stage_name, kw)
+            ledger.save_progress(log_workdir, plan_name, stage_name, kw)
 
     def _log(stage: str, cycle: int, result: RoleRunResult, model: ResolvedModel) -> None:
         cycles_log.record_dispatch(
-            workdir=workdir, stage_name=stage_name, stage=stage, cycle=cycle,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, stage=stage, cycle=cycle,
             role=result.role, model=model.model, adapter=model.adapter,
             result=result.review_result, error_detail=result.error_detail,
         )
 
     def _log_decision(stage: str, cycle: int, decision) -> None:
         cycles_log.record_decision(
-            workdir=workdir, stage_name=stage_name, stage=stage, cycle=cycle,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, stage=stage, cycle=cycle,
             action=decision.action, reason=decision.reason,
             escalated_model=decision.escalated_model,
             escalation_trigger=decision.escalation_trigger,
@@ -657,7 +673,7 @@ def run_pr_cycle(
     # declares no files, when nothing has recurred yet, or when nothing
     # intersects -- so a fresh repo and an unrelated PR both get an unchanged
     # prompt rather than a growing preamble.
-    memory_block = memory.render_for_prompt(memory.select(workdir, files or []))
+    memory_block = memory.render_for_prompt(memory.select(log_workdir, files or []))
     pr_context_block = _pr_unit_context_block(pr_index=pr_index, pr_title=pr_title, workdir=workdir, section=pr_section)
 
     review_profile_prompt = resolve_prompt("review", profile=profile, workdir=workdir)
@@ -1013,6 +1029,6 @@ def run_pr_cycle(
         # `finally` because a failed cycle is exactly the one whose findings
         # are worth carrying forward.
         try:
-            memory.regenerate(workdir)
+            memory.regenerate(log_workdir)
         except Exception:  # noqa: BLE001 -- derived data, never worth failing a cycle over
             pass

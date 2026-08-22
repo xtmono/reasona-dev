@@ -110,12 +110,12 @@ def _review_outcome(cycle_verdict: str | None) -> GateOutcome:
     return GateOutcome("review", ok, cycle_verdict)
 
 
-def _acceptance_outcome(workdir: Path, stage_name: str, record: bool) -> GateOutcome:
+def _acceptance_outcome(workdir: Path, stage_name: str, record: bool, log_workdir: Path) -> GateOutcome:
     criteria, declared = acceptance.load_criteria_file(acceptance_path(workdir, stage_name))
     if not declared or not criteria:
         if record:
             cycles_log.record_acceptance(
-                workdir=workdir, stage_name=stage_name, results=[], declared=False
+                workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, results=[], declared=False
             )
         # Passing-with-warning, not failing: promoting this to a refusal is
         # the intended end state, but flipping it before any plan declares
@@ -130,7 +130,7 @@ def _acceptance_outcome(workdir: Path, stage_name: str, record: bool) -> GateOut
     report = acceptance.run_all(criteria, workdir, stage_name=stage_name)
     if record:
         cycles_log.record_acceptance(
-            workdir=workdir, stage_name=stage_name,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name,
             results=[
                 {"id": r.id, "expect": r.expect, "passed": r.passed,
                  "exit_code": r.exit_code, "error": r.error}
@@ -153,17 +153,27 @@ def evaluate(
     *,
     cycle_verdict: str | None = None,
     record: bool = True,
+    log_workdir: str | Path | None = None,
 ) -> ShipDecision:
     """Run all three gates and compose their verdicts.
 
     `record=False` is for callers that want the verdict without appending to
     `cycles.jsonl` -- a dry run, or a second evaluation of the same unit
     that would otherwise double-count in every later query.
+
+    `log_workdir` (defaults to `workdir`): see `cycles_log.record_dispatch()`'s
+    own docstring -- `workdir` here is a PR unit's own worktree (acceptance
+    criteria have to run against its actual code), but `cycles.jsonl` needs
+    the TOP-LEVEL repo or the record is lost the moment `orchestrate.py`
+    deletes this worktree on a successful merge -- which is exactly the
+    call this function's own `record_ship()` makes right before that
+    happens.
     """
     workdir = Path(workdir)
+    log_workdir = Path(log_workdir) if log_workdir is not None else workdir
     outcomes = [
         _review_outcome(cycle_verdict),
-        _acceptance_outcome(workdir, stage_name, record),
+        _acceptance_outcome(workdir, stage_name, record, log_workdir),
     ]
     decision = ShipDecision(
         stage_name=stage_name,
@@ -172,7 +182,7 @@ def evaluate(
     )
     if record:
         cycles_log.record_ship(
-            workdir=workdir, stage_name=stage_name, passed=decision.passed,
+            workdir=workdir, log_workdir=log_workdir, stage_name=stage_name, passed=decision.passed,
             gates={o.name: o.passed for o in outcomes}, reason=decision.reason,
         )
     return decision

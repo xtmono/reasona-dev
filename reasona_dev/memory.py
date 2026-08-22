@@ -6,7 +6,7 @@ has nothing to do with their format: every entry is easy to add and nobody
 owns deleting one. dev-ralf's own SKILL.md reached 472 lines, a large share
 of it prose explaining why superseded revisions were wrong, and all of it
 loaded into every agent's context on every run. Relocating that habit into
-`.reasona/memory/*.md` would reproduce it exactly.
+`.reasona/log/memory/*.md` would reproduce it exactly.
 
 So memory here is not a notebook. It is a projection of measurement:
 `cycles_log` records what every gate actually found, and this module
@@ -62,7 +62,14 @@ _FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<body>.*?)\n---\s*\n(?P<rest>.*)\Z",
 
 
 def memory_dir(workdir: str | Path) -> Path:
-    return Path(workdir) / ".reasona" / "memory"
+    """`<workdir>/.reasona/log/memory/` -- `workdir` here MUST be the
+    TOP-LEVEL target repo. Every caller in `pr_cycle.py` already has to
+    pass the same top-level anchor to `cycles_log`'s own functions (this
+    module's `derive()` reads FROM `cycles_log.cycles_path()`, so the two
+    were always going to have to agree on that anchor) -- see
+    `cycles_log.record_dispatch()`'s docstring for the incident this
+    matters for."""
+    return Path(workdir) / ".reasona" / "log" / "memory"
 
 
 @dataclass
@@ -216,7 +223,7 @@ def regenerate(
     min_occurrences: int = DEFAULT_MIN_OCCURRENCES,
     window_units: int = DEFAULT_WINDOW_UNITS,
 ) -> list[Memory]:
-    """Rewrite `.reasona/memory/` to exactly match what `derive()` computes.
+    """Rewrite `.reasona/log/memory/` to exactly match what `derive()` computes.
 
     Removes every generated file that no longer corresponds to a current
     memory -- that removal IS the decay mechanism, so it must not be

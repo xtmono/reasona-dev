@@ -37,6 +37,39 @@ def test_dispatch_row_carries_finding_keys_and_counts(tmp_path):
     assert {f["path"] for f in row["findings"]} == {"src/a.rs", "src/b.rs"}
 
 
+def test_record_dispatch_writes_to_log_workdir_not_workdir(tmp_path):
+    """The incident this closes: a PR unit's own worktree gets deleted
+    outright by `worktree.remove_unit_worktree()` on a successful merge --
+    a record written there is lost forever. `workdir` (git-scoped, for
+    `head_sha`) and `log_workdir` (where the file actually lands) must be
+    independently controllable, and production callers pass the TOP-LEVEL
+    repo as `log_workdir` while `workdir` stays the unit's own worktree."""
+    unit_worktree = tmp_path / "worktree"
+    unit_worktree.mkdir()
+    top_level_repo = tmp_path / "repo"
+    top_level_repo.mkdir()
+
+    cycles_log.record_dispatch(
+        workdir=unit_worktree, log_workdir=top_level_repo,
+        stage_name="pr-1", stage="review", cycle=1,
+        role="reviewer", model="opus", adapter="claude", result=_result(),
+    )
+
+    assert not cycles_log.cycles_path(unit_worktree).exists()
+    assert cycles_log.cycles_path(top_level_repo).is_file()
+    assert cycles_log.read_records(top_level_repo)[0]["role"] == "reviewer"
+
+
+def test_record_dispatch_log_workdir_defaults_to_workdir(tmp_path):
+    """Callers that have not been updated to pass `log_workdir` (most of
+    the existing test suite) keep working exactly as before."""
+    cycles_log.record_dispatch(
+        workdir=tmp_path, stage_name="pr-1", stage="review", cycle=1,
+        role="reviewer", model="opus", adapter="claude", result=_result(),
+    )
+    assert cycles_log.cycles_path(tmp_path).is_file()
+
+
 def test_finding_key_is_stable_across_line_shifts(tmp_path):
     """A fix that shifts line numbers must not make the same finding look
     new -- otherwise recurrence attribution silently under-counts."""

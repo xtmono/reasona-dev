@@ -141,4 +141,4 @@ def test_issue_number_hint_roundtrips(tmp_path):
 
 
 def test_unit_dir_is_namespaced_by_plan_then_stage(tmp_path):
-    assert ledger.unit_dir(tmp_path, "my-plan", "pr-3") == tmp_path / ".reasona" / "dev" / "my-plan" / "pr-3"
+    assert ledger.unit_dir(tmp_path, "my-plan", "pr-3") == tmp_path / ".reasona" / "log" / "dev" / "my-plan" / "pr-3"

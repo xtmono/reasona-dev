@@ -34,7 +34,7 @@ here on the same `(stage_name, cycle)` key, splitting findings four ways:
 caught by a gate only, by an AC only, by both, or by neither (a post-merge
 defect, i.e. a hole in the AC design itself).
 
-`.reasona/memory/*.md` is generated FROM this file, never hand-written --
+`.reasona/log/memory/*.md` is generated FROM this file, never hand-written --
 see `reasona_dev.memory`. That is what keeps the memory surface from
 drifting into the prose bloat it exists to replace.
 """
@@ -67,11 +67,15 @@ def _head_sha(workdir: Path) -> str | None:
 
 
 def cycles_path(workdir: str | Path) -> Path:
-    """`<workdir>/.reasona/cycles.jsonl` -- the same `.reasona/` convention
-    `review-<stage>.json` / `model_divergence.jsonl` already use, anchored
-    to the TARGET repo (never reasona-dev's own install location).
+    """`<workdir>/.reasona/log/cycles.jsonl` -- `workdir` here MUST be the
+    TOP-LEVEL target repo, never a per-PR-unit worktree (see the
+    `log_workdir` parameter on every `record_*()` function below for why).
+    `.reasona/log/` is the boundary nothing ever copies into a worktree
+    (`worktree._sync_reasona_config()`'s own allowlist never names it) --
+    naming this file's parent directory `log/` makes that boundary the
+    same word in both places, not just a fact you have to already know.
     """
-    return Path(workdir) / ".reasona" / "cycles.jsonl"
+    return Path(workdir) / ".reasona" / "log" / "cycles.jsonl"
 
 
 # Contract text is stored truncated. It has to be stored at all because
@@ -106,6 +110,7 @@ def _finding_rows(result: ReviewResult) -> list[dict]:
 def record_dispatch(
     *,
     workdir: str | Path,
+    log_workdir: str | Path | None = None,
     stage_name: str,
     stage: str,
     cycle: int,
@@ -122,12 +127,27 @@ def record_dispatch(
     empty -- the line still matters, because it is what marks the boundary
     between "findings before this fix" and "findings after it").
 
+    **`workdir` and `log_workdir` are deliberately different parameters.**
+    `workdir` is git-scoped -- `_head_sha()` needs THIS unit's own worktree
+    to record the commit the finding was evaluated against, which differs
+    per unit and changes after every fix commit. `log_workdir` is where the
+    record actually gets WRITTEN, and defaults to `workdir` only for
+    callers that have not been updated to pass the real one -- production
+    callers must pass the TOP-LEVEL repo explicitly, or the record is
+    written inside a per-unit worktree that `worktree.remove_unit_worktree()`
+    deletes outright on a successful merge, permanently losing it (a real
+    incident: every successfully-shipped unit's cycle history and the
+    `.reasona/log/memory/` notes generated from it vanished the moment its
+    worktree was removed -- caught by an operator reading the file and
+    finding it had no plan/PR/cycle tag at all, then finding it simply
+    was not there for anything that had actually shipped).
+
     Instrumentation must never be able to fail a PR cycle, so every error
     is swallowed. A missing measurement is a cost; a cycle aborted by its
     own logger is a defect.
     """
     try:
-        path = cycles_path(workdir)
+        path = cycles_path(log_workdir if log_workdir is not None else workdir)
         path.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "schema_version": SCHEMA_VERSION,
@@ -160,6 +180,7 @@ def record_dispatch(
 def record_decision(
     *,
     workdir: str | Path,
+    log_workdir: str | Path | None = None,
     stage_name: str,
     stage: str,
     cycle: int,
@@ -176,9 +197,12 @@ def record_decision(
     PR" (budget exhaustion vs. recurrence vs. non-convergence) is exactly
     what a later budget-shape review needs, and it is not recoverable from
     the finding rows alone.
+
+    `workdir` vs `log_workdir`: see `record_dispatch()`'s own docstring --
+    identical split, identical reason.
     """
     try:
-        path = cycles_path(workdir)
+        path = cycles_path(log_workdir if log_workdir is not None else workdir)
         path.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "schema_version": SCHEMA_VERSION,
@@ -207,6 +231,7 @@ def record_decision(
 def record_acceptance(
     *,
     workdir: str | Path,
+    log_workdir: str | Path | None = None,
     stage_name: str,
     results: list[dict],
     declared: bool,
@@ -223,9 +248,12 @@ def record_acceptance(
     rather than skipped: AC coverage is the measurement that decides when
     an undeclared unit should stop being a warning and start being a
     refusal, and a row that is never written cannot be counted.
+
+    `workdir` vs `log_workdir`: see `record_dispatch()`'s own docstring --
+    identical split, identical reason.
     """
     try:
-        path = cycles_path(workdir)
+        path = cycles_path(log_workdir if log_workdir is not None else workdir)
         path.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "schema_version": SCHEMA_VERSION,
@@ -255,6 +283,7 @@ def record_acceptance(
 def record_ship(
     *,
     workdir: str | Path,
+    log_workdir: str | Path | None = None,
     stage_name: str,
     passed: bool,
     gates: dict[str, bool],
@@ -266,9 +295,15 @@ def record_ship(
     unit from shipping" is a question about the composition, and a reader
     reconstructing it from three independent rows would have to re-implement
     the composition rule to do so.
+
+    `workdir` vs `log_workdir`: see `record_dispatch()`'s own docstring --
+    identical split, identical reason. This one matters most of all: a
+    unit's ship verdict is recorded right before `orchestrate.py` deletes
+    its worktree on a successful merge (§3.11.1) -- the ONE record most
+    likely to be lost if `log_workdir` is left to default.
     """
     try:
-        path = cycles_path(workdir)
+        path = cycles_path(log_workdir if log_workdir is not None else workdir)
         path.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "schema_version": SCHEMA_VERSION,

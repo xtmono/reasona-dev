@@ -292,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("plan_file", help="Path to the plan document (manifest form)")
     p_run.add_argument("--workdir", default=None, help="Target repository root, resolved to an absolute path (default: cwd)")
-    p_run.add_argument("--rundir", default=None, help="Where role outputs and the ledger land (default: <workdir>/.reasona/dev/<plan>)")
+    p_run.add_argument("--rundir", default=None, help="Where role outputs and the ledger land (default: <workdir>/.reasona/log/dev/<plan>)")
     p_run.add_argument("--port", type=int, default=8052, help="Port each `bernstein run` dispatch binds (reused sequentially, or the first of `--job` consecutive ports when running concurrently)")
     p_run.add_argument(
         "--job", type=int, default=4,
@@ -326,7 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--restart", action="store_true",
         help=(
-            "Ignore and clear this plan's ledger (.reasona/dev/<plan>/<stage>/ledger.json) "
+            "Ignore and clear this plan's ledger (.reasona/log/dev/<plan>/<stage>/ledger.json) "
             "and run every unit fresh, including re-dispatching cycle-0 into a fresh "
             "worktree. Use when the plan itself changed since the last run, not for a "
             "plain retry after an interruption -- a plain re-run of the same command "

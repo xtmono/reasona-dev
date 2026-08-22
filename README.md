@@ -52,7 +52,7 @@ same command again:**
 ```bash
 reasona-dev run-plan docs/plans/<plan>.md --workdir .
 ```
-A progress ledger (`.reasona/dev/<plan>/`) skips cycle-0 per unit if it
+A progress ledger (`.reasona/log/dev/<plan>/`) skips cycle-0 per unit if it
 already ran (reusing that unit's own worktree), resumes any PR unit's
 review/scan cycle from where it stopped (not from cycle 1), and skips any
 PR unit that already shipped -- all automatically, no flags needed.
