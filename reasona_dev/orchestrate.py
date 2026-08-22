@@ -342,7 +342,7 @@ def dispatch_unit_cycle0(
 
     Returns `(ok, reason)`.
     """
-    plan_yaml_path = ledger.log_dir(workdir, plan_name) / only_index / "plan.yaml"
+    plan_yaml_path = ledger.run_dir(workdir, plan_name) / only_index / "plan.yaml"
     plan_yaml_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         write_plan_yaml(
@@ -811,18 +811,18 @@ def run_plan(
     Useful when the ledger itself is unavailable or wrong.
 
     `plan_name` namespaces every ledger/run-output path under
-    `<workdir>/.reasona/log/<plan_name>/<stage_name>/` (`reasona_dev.ledger`)
+    `<workdir>/.reasona/dev/<plan_name>/<stage_name>/` (`reasona_dev.ledger`)
     -- two plans that both happen to name a unit `pr-1` (a common name,
     since `plan_compile._stage_name()` is just `f"pr-{index}"`) do not
     share files or corrupt each other's resume state. `rundir` overrides
     the log base directory (rarely needed); it defaults to
-    `reasona_dev.ledger.log_dir(workdir, plan_name)`.
+    `reasona_dev.ledger.run_dir(workdir, plan_name)`.
 
     Every `*_fn` is injectable purely for testing; production callers pass
     none of them.
     """
     workdir = Path(workdir)
-    log_base = Path(rundir) if rundir is not None else ledger.log_dir(workdir, plan_name)
+    log_base = Path(rundir) if rundir is not None else ledger.run_dir(workdir, plan_name)
     units = order_units(resolve_plan_units(plan_text, workdir))
     result = PlanRunResult()
     if not units:

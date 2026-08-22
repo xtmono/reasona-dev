@@ -1622,7 +1622,7 @@ issue is a gh-pr-stage artifact, §3.12). So the worktree/branch starts out name
 (`git branch -m`) once the issue exists — always the "on a feature/temp branch" path `/gh-pr` itself
 documents, never `checkout -b` (the worktree's branch can never literally be `base`).
 
-**`.reasona/log/<plan_name>/<stage_name>/` (the ledger/raw-output layout, §3.11.3) is unaffected by
+**`.reasona/dev/<plan_name>/<stage_name>/` (the ledger/raw-output layout, §3.11.3) is unaffected by
 any of this** — only the actual git checkout moved to a per-unit worktree; logs and the ledger stay
 anchored to the top-level `workdir` exactly as before, so they remain readable/browsable after a
 unit's worktree is cleaned up.
@@ -1648,16 +1648,21 @@ avoid in the first place -- a network drop, a killed process. Re-running the sam
 command needs to pick up where it left off, not redo units that already shipped, re-create a
 worktree that already exists, or re-dispatch cycle-0 against code that already exists.
 
-**Layout: `<workdir>/.reasona/log/<plan_name>/<stage_name>/`, namespaced by plan first, then PR
-unit** -- not a flat `<workdir>/.reasona/`. Two plans that both exist under the same workdir (or two
+**Layout: `<workdir>/.reasona/dev/<plan_name>/<stage_name>/`, namespaced by plan first, then PR
+unit** -- not a flat `<workdir>/.reasona/`. (Renamed from `.reasona/log/` -- a repo that runs both
+reasona-dev and reasona-plan against the same `--workdir` (e.g. `thaki-agent-security`, once both
+tools' `bernstein.yaml` regeneration started sharing `.reasona/`, §3.15) needs the two tools'
+runtime state to never collide even though they share the same `.reasona/` root; the tool-name
+segment itself is the disambiguator -- reasona-plan keeps its own under `.reasona/plan/<plan_name>/`,
+never `.reasona/dev/`.) Two plans that both exist under the same workdir (or two
 different plans that both happen to name a unit `pr-1`, the common case since
 `plan_compile._stage_name()` is just `f"pr-{index}"`) must not share a ledger file or a compiled
 `plan.yaml`; the flat layout silently collided on both before this. `reasona_dev/ledger.py` is the
 single module owning this layout:
 
-    <workdir>/.reasona/log/<plan_name>/<stage_name>/plan.yaml     this unit's compiled cycle-0 plan
-    <workdir>/.reasona/log/<plan_name>/<stage_name>/ledger.json   dev-dispatched flag + progress + terminal outcome + PR-url/issue-number hints
-    <workdir>/.reasona/log/<plan_name>/<stage_name>/<role>-c<cycle>.raw.txt  raw per-role output, same as before
+    <workdir>/.reasona/dev/<plan_name>/<stage_name>/plan.yaml     this unit's compiled cycle-0 plan
+    <workdir>/.reasona/dev/<plan_name>/<stage_name>/ledger.json   dev-dispatched flag + progress + terminal outcome + PR-url/issue-number hints
+    <workdir>/.reasona/dev/<plan_name>/<stage_name>/<role>-c<cycle>.raw.txt  raw per-role output, same as before
 
 **Cycle-0 dispatch is tracked per unit, not once for the whole plan.** `dev_already_dispatched()`/
 `mark_dev_dispatched()` used to be keyed by `plan_name` alone (one flag covering every unit, from
